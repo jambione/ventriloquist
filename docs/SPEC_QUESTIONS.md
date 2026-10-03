@@ -135,3 +135,94 @@ Raw-key helpers (`SessionCipher::new`, `with_send_counter`, `seal_with`, `open_w
 SPEC says the desktop acks `final` and `edit`, and the phone retries until acked.
 
 **Decision.** The desktop acks every `final` and `edit` it receives, including duplicates and revisions lower than or equal to the highest it has seen (which it otherwise ignores). Otherwise a lost `ack` would make the phone retry five times for nothing. Partials are never acked.
+
+## M2 (Swift) — `ios/VQProtocol`
+
+### Q21. "Equal" strings are byte-equal, never Unicode-equivalent
+README §5.1 says duplicate keys are "equal after unescaping" and §5.1 matches `t` "case-sensitively", but does not say whether equality is by code points or by Unicode canonical equivalence. Swift's `String ==` uses canonical equivalence, so `"K"` (U+212A KELVIN SIGN) equals `"K"`, and precomposed `"é"` equals `"é"`. A Swift port that compared keys or `t` with `String ==` would reject `{"K":1,"K":2}` as a duplicate where Rust accepts it.
+
+**Decision.** Everywhere the wire compares strings (duplicate keys, `t` dispatch, `state`, message equality in tests), the Swift package compares the unescaped **UTF-8 bytes** (equivalently, Unicode scalar sequences), exactly like Rust. No normalization is ever applied. The strict reader stores strings as `[UInt8]`; `Message`'s `Equatable` compares strings byte-wise. Suggested README wording for §5.1: "compared as sequences of Unicode scalar values, without normalization".
+
+### Q22. "Character" in §5.8 means Unicode scalar value
+README §5.8 defines `escaped_len` "over characters" and cuts `max_text_prefix` "at a character boundary". In Rust a `char` is a Unicode scalar value; in Swift a `Character` is a grapheme cluster.
+
+**Decision.** Swift's `escapedLength`, `uttTextFits` and `maxTextPrefix` iterate `unicodeScalars` and cut at scalar boundaries, matching Rust. A cut can therefore separate a combining mark or emoji modifier from its base; that is accepted (the result is still valid UTF-8 and always fits). Suggested README wording: "Unicode scalar value" instead of "character".
+
+### Q23. Swift API shape (mirrors README §11)
+- **`Hello.new(deviceId:name:publicKey:paired:)`** returns `OwnHello: ~Copyable` holding `hello` and the non-copyable `SessionNonce`. Swift does not allow tuples with non-copyable elements, and a client module cannot partially consume a non-frozen struct, so the nonce is moved out with the consuming `OwnHello.takeNonce()`. `SessionCipher.establish(identity:role:peerPublic:ownNonce:peerNonce:)` takes the nonce `consuming`; reusing a nonce is a compile error (verified: "'n' consumed more than once").
+- **`SessionCipher`** is a `final class` (one shared counter state; cannot be copied or rewound). It is deliberately not `Sendable`: confine it to one actor per connection. `K_sess` is a CryptoKit `SymmetricKey` and is never exposed.
+- **`PairKey`** hides `K_pair`; argument order is derived from `ownRole` and the typed `PairRequest`/`PairChallenge`, as in Rust.
+- **Errors** are `VQError` with `code` equal to the Rust codes (README §9). Its `description` contains at most a 64-scalar excerpt of peer data and must not be used for `error.msg`.
+- **Fixed-size binary fields** are `Bytes32` (failable init from exactly 32 bytes). `IdentityKeyPair(secretBytes:)` is failable (`nil` unless 32 bytes) instead of Rust's typed array.
+- **Test hooks** (raw-key `SessionCipher(rawKeyForTests:role:)`, `advanceSendCounterForTests(to:)` which can only move forward, `sealForTests`, `nonceForTests`, `decodeEnvelopeForTests`, `derivePairKeyForTests`, `deriveSessionKeyForTests`, the raw MAC helpers, `SharedSecret(bytesForTests:)`, `SessionNonce(bytesForTests:)`, `PairKey.keyBytesForTests`) are `internal` and reachable only through `@testable import`, the Swift equivalent of the Rust `test-vectors` feature. Production clients (the app, `PhoneSim`) cannot call them.
+- HKDF uses CryptoKit's `HKDF<SHA256>.deriveKey` (README §6.3); MAC checks use `HMAC<SHA256>.isValidAuthenticationCode` (constant time).
+
+### Q24. CryptoKit vs x25519-dalek on low-order points
+CryptoKit's `sharedSecretFromKeyAgreement` **throws** (CoreCrypto error -7) for every low-order or non-canonical-zero peer key in `crypto.json → x25519_errors`, including the variants with bit 255 set, instead of returning an all-zero secret as dalek does. **Decision.** Any throw from key agreement, or an all-zero result, maps to `non_contributory`. Both behaviours give the same vector outcome. Bit 255 of a received u-coordinate is masked by CryptoKit exactly as RFC 7748 requires (`x25519_high_bit` passes).
+
+### Q25. Vector loading in Swift
+`messages.json` carries `"v": 18446744073709551615` as a JSON **number** (`hello_unsupported`), which `JSONSerialization` would read through `Double` and corrupt. README §10.1 says u64 *counters* are strings but other integers are numbers "that fit their documented type exactly", so this is consistent with the README, but a loader must read numbers exactly. **Decision.** The Swift tests read the vector files with their own small JSON tree parser that keeps numbers as source text. No change to the vectors is needed.
+
+## M3 (desktop core) — `vq-host-core`
+
+These are numbered D1… so they cannot collide with the M2 entries being written at the same time.
+
+### D1. Log dedupe across restarts: sidecar index
+The SPEC §6.2 log line carries only an 8-digit id prefix and no revision, so the Markdown file alone cannot identify (`id`, `rev`). **Decision.** Each day file `YYYY-MM-DD.md` has a sidecar index `<log_dir>/.vq-index/YYYY-MM-DD.idx` with one `<uuid> <rev>` line per logged entry. The index line is appended *after* the Markdown entry has been written and flushed. The index is loaded when the logger first writes to a day (and after a log-dir change). A crash between the two appends can log one entry twice, but never loses one. As the spec says, dedupe is per day file: the same (`id`, `rev`) arriving on a later day is logged in that day's file.
+
+### D2. Which revisions are logged, and with which time
+**Decision.**
+- Only a `final`/`edit` that the transcript store *accepts* (a higher `rev` than any seen for that `id` in this run) is logged, and then only if (`id`, `rev`) is not already in the day's index. A stale lower-revision `final` that arrives after an `edit` is acked but not logged, so the log never shows an older text after the correction.
+- The line's `HH:MM:SS` and the file's date are both the local wall-clock time when that revision **arrived**.
+- The header is `# Ventriloquist — YYYY-MM-DD` followed by one blank line. Entries follow with no blank lines between them. If someone has edited the file by hand and it no longer ends in a newline, one is added before the next entry.
+
+### D3. "Rendered inertly" in the log
+**Decision.**
+- LF splits lines, and a CR directly before an LF is dropped. Every text line, including empty ones, is indented two spaces, so no text line can begin at column 0 and pass for an entry or the header.
+- These characters are written as visible `\u{XX}` escapes: control characters other than TAB (C0, DEL, C1, a lone CR, ESC), the bidi controls (U+061C, U+200E/F, U+202A–202E, U+2066–2069) and U+2028/U+2029.
+- The device name gets the same escaping, and its LF and TAB are escaped too.
+- Markdown syntax is **not** escaped, so the text stays verbatim for copying.
+
+### D4. Unpaired idle drop and the reconnect hold-off
+SPEC §6.3 says to drop unpaired phones after 5 minutes without pairing activity, and also to reconnect automatically. Taken together, a dropped phone would be reconnected at once. **Decision.**
+- The session layer decides the drop (`policy::idle_drop_due`), because it knows the pairing state. Pairing activity is a connect, a `hello`, a `pair_request` or a `pair_confirm`. The rule applies to every session that is not Secure, including one that never sent `hello`.
+- The disconnect carries a reconnect hold-off: **60 s** after an idle drop and **30 s** after `error{unknown_peer}`. Without the hold-off, an unknown phone would loop between connect and `unknown_peer`.
+- Otherwise the reconnect backoff is 0 for the first attempt, then 1, 2, 4, 8, and 15 s for every later attempt. It resets after a successful connection; the first retry after a drop waits 1 s.
+- The TCP dev transport uses the same schedule.
+- The owner may tune these constants in `transport/policy.rs`.
+
+### D5. Keepalive details
+**Decision.**
+- Once Secure, the desktop sends `ping` every 15 s. Only a `pong` resets the count of unanswered pings.
+- When a `ping` is due while 3 are still unanswered, the desktop disconnects, about 60 s after the last `pong`. The close reason is `keepalive_timeout`.
+- Each incoming `ping` gets a `pong`.
+- Sessions that are not Secure send no keepalive; the idle drop (D4) covers them.
+
+### D6. Desktop reactions not fixed by the README
+**Decision.**
+- **Pairing that cannot be saved.** If the pairing store cannot be written, the desktop answers `pair_result{ok:false}` and emits a `storage_warning`, and the attempt is not counted as a failure. Answering `ok:true` would make the phone store a pairing that the desktop rejects with `unknown_peer` on the next connection.
+- **Low-order public key.** If the phone's `hello.pub` is a low-order key (`non_contributory`), the desktop answers `error{protocol}` and disconnects.
+- **Out-of-order pairing messages.** A `pair_request` that arrives before `hello` is dropped. A `pair_confirm` that arrives before `hello` gets `pair_result{ok:false}`.
+- **Decryption failures.** `decrypt_failed` while Secure is answered with `error{decrypt_failed}` and a disconnect. A `replay` is dropped with no event.
+- **Errors from the phone.** An `error` from the phone, whether plaintext or encrypted, is shown and the desktop disconnects. It never changes the pairing store, whatever its provenance.
+- **Version errors.** `error{version}` from the phone means *this desktop* must be updated. A `hello` with an unsupported `v` means the phone must be updated.
+- **Display name.** The desktop sends its `hello` with `paired:false` (README §7.1). The phone's name comes from that connection's `hello`. The name stored at pairing time is not updated later.
+
+### D7. Files, identity and config
+**Decision.**
+- The config directory is `<OS config dir>/com.ventriloquist.desktop`, which is the same as the Tauri identifier.
+- `identity.json` holds `{version, device_id, secret_key(b64)}`. It is mode 0600 on unix, the mode is restored on every load, and the directory is created 0700. On Windows no explicit ACL is set; the file relies on the per-user `%APPDATA%` ACL.
+- A corrupt identity file is an error and is never regenerated silently, because a new key would break every pairing.
+- `peers.json` and `config.json` are written atomically: temp file, fsync, rename.
+- `vq-host --log-dir/--name` override the values for that run only and are not persisted. The `set_log_dir` and `set_name` commands persist.
+- The display name is trimmed, control characters are removed, and it is capped at 64 characters. An empty name resets to the hostname, without `.local`.
+
+### D8. Transcript entry semantics
+**Decision.**
+- Entries are keyed by `id` across all phones. The cap evicts in order of first arrival, and `entry_evicted` is emitted.
+- The entry reflects the highest accepted revision: `partial` = that revision is a partial; `edited` = that revision is an edit.
+- `received_at` and `time` are the local arrival time of that revision; `ts` is the phone's start-of-utterance time.
+- "Clear view" belongs to the UI only; the core has no command for it.
+
+### D9. Peer ids
+**Decision.** A `PeerId` names one *connection*: `tcp:<addr>#<n>` or `ble:<peripheral id>#<n>`. A reconnect therefore gets a new id, and stale commands for an old connection are ignored.
