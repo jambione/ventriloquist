@@ -153,7 +153,7 @@ A receiver MUST check the **whole document**, including members it will later ig
 2. **Depth.** Objects and arrays nest more than **32** levels. The outermost container is depth 1. So `{"t":"ping","x":[[…]]}` is allowed with up to 31 nested arrays inside `x`, and rejected with 32. Scalars do not count.
 3. **Finite numbers.** A number token, converted to an IEEE 754 binary64 double with round-to-nearest-even, is infinite. This is the same as the decimal value having magnitude ≥ 2^1024 − 2^970. For example `1e309`, `-1e400` and `1.7976931348623159e308` are rejected, while `1.7976931348623157e308`, `1e-400` (which rounds to 0) and a 39-digit integer are accepted. The rule applies to every number, including integer fields: `"rev":1e400` is `invalid_json`, not `invalid_message`.
 4. **Lone surrogates.** A `\u` escape of a high surrogate (`D800`–`DBFF`) is not immediately followed by a `\u` escape of a low surrogate (`DC00`–`DFFF`), or a low-surrogate escape appears without such a high surrogate directly before it. This applies to keys and values. A correctly paired `😀` is fine.
-5. **Duplicate keys.** Any object, at any depth, has two members whose keys are equal after unescaping (so `"t"` and `"t"` are duplicates). Members of different objects may share keys.
+5. **Duplicate keys.** Any object, at any depth, has two members whose keys are equal after unescaping (so `"t"` and `"t"` are duplicates). Keys, and the `t` value, are compared as sequences of Unicode scalar values **without normalization**, so U+212A KELVIN SIGN ≠ `K` and precomposed `é` ≠ `e`+U+0301. Members of different objects may share keys.
 
 These five checks all yield the same code, so their relative order is not observable. They come after the size check and before every message-level check (§9.1).
 
@@ -255,7 +255,7 @@ The 6-digit code is **never** sent over the wire.
 - **Size rule (normative, for the sender).** A `utt` is always sent encrypted, so its JSON MUST fit in **65,511** bytes (§8). A text within 32,000 bytes can still escape past that (32,000 × U+0001 escapes to 192,000 bytes). The phone therefore ends the utterance as soon as **either** the text reaches 32,000 UTF-8 bytes **or** the encoded `utt` would exceed the limit. The test is defined independently of the other fields:
 
   ```
-  escaped_len(text) = Σ over characters c of:
+  escaped_len(text) = Σ over Unicode scalar values c of:
                         2  if c is " or \ or U+0008, U+0009, U+000A, U+000C, U+000D
                         6  if c is any other character in U+0000–U+001F
                         len_utf8(c) otherwise
@@ -263,7 +263,7 @@ The 6-digit code is **never** sent over the wire.
                             rev 4294967295, state "partial", ts 18446744073709551615)
   fits(text)  ⇔  len_utf8(text) ≤ 32,000  and  126 + escaped_len(text) ≤ 65,511
   ```
-  When `fits` fails, the phone sends the longest prefix of the text, cut at a character boundary, for which `fits` holds, as the utterance's `final`, and ends the utterance. Encoders MUST NOT escape more than `escaped_len` assumes (for example, they MUST NOT escape `/` or non-ASCII characters), so that `fits(text)` guarantees the message can be sent. In Rust: `utt_text_fits(text)` and `max_text_prefix(text)`. The vectors are in `messages.json` → `utt_fits`.
+  When `fits` fails, the phone sends the longest prefix of the text, cut at a Unicode scalar value boundary (not a grapheme boundary), for which `fits` holds, as the utterance's `final`, and ends the utterance. Encoders MUST NOT escape more than `escaped_len` assumes (for example, they MUST NOT escape `/` or non-ASCII characters), so that `fits(text)` guarantees the message can be sent. In Rust: `utt_text_fits(text)` and `max_text_prefix(text)`. The vectors are in `messages.json` → `utt_fits`.
 
 ### 5.9 `ack` (encrypted, desktop → phone)
 | field | type |
