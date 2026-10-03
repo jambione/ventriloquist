@@ -1,0 +1,455 @@
+{
+  "description": "Framing (SPEC §4.2). Frame = flags(1) ‖ msg_seq(u16 BE) ‖ chunk. `split`: FrameSplitter starting at `seq`, splitting `message` for payload size `mtu`, must produce exactly `frames`, and the next message uses `next_seq`. `reassembly`: feed `steps[].frame` in order to ONE fresh reassembler; each step yields `pending`, a complete `message`, or an `error` code (the frame was dropped; the reassembler stays usable).",
+  "reassembly": [
+    {
+      "name": "single FIRST|LAST frame",
+      "steps": [
+        {
+          "frame": "03000568656c6c6f",
+          "message": "68656c6c6f",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "empty FIRST|LAST frame yields an empty message",
+      "steps": [
+        {
+          "frame": "030000",
+          "message": "",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "three frames",
+      "steps": [
+        {
+          "frame": "010001aabb",
+          "result": "pending"
+        },
+        {
+          "frame": "000001ccdd",
+          "result": "pending"
+        },
+        {
+          "frame": "020001ee",
+          "message": "aabbccddee",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "empty middle and last chunks are fine",
+      "steps": [
+        {
+          "frame": "010009aa",
+          "result": "pending"
+        },
+        {
+          "frame": "000009",
+          "result": "pending"
+        },
+        {
+          "frame": "020009",
+          "message": "aa",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "FIRST resets a partial buffer (different seq)",
+      "steps": [
+        {
+          "frame": "01000111",
+          "result": "pending"
+        },
+        {
+          "frame": "01000222",
+          "result": "pending"
+        },
+        {
+          "frame": "02000233",
+          "message": "2233",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "FIRST resets a partial buffer (same seq)",
+      "steps": [
+        {
+          "frame": "01000711",
+          "result": "pending"
+        },
+        {
+          "frame": "03000722",
+          "message": "22",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "seq mismatch discards the buffer; remaining frames are orphans",
+      "steps": [
+        {
+          "frame": "01000111",
+          "result": "pending"
+        },
+        {
+          "error": "seq_mismatch",
+          "frame": "00000222",
+          "result": "error"
+        },
+        {
+          "error": "orphan_frame",
+          "frame": "02000133",
+          "result": "error"
+        },
+        {
+          "frame": "03000344",
+          "message": "44",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "continuation without FIRST is an orphan",
+      "steps": [
+        {
+          "error": "orphan_frame",
+          "frame": "00000011",
+          "result": "error"
+        },
+        {
+          "error": "orphan_frame",
+          "frame": "02000011",
+          "result": "error"
+        }
+      ]
+    },
+    {
+      "name": "frame shorter than header discards the buffer",
+      "steps": [
+        {
+          "frame": "01000111",
+          "result": "pending"
+        },
+        {
+          "error": "frame_too_short",
+          "frame": "0200",
+          "result": "error"
+        },
+        {
+          "error": "orphan_frame",
+          "frame": "02000122",
+          "result": "error"
+        },
+        {
+          "error": "frame_too_short",
+          "frame": "",
+          "result": "error"
+        }
+      ]
+    },
+    {
+      "name": "reserved flag bits set discards the buffer",
+      "steps": [
+        {
+          "frame": "01000111",
+          "result": "pending"
+        },
+        {
+          "error": "reserved_flags",
+          "frame": "06000122",
+          "result": "error"
+        },
+        {
+          "error": "orphan_frame",
+          "frame": "02000133",
+          "result": "error"
+        },
+        {
+          "error": "reserved_flags",
+          "frame": "83000144",
+          "result": "error"
+        },
+        {
+          "error": "reserved_flags",
+          "frame": "fc000144",
+          "result": "error"
+        }
+      ]
+    },
+    {
+      "name": "seq 0xffff then wrap to 0x0000",
+      "steps": [
+        {
+          "frame": "01ffff01",
+          "result": "pending"
+        },
+        {
+          "frame": "02ffff02",
+          "message": "0102",
+          "result": "message"
+        },
+        {
+          "frame": "03000003",
+          "message": "03",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "buffer of exactly 65536 bytes is accepted",
+      "steps": [
+        {
+          "frame": {
+            "fill_count": 65535,
+            "fill_hex": "5a",
+            "prefix_hex": "010005"
+          },
+          "result": "pending"
+        },
+        {
+          "frame": "0200055a",
+          "message": {
+            "fill_count": 65536,
+            "fill_hex": "5a"
+          },
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "buffer exceeding 65536 bytes is discarded",
+      "steps": [
+        {
+          "frame": {
+            "fill_count": 65536,
+            "fill_hex": "5a",
+            "prefix_hex": "010005"
+          },
+          "result": "pending"
+        },
+        {
+          "error": "message_too_large",
+          "frame": "0000055a",
+          "result": "error"
+        },
+        {
+          "error": "orphan_frame",
+          "frame": "0200055a",
+          "result": "error"
+        },
+        {
+          "frame": "030006",
+          "message": "",
+          "result": "message"
+        }
+      ]
+    },
+    {
+      "name": "single FIRST frame over the limit",
+      "steps": [
+        {
+          "error": "message_too_large",
+          "frame": {
+            "fill_count": 65537,
+            "fill_hex": "5a",
+            "prefix_hex": "030005"
+          },
+          "result": "error"
+        }
+      ]
+    }
+  ],
+  "split": [
+    {
+      "frames": [
+        "030000"
+      ],
+      "message": "",
+      "mtu": 20,
+      "name": "empty message, mtu 20",
+      "next_seq": 1,
+      "seq": 0
+    },
+    {
+      "frames": [
+        "030000ab"
+      ],
+      "message": "ab",
+      "mtu": 20,
+      "name": "1 byte, mtu 20",
+      "next_seq": 1,
+      "seq": 0
+    },
+    {
+      "frames": [
+        "0300010102030405060708090a0b0c0d0e0f1011"
+      ],
+      "message": "0102030405060708090a0b0c0d0e0f1011",
+      "mtu": 20,
+      "name": "exactly one chunk (17 bytes), mtu 20",
+      "next_seq": 2,
+      "seq": 1
+    },
+    {
+      "frames": [
+        "0100020102030405060708090a0b0c0d0e0f1011",
+        "02000212"
+      ],
+      "message": "0102030405060708090a0b0c0d0e0f101112",
+      "mtu": 20,
+      "name": "one byte over one chunk (18 bytes), mtu 20",
+      "next_seq": 3,
+      "seq": 2
+    },
+    {
+      "frames": [
+        "0100030102030405060708090a0b0c0d0e0f1011",
+        "02000312131415161718191a1b1c1d1e1f202122"
+      ],
+      "message": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122",
+      "mtu": 20,
+      "name": "two full chunks (34 bytes), mtu 20",
+      "next_seq": 4,
+      "seq": 3
+    },
+    {
+      "frames": [
+        "010102000102030405060708090a0b0c0d0e0f10",
+        "0001021112131415161718191a1b1c1d1e1f2021",
+        "00010222232425262728292a2b2c2d2e2f303132",
+        "000102333435363738393a3b3c3d3e3f40414243",
+        "0001024445464748494a4b4c4d4e4f5051525354",
+        "02010255565758595a5b5c5d5e5f60616263"
+      ],
+      "message": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60616263",
+      "mtu": 20,
+      "name": "100 bytes, mtu 20",
+      "next_seq": 259,
+      "seq": 258
+    },
+    {
+      "frames": [
+        "017fff000102030405060708090a0b0c0d0e0f10111213",
+        "007fff1415161718191a1b1c1d1e1f2021222324252627",
+        "007fff28292a2b2c2d2e2f303132333435363738393a3b",
+        "007fff3c3d3e3f404142434445464748494a4b4c4d4e4f",
+        "027fff505152535455565758595a5b5c5d5e5f60616263"
+      ],
+      "message": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60616263",
+      "mtu": 23,
+      "name": "100 bytes, mtu 23",
+      "next_seq": 32768,
+      "seq": 32767
+    },
+    {
+      "frames": [
+        "038000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60616263"
+      ],
+      "message": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60616263",
+      "mtu": 185,
+      "name": "100 bytes, mtu 185 (single frame)",
+      "next_seq": 32769,
+      "seq": 32768
+    },
+    {
+      "frames": [
+        "01002a00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3",
+        "00002afa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6ed",
+        "00002af4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7",
+        "00002aeef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1",
+        "00002ae8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4db",
+        "02002ae2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51"
+      ],
+      "message": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51",
+      "mtu": 185,
+      "name": "1000 bytes, mtu 185",
+      "next_seq": 43,
+      "seq": 42
+    },
+    {
+      "frames": [
+        "01fffe00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990",
+        "00fffe979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b12192027",
+        "00fffe2e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7be",
+        "00fffec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e55",
+        "02fffe5c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51"
+      ],
+      "message": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51",
+      "mtu": 244,
+      "name": "1000 bytes, mtu 244",
+      "next_seq": 65535,
+      "seq": 65534
+    },
+    {
+      "frames": [
+        "01ffff00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4",
+        "02ffffebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51"
+      ],
+      "message": "00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51",
+      "mtu": 512,
+      "name": "1000 bytes, mtu 512",
+      "next_seq": 0,
+      "seq": 65535
+    },
+    {
+      "frames": [
+        "03ffff7b2274223a2270696e67227d"
+      ],
+      "message": "7b2274223a2270696e67227d",
+      "mtu": 20,
+      "name": "ASCII JSON, mtu 20, seq wraps after this",
+      "next_seq": 0,
+      "seq": 65535
+    }
+  ],
+  "split_errors": [
+    {
+      "error": "mtu_too_small",
+      "message": "00",
+      "mtu": 19,
+      "name": "mtu 19 is below the minimum"
+    },
+    {
+      "error": "mtu_too_small",
+      "message": "00",
+      "mtu": 3,
+      "name": "mtu 3"
+    },
+    {
+      "error": "mtu_too_small",
+      "message": "",
+      "mtu": 0,
+      "name": "mtu 0"
+    },
+    {
+      "error": "message_too_large",
+      "message": {
+        "fill_count": 65537,
+        "fill_hex": "41"
+      },
+      "mtu": 512,
+      "name": "65537-byte message"
+    }
+  ],
+  "split_large": [
+    {
+      "first_frame_header": "010000",
+      "frame_count": 129,
+      "last_frame_header": "020000",
+      "last_frame_len": 387,
+      "message": {
+        "fill_count": 65536,
+        "fill_hex": "41"
+      },
+      "mtu": 512,
+      "name": "65536-byte message at mtu 512 is allowed",
+      "seq": 0
+    }
+  ],
+  "vectors_version": 1
+}

@@ -1,0 +1,388 @@
+{
+  "decode": [
+    {
+      "envelope": "007b2274223a2268656c6c6f222c2276223a312c226465766963655f6964223a2236663163396130652d316432622d346333642d386534662d356136623763386439653066222c226e616d65223a224465736b222c22707562223a2245424553457851564668635947526f62484230654879416849694d6b4a53596e4b436b714b7977744c69383d222c22706169726564223a66616c73652c2273657373696f6e5f6e6f6e6365223a224d4445794d7a51314e6a63344f546f375044302b50304242516b4e4552555a4853456c4b5330784e546b383d227d",
+      "name": "plaintext hello allowed",
+      "result": "message",
+      "session": null,
+      "type": "hello"
+    },
+    {
+      "envelope": "007b2274223a22706169725f72657175657374222c226e6f6e63655f70223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b61477877644868383d227d",
+      "name": "plaintext pair_request allowed",
+      "result": "message",
+      "session": null,
+      "type": "pair_request"
+    },
+    {
+      "envelope": "007b2274223a22706169725f6368616c6c656e6765222c226e6f6e63655f64223a22494345694979516c4a69636f4b536f724c4330754c7a41784d6a4d304e5459334f446b364f7a7739506a383d227d",
+      "name": "plaintext pair_challenge allowed",
+      "result": "message",
+      "session": null,
+      "type": "pair_challenge"
+    },
+    {
+      "envelope": "007b2274223a22706169725f636f6e6669726d222c226d6163223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b61477877644868383d227d",
+      "name": "plaintext pair_confirm allowed",
+      "result": "message",
+      "session": null,
+      "type": "pair_confirm"
+    },
+    {
+      "envelope": "007b2274223a22706169725f726573756c74222c226f6b223a66616c73657d",
+      "name": "plaintext pair_result allowed",
+      "result": "message",
+      "session": null,
+      "type": "pair_result"
+    },
+    {
+      "envelope": "007b2274223a226572726f72222c22636f6465223a22756e6b6e6f776e5f70656572222c226d7367223a22227d",
+      "name": "plaintext error allowed (with session too)",
+      "result": "message",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      },
+      "type": "error"
+    },
+    {
+      "envelope": "007b2274223a22757474222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a312c227374617465223a227061727469616c222c2274657874223a2268656c6c6f20776f726c64222c227473223a313735393530303030303030307d",
+      "error": "plaintext_not_allowed",
+      "name": "plaintext utt rejected (no session)",
+      "result": "error",
+      "session": null
+    },
+    {
+      "envelope": "007b2274223a22757474222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a312c227374617465223a227061727469616c222c2274657874223a2268656c6c6f20776f726c64222c227473223a313735393530303030303030307d",
+      "error": "plaintext_not_allowed",
+      "name": "plaintext utt rejected (session established)",
+      "result": "error",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      }
+    },
+    {
+      "envelope": "007b2274223a2261636b222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a317d",
+      "error": "plaintext_not_allowed",
+      "name": "plaintext ack rejected",
+      "result": "error",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      }
+    },
+    {
+      "envelope": "007b2274223a2270696e67227d",
+      "error": "plaintext_not_allowed",
+      "name": "plaintext ping rejected",
+      "result": "error",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      }
+    },
+    {
+      "envelope": "007b2274223a22706f6e67227d",
+      "error": "plaintext_not_allowed",
+      "name": "plaintext pong rejected",
+      "result": "error",
+      "session": null
+    },
+    {
+      "envelope": "007b2274223a226675747572655f7468696e67227d",
+      "name": "plaintext unknown type is passed up as unknown (dropped, not fatal)",
+      "result": "unknown",
+      "session": null,
+      "type": "future_thing"
+    },
+    {
+      "envelope": "007b",
+      "error": "invalid_json",
+      "name": "plaintext invalid JSON",
+      "result": "error",
+      "session": null
+    },
+    {
+      "envelope": "00",
+      "error": "invalid_json",
+      "name": "plaintext empty body",
+      "result": "error",
+      "session": null
+    },
+    {
+      "envelope": "010000000000000000fa8d4bb55c856f740b34d1478a56fefe95b79c65c73c0d4c266c5887d3d40cd737125c86880cdd872427eff74a408f55c3e56ae907d749c58ebfc68ba17a600f6af56bd2ab3d6cfb3a9416773a505f893b4528a052badd56766babdd4161c0f5324ad79cfb8d6404fb4a3ae9b72c3ee72166ed7c6375c619568ae1afe0d7f74f901275d58fa81c7cf5",
+      "name": "encrypted utt with session",
+      "result": "message",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      },
+      "type": "utt"
+    },
+    {
+      "envelope": "010000000000000000fa8d4bb55c856f740b34d1478a56fefe95b79c65c73c0d4c266c5887d3d40cd737125c86880cdd872427eff74a408f55c3e56ae907d749c58ebfc68ba17a600f6af56bd2ab3d6cfb3a9416773a505f893b4528a052badd56766babdd4161c0f5324ad79cfb8d6404fb4a3ae9b72c3ee72166ed7c6375c619568ae1afe0d7f74f901275d58fa81c7cf5",
+      "error": "no_session",
+      "name": "encrypted utt without session",
+      "result": "error",
+      "session": null
+    },
+    {
+      "envelope": "010000000000000000fa8d4bb55c857f720d798f47cf10bfabd3e2d867833f081d1b2c5ddd92cb4a922bc21abf3609877a0adbaad7e578",
+      "name": "encrypted error is also fine",
+      "result": "message",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      },
+      "type": "error"
+    },
+    {
+      "envelope": "010000000000000000fa8d4bb55c857c750b638f00bc46b4add9e0d87183254b43753c4540f94bbed4f36f5c4b13fe26477719",
+      "name": "encrypted unknown type",
+      "result": "unknown",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      },
+      "type": "future_thing"
+    },
+    {
+      "envelope": "010000000000000000efc04bb70cd4756e71bac3bb19d306e7cbb739654c33f5d4",
+      "error": "invalid_json",
+      "name": "encrypted non-JSON",
+      "result": "error",
+      "session": {
+        "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "role": "desktop"
+      }
+    }
+  ],
+  "description": "Envelopes (SPEC §4.3). Plaintext = 00 ‖ JSON. Encrypted = 01 ‖ counter(u64 BE) ‖ ChaCha20-Poly1305(key, nonce, plaintext, aad=01) where nonce = direction byte ‖ 000000 ‖ counter(u64 BE); direction phone_to_desktop=01, desktop_to_phone=02. Counters are decimal strings. `open_errors`: open `envelope` with a FRESH receiver of `receiver_role` (which receives the opposite direction of its own sends). `decode`: full decode policy on a fresh receiver; `session` null means no session key established. `stack`: plaintext → envelope (sender's counter) → frames (splitter at `seq`, `mtu`).",
+  "encrypt": [
+    {
+      "aad": "01",
+      "counter": "0",
+      "direction": "phone_to_desktop",
+      "envelope": "010000000000000000fa8d4bb55c856f740b34d1478a56fefe95b79c65c73c0d4c266c5887d3d40cd737125c86880cdd872427eff74a408f55c3e56ae907d749c58ebfc68ba17a600f6af56bd2ab3d6cfb3a9416773a505f893b4528a052badd56766babdd4161c0f5324ad79cfb8d6404fb4a3ae9b72c3ee72166ed7c6375c619568ae1afe0d7f74f901275d58fa81c7cf5",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "utt, phone→desktop, counter 0",
+      "nonce": "010000000000000000000000",
+      "plaintext": "7b2274223a22757474222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a312c227374617465223a227061727469616c222c2274657874223a2268656c6c6f20776f726c64222c227473223a313735393530303030303030307d"
+    },
+    {
+      "aad": "01",
+      "counter": "1",
+      "direction": "phone_to_desktop",
+      "envelope": "010000000000000001dbd5107fa5bc02e5a7bbcfaedfe1cfc3ef7d114c97fd92547ac789f6e851971bc849a9b08c3a3443ffc229505da5090592bee3ae9fa2774a9634cf339df4fb2b6a6b145ef67ba238ee717328d449a83e2aa62514887d34d748daa991e21d280bb42e439a8edd7e552e789dcf593ed220706025f047ab4c77be397637c87f28ca2112572816069d9a6f",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "utt, phone→desktop, counter 1",
+      "nonce": "010000000000000000000001",
+      "plaintext": "7b2274223a22757474222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a312c227374617465223a227061727469616c222c2274657874223a2268656c6c6f20776f726c64222c227473223a313735393530303030303030307d"
+    },
+    {
+      "aad": "01",
+      "counter": "1",
+      "direction": "desktop_to_phone",
+      "envelope": "010000000000000001c2787a6c47d6ae01b979164b6008f133b6f1f6fe578b5d6c553b5643bcdeecb1a3e91833edaa044d551ba2a3a4a8f11c7da105bd65a786d2134f429dc3fea6c7a5a6f471efaf0ec21cffd7e64aab6b7eade7557a35dd9a7a2fa8f96152c8b40459471c83f4663392bb1d1b147cf48219ab8e3794d6934051ca6d44c898d898ac5ed594dd085383fc28",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "same plaintext+counter, desktop→phone (different nonce)",
+      "nonce": "020000000000000000000001",
+      "plaintext": "7b2274223a22757474222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a312c227374617465223a227061727469616c222c2274657874223a2268656c6c6f20776f726c64222c227473223a313735393530303030303030307d"
+    },
+    {
+      "aad": "01",
+      "counter": "72623859790382856",
+      "direction": "desktop_to_phone",
+      "envelope": "0101020304050607088837abb07730f7ae929c9e000dd33f4a4fd8fdf8dfd062e8b366a00d01ff52be2476eebfb6b60614d4d6e6ae8c5e18fe3ee630a418cf077d07ec326e1cef4dc019837999e2f4d63a351de319537afc",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "ack, desktop→phone, counter 0x0102030405060708",
+      "nonce": "020000000102030405060708",
+      "plaintext": "7b2274223a2261636b222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a317d"
+    },
+    {
+      "aad": "01",
+      "counter": "18446744073709551615",
+      "direction": "phone_to_desktop",
+      "envelope": "01ffffffffffffffffb3cc3470e1113436c79c2089ddcfcacfb9a5bfae64d586832c08c120",
+      "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "name": "ping, counter u64::MAX",
+      "nonce": "01000000ffffffffffffffff",
+      "plaintext": "7b2274223a2270696e67227d"
+    },
+    {
+      "aad": "01",
+      "counter": "7",
+      "direction": "desktop_to_phone",
+      "envelope": "010000000000000007950e5ab8ef635614d4b5d93fa27b8976",
+      "key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "name": "empty plaintext",
+      "nonce": "020000000000000000000007",
+      "plaintext": ""
+    },
+    {
+      "aad": "01",
+      "counter": "2",
+      "direction": "phone_to_desktop",
+      "envelope": "01000000000000000285fe53ff7df6c10395daa2c96beb533f0dccaf0404284e25744bcdf629a478c3888227d4c2df507146933125c245b48122d9ba11398f6751dc55c44baeb282c2da9a837e0426efc53a2aca0b0be1e2df437afa2afbe54a241af78a3d46114a21be8a822dad99b1d14e420ca308d098a966003caed2b5222f04520d2d7a76d8925fe4a9b00470420a03440c141c0072490377425e",
+      "key": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "name": "multibyte UTF-8 text",
+      "nonce": "010000000000000000000002",
+      "plaintext": "7b2274223a22757474222c226964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c22726576223a322c227374617465223a2266696e616c222c2274657874223a226e61c3af766520636166c3a920f09f98805c6e6c696e6532222c227473223a313735393530303030303030307d"
+    }
+  ],
+  "open_errors": [
+    {
+      "envelope": "010000000000000003302ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb26348",
+      "error": "decrypt_failed",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "valid envelope opened by the wrong role (direction mismatch)",
+      "receiver_role": "phone"
+    },
+    {
+      "envelope": "010000000000000003302ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb26348",
+      "error": "decrypt_failed",
+      "key": "7f8182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "wrong key",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "010000000000000003302ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb263c8",
+      "error": "decrypt_failed",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "tag bit flipped",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "010000000000000003312ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb26348",
+      "error": "decrypt_failed",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "ciphertext bit flipped",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "010000000000000002302ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb26348",
+      "error": "decrypt_failed",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "counter bit flipped",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "010000000000000003302ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb263",
+      "error": "decrypt_failed",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "truncated by one byte",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "010000000000000003302ce710c8add21be6c1e918c1a72f",
+      "error": "envelope_too_short",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "24 bytes: shorter than kind+counter+tag",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "01",
+      "error": "envelope_too_short",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "kind byte only",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "",
+      "error": "empty_envelope",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "empty envelope",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "020000000000000003302ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb26348",
+      "error": "unknown_envelope_kind",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "unknown kind 0x02",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "ff",
+      "error": "unknown_envelope_kind",
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "unknown kind 0xff",
+      "receiver_role": "desktop"
+    },
+    {
+      "envelope": "010000000000000003302ce710c8add21be6c1e918c1a72fe2d860cd811f2febcc5fb26348",
+      "error": null,
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "valid envelope (sanity: no error)",
+      "plaintext": "7b2274223a22706f6e67227d",
+      "receiver_role": "desktop"
+    }
+  ],
+  "plaintext": [
+    {
+      "envelope": "007b2274223a22706169725f72657175657374222c226e6f6e63655f70223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b61477877644868383d227d",
+      "json_utf8": "{\"t\":\"pair_request\",\"nonce_p\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "name": "pair_request"
+    },
+    {
+      "envelope": "007b2274223a226572726f72222c22636f6465223a2276657273696f6e222c226d7367223a225570646174652056656e7472696c6f7175697374227d",
+      "json_utf8": "{\"t\":\"error\",\"code\":\"version\",\"msg\":\"Update Ventriloquist\"}",
+      "name": "error"
+    }
+  ],
+  "stack": [
+    {
+      "counter": "0",
+      "envelope": "010000000000000000fa8d4bb55c856f740b34d1478a56fefe95b79c65c73c0d4c266c5887d3d40cd737125c86880cdd872427eff74a408f55c3e56ae907d749c58ebfc68ba17a600f6af56bd2ab3d6cfb3a9416773a505f893b4528a052badd56766babdd4161c0f5324ad79cfb8d6404fb4a3ae9b72c3ee72166ed7c6375c619568ae1afe0d7f74f901275d58fa81c7cf5",
+      "frames": [
+        "010000010000000000000000fa8d4bb55c856f74",
+        "0000000b34d1478a56fefe95b79c65c73c0d4c26",
+        "0000006c5887d3d40cd737125c86880cdd872427",
+        "000000eff74a408f55c3e56ae907d749c58ebfc6",
+        "0000008ba17a600f6af56bd2ab3d6cfb3a941677",
+        "0000003a505f893b4528a052badd56766babdd41",
+        "00000061c0f5324ad79cfb8d6404fb4a3ae9b72c",
+        "0000003ee72166ed7c6375c619568ae1afe0d7f7",
+        "0200004f901275d58fa81c7cf5"
+      ],
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "mtu": 20,
+      "name": "utt phone→desktop, mtu 20",
+      "plaintext_utf8": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"partial\",\"text\":\"hello world\",\"ts\":1759500000000}",
+      "sender_role": "phone",
+      "seq": 0
+    },
+    {
+      "counter": "5",
+      "envelope": "01000000000000000550b26871978f2f3f7b8cefab3a026d9e8a0af1b62667205a7dde7593ed69870e5a40ee3e26957790e1f79288933ec0d3b616be85a808b413c8831e42302c7126cde9312965432e93826df82aee696ab916f4682eb679f9e57d8cdc242c5009f075927769bff77ca1a8e7d692ab07d3aee213704c9ced159d0a3d85f14c779c5a725c041f487ac23354",
+      "frames": [
+        "03000901000000000000000550b26871978f2f3f7b8cefab3a026d9e8a0af1b62667205a7dde7593ed69870e5a40ee3e26957790e1f79288933ec0d3b616be85a808b413c8831e42302c7126cde9312965432e93826df82aee696ab916f4682eb679f9e57d8cdc242c5009f075927769bff77ca1a8e7d692ab07d3aee213704c9ced159d0a3d85f14c779c5a725c041f487ac23354"
+      ],
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "mtu": 185,
+      "name": "utt phone→desktop, mtu 185",
+      "plaintext_utf8": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"partial\",\"text\":\"hello world\",\"ts\":1759500000000}",
+      "sender_role": "phone",
+      "seq": 9
+    },
+    {
+      "counter": "0",
+      "envelope": "01000000000000000097943d6249de918b96481484ec3e1d3bf220d1f3261af0966b1c2732041f4790358f0a3f329eee79094d968c6f4e4ec210b59b860a79bcac07eb2ce219e1b6d6fd3f5b58d6aa80adbc81bb4d51fcda",
+      "frames": [
+        "01ffff01000000000000000097943d6249de918b",
+        "00ffff96481484ec3e1d3bf220d1f3261af0966b",
+        "00ffff1c2732041f4790358f0a3f329eee79094d",
+        "00ffff968c6f4e4ec210b59b860a79bcac07eb2c",
+        "00ffffe219e1b6d6fd3f5b58d6aa80adbc81bb4d",
+        "02ffff51fcda"
+      ],
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "mtu": 20,
+      "name": "ack desktop→phone, mtu 20",
+      "plaintext_utf8": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1}",
+      "sender_role": "desktop",
+      "seq": 65535
+    }
+  ],
+  "vectors_version": 1
+}

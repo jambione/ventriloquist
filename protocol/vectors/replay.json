@@ -1,0 +1,221 @@
+{
+  "description": "Replay protection (SPEC §4.3). For each sequence, create ONE receiver for `receiver_role` with `key` and open `steps[].envelope` in order. A step is accepted iff its counter is strictly greater than the last ACCEPTED counter (none initially) AND the tag verifies; failed steps never change state. `last_accepted_after` is the last accepted counter after the step (decimal string, null = none). `send_sequences`: a sender starting at `start_counter` seals `sends[].plaintext` in order; after using counter u64::MAX the sender must refuse with counter_exhausted.",
+  "send_sequences": [
+    {
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "fresh session starts at 0 and increments",
+      "sender_role": "desktop",
+      "sends": [
+        {
+          "envelope": "01000000000000000097943d6249de8081930d1adb7e7c219152a725fc7407dbb06f75aa74",
+          "plaintext": "7b2274223a2270696e67227d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000001c2787a6c47d6ab1ca33c1814f62c664f6859f382c593edc4e652278d",
+          "plaintext": "7b2274223a2270696e67227d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000002e569310e981484aa1201dd6f0eca09629436eac7e86f3d054613ee1b",
+          "plaintext": "7b2274223a2270696e67227d",
+          "result": "ok"
+        }
+      ],
+      "start_counter": "0"
+    },
+    {
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "counter exhaustion",
+      "sender_role": "phone",
+      "sends": [
+        {
+          "envelope": "01fffffffffffffffe73ca0abc00efce5224b9e4b9662853777dbb77e8d0e76b2308c95b5d",
+          "plaintext": "7b2274223a2270696e67227d",
+          "result": "ok"
+        },
+        {
+          "envelope": "01fffffffffffffffff88bd2e59b68d446cda750ee73deeeee3fc755850a0f3420c2e3cefc",
+          "plaintext": "7b2274223a22706f6e67227d",
+          "result": "ok"
+        },
+        {
+          "error": "counter_exhausted",
+          "plaintext": "7b2274223a2270696e67227d",
+          "result": "error"
+        }
+      ],
+      "start_counter": "18446744073709551614"
+    }
+  ],
+  "sequences": [
+    {
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "in order, duplicate, gap, old, forged high counter",
+      "receiver_role": "desktop",
+      "steps": [
+        {
+          "envelope": "010000000000000000fa8d4bb55c856a691171df49c15cfefe87fa71aeba19e9a802c110cb36fc1af37a01",
+          "last_accepted_after": "0",
+          "plaintext": "7b2274223a2270696e67222c226e223a307d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000001dbd5107fa5bc07f8bdfec1a094ebcfc3fc30e27de8771c3bc1906ddec13bc098ff7e",
+          "last_accepted_after": "1",
+          "plaintext": "7b2274223a2270696e67222c226e223a317d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000001dbd5107fa5bc07f8bdfec1a094ebcfc3fc30e27de8771c3bc1906ddec13bc098ff7e",
+          "error": "replay",
+          "last_accepted_after": "1",
+          "result": "error"
+        },
+        {
+          "envelope": "010000000000000000fa8d4bb55c856a691171df49c15cfefe87fa71aeba19e9a802c110cb36fc1af37a01",
+          "error": "replay",
+          "last_accepted_after": "1",
+          "result": "error"
+        },
+        {
+          "envelope": "010000000000000003302ce710c8add21de6c1e9495055f85223738008e17d17d433e2d721b770db934964",
+          "last_accepted_after": "3",
+          "plaintext": "7b2274223a2270696e67222c226e223a337d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000002a466eb23c6988360d206c035bfd9320f3c9395944fa9c548ee3fc66b94f793d8181c",
+          "error": "replay",
+          "last_accepted_after": "3",
+          "result": "error"
+        },
+        {
+          "envelope": "01ffffffffffffffff302ce710c8add21de6c1e9495055f85223738008e17d17d433e2d721b770db934964",
+          "error": "decrypt_failed",
+          "last_accepted_after": "3",
+          "result": "error"
+        },
+        {
+          "envelope": "010000000000000004db2b4f1859ebf188b4a27fef3b5a6c364ec01628141f7215871dac9e9f92d0a57f3c",
+          "last_accepted_after": "4",
+          "plaintext": "7b2274223a2270696e67222c226e223a347d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000004db2b4f1859ebf188b4a27fef3b5a6c364ec01628141f7215871dac9e9f92d0a57f3c",
+          "error": "replay",
+          "last_accepted_after": "4",
+          "result": "error"
+        }
+      ]
+    },
+    {
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "first accepted counter need not be 0; then 0 is a replay",
+      "receiver_role": "desktop",
+      "steps": [
+        {
+          "envelope": "01000000000000000550b26871978f2a2261c9e1a571086d9e9d47cd81cc3ff830316d86c0ceaa5f56f26d",
+          "last_accepted_after": "5",
+          "plaintext": "7b2274223a2270696e67222c226e223a357d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000000fa8d4bb55c856a691171df49c15cfefe87fa71aeba19e9a802c110cb36fc1af37a01",
+          "error": "replay",
+          "last_accepted_after": "5",
+          "result": "error"
+        },
+        {
+          "envelope": "01000000000000000550b26871978f2a2261c9e1a571086d9e9d47cd81cc3ff830316d86c0ceaa5f56f26d",
+          "error": "replay",
+          "last_accepted_after": "5",
+          "result": "error"
+        },
+        {
+          "envelope": "010000000000000006c51821d6af7ab9ea8f481d3e4cfa852b2b10157c658a0ecf206143dd899e4a6c3dea",
+          "last_accepted_after": "6",
+          "plaintext": "7b2274223a2270696e67222c226e223a367d",
+          "result": "ok"
+        }
+      ]
+    },
+    {
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "tampered envelope does not advance the window",
+      "receiver_role": "desktop",
+      "steps": [
+        {
+          "envelope": "010000000000000004db2b4f1859ebf188b4a27fef3b5a6c364ec01628141f7215871dac9e9f92d0a57f3d",
+          "error": "decrypt_failed",
+          "last_accepted_after": null,
+          "result": "error"
+        },
+        {
+          "envelope": "010000000000000004db2b4f1859ebf188b4a27fef3b5a6c364ec01628141f7215871dac9e9f92d0a57f3c",
+          "last_accepted_after": "4",
+          "plaintext": "7b2274223a2270696e67222c226e223a347d",
+          "result": "ok"
+        },
+        {
+          "envelope": "010000000000000004db2b4f1859ebf188b4a27fef3b5a6c364ec01628141f7215871dac9e9f92d0a57f3c",
+          "error": "replay",
+          "last_accepted_after": "4",
+          "result": "error"
+        }
+      ]
+    },
+    {
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "desktop→phone direction, counter u64::MAX is accepted once",
+      "receiver_role": "phone",
+      "steps": [
+        {
+          "envelope": "01000000000000000097cb2de1fdca48552c9c0b3337c70acaa729",
+          "last_accepted_after": "0",
+          "plaintext": "7b7d",
+          "result": "ok"
+        },
+        {
+          "envelope": "01ffffffffffffffff516adfaaf1edc8aa091ef4b42c50a7df3a93",
+          "last_accepted_after": "18446744073709551615",
+          "plaintext": "7b7d",
+          "result": "ok"
+        },
+        {
+          "envelope": "01ffffffffffffffff516adfaaf1edc8aa091ef4b42c50a7df3a93",
+          "error": "replay",
+          "last_accepted_after": "18446744073709551615",
+          "result": "error"
+        },
+        {
+          "envelope": "010000000000000001c227a5c18e0cc8630c2a58b581c4ef730968",
+          "error": "replay",
+          "last_accepted_after": "18446744073709551615",
+          "result": "error"
+        }
+      ]
+    },
+    {
+      "key": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "name": "wrong-direction envelope fails and does not advance",
+      "receiver_role": "phone",
+      "steps": [
+        {
+          "envelope": "010000000000000009c91ecea8ceda08f9a4698e1abe408c3c470240d5532c531d895e7c5724f9a8cc06e2",
+          "error": "decrypt_failed",
+          "last_accepted_after": null,
+          "result": "error"
+        },
+        {
+          "envelope": "01000000000000000097cb2de1fdca48552c9c0b3337c70acaa729",
+          "last_accepted_after": "0",
+          "plaintext": "7b7d",
+          "result": "ok"
+        }
+      ]
+    }
+  ],
+  "vectors_version": 1
+}

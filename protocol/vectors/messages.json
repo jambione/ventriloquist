@@ -1,0 +1,755 @@
+{
+  "decode": [
+    {
+      "expected": {
+        "device_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "name": "Jon's iPhone",
+        "paired": true,
+        "pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "session_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "t": "hello",
+        "v": 1
+      },
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello",
+      "result": "message",
+      "type": "hello"
+    },
+    {
+      "expected": {
+        "device_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "name": "Jon's iPhone",
+        "paired": true,
+        "pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "session_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "t": "hello",
+        "v": 1
+      },
+      "json": "{\"t\":\"hello\",\"caps\":[\"x\"],\"v\":1,\"device_id\":\"0F8FAD5B-D9CB-469F-A165-70867728950E\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello with uppercase device_id and extra fields",
+      "result": "message",
+      "type": "hello"
+    },
+    {
+      "json": "{\"t\":\"hello\",\"v\":2,\"name\":\"Jon's Mac\",\"future\":{\"a\":1}}",
+      "name": "hello with other version → hello_unsupported",
+      "peer_name": "Jon's Mac",
+      "result": "hello_unsupported",
+      "v": 2
+    },
+    {
+      "json": "{\"t\":\"hello\",\"v\":0}",
+      "name": "hello v 0 → hello_unsupported",
+      "peer_name": null,
+      "result": "hello_unsupported",
+      "v": 0
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello missing v",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":\"1\",\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello v as string",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":-1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello v negative",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true}",
+      "name": "hello missing session_nonce",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello missing paired",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello pub unpadded base64",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_s=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello pub url-safe alphabet",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ==\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello pub 31 bytes",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello pub 33 bytes",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5bd9cb469fa16570867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello device_id without hyphens",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"{0f8fad5b-d9cb-469f-a165-70867728950e}\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello device_id in braces",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "nonce_p": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "t": "pair_request"
+      },
+      "json": "{\"t\":\"pair_request\",\"nonce_p\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "name": "pair_request",
+      "result": "message",
+      "type": "pair_request"
+    },
+    {
+      "expected": {
+        "nonce_d": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "t": "pair_challenge"
+      },
+      "json": "{\"t\":\"pair_challenge\",\"nonce_d\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "pair_challenge",
+      "result": "message",
+      "type": "pair_challenge"
+    },
+    {
+      "expected": {
+        "mac": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "t": "pair_confirm"
+      },
+      "json": "{\"t\":\"pair_confirm\",\"mac\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "name": "pair_confirm",
+      "result": "message",
+      "type": "pair_confirm"
+    },
+    {
+      "expected": {
+        "mac": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "ok": true,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":true,\"mac\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "name": "pair_result ok",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "expected": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":false}",
+      "name": "pair_result fail",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "expected": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":false,\"mac\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "name": "pair_result fail with mac: mac is ignored",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "expected": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":false,\"mac\":null}",
+      "name": "pair_result fail with null mac",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"pair_result\",\"ok\":true}",
+      "name": "pair_result ok without mac",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"pair_result\",\"mac\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "name": "pair_result missing ok",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "code": "bad_mac",
+        "msg": "MAC mismatch",
+        "t": "error"
+      },
+      "json": "{\"t\":\"error\",\"code\":\"bad_mac\",\"msg\":\"MAC mismatch\"}",
+      "name": "error",
+      "result": "message",
+      "type": "error"
+    },
+    {
+      "expected": {
+        "code": "unknown_peer",
+        "msg": "",
+        "t": "error"
+      },
+      "json": "{\"t\":\"error\",\"code\":\"unknown_peer\"}",
+      "name": "error without msg (defaults to empty)",
+      "result": "message",
+      "type": "error"
+    },
+    {
+      "expected": {
+        "code": "something_new",
+        "msg": "x",
+        "t": "error"
+      },
+      "json": "{\"t\":\"error\",\"code\":\"something_new\",\"msg\":\"x\"}",
+      "name": "error with unknown code is fine",
+      "result": "message",
+      "type": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"error\",\"msg\":\"x\"}",
+      "name": "error missing code",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "partial",
+        "t": "utt",
+        "text": "hello world",
+        "ts": 1759500000000
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"hello world\",\"ts\":1759500000000}",
+      "name": "utt partial",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "final",
+        "t": "utt",
+        "text": "x",
+        "ts": 1759500000000
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"final\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt final",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "edit",
+        "t": "utt",
+        "text": "x",
+        "ts": 1759500000000
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"edit\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt edit",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "partial",
+        "t": "utt",
+        "text": "",
+        "ts": 1759500000000
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"\",\"ts\":1759500000000}",
+      "name": "utt empty text",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "final",
+        "t": "utt",
+        "text": "café 😀 \"q\" \\ / \n\t",
+        "ts": 1
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"final\",\"text\":\"café 😀 \\\"q\\\" \\\\ \\/ \\n\\t\",\"ts\":1}",
+      "name": "utt escapes and unicode",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "partial",
+        "t": "utt",
+        "text": "naïve café 😀 日本語",
+        "ts": 1759500000000
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"naïve café 😀 日本語\",\"ts\":1759500000000}",
+      "name": "utt raw multibyte UTF-8",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 4294967295,
+        "state": "partial",
+        "t": "utt",
+        "text": "x",
+        "ts": 1759500000000
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":4294967295,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt rev u32 max",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":4294967296,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt rev u32 max + 1",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":-1,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt rev negative",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7.5,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt rev fractional",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":\"7\",\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt rev as string",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "partial",
+        "t": "utt",
+        "text": "x",
+        "ts": 18446744073709551615
+      },
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"x\",\"ts\":18446744073709551615}",
+      "name": "utt ts u64 max",
+      "result": "message",
+      "type": "utt"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"x\",\"ts\":-1}",
+      "name": "utt ts negative",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"volatile\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt unknown state",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"Partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt state wrong case",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"rev\":7,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt missing id",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"not-a-uuid\",\"rev\":7,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "utt bad id",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":null,\"ts\":1759500000000}",
+      "name": "utt text null",
+      "result": "error"
+    },
+    {
+      "json_fill": {
+        "count": 32000,
+        "fill": "a",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"final\",\"text\":\"",
+        "suffix": "\",\"ts\":0}"
+      },
+      "name": "utt text exactly 32000 bytes",
+      "result": "message",
+      "text_bytes": 32000,
+      "type": "utt"
+    },
+    {
+      "error": "text_too_long",
+      "json_fill": {
+        "count": 32001,
+        "fill": "a",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"final\",\"text\":\"",
+        "suffix": "\",\"ts\":0}"
+      },
+      "name": "utt text 32001 bytes",
+      "result": "error"
+    },
+    {
+      "json_fill": {
+        "count": 8000,
+        "fill": "😀",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"final\",\"text\":\"",
+        "suffix": "\",\"ts\":0}"
+      },
+      "name": "utt text 8000 four-byte emoji = 32000 bytes",
+      "result": "message",
+      "text_bytes": 32000,
+      "type": "utt"
+    },
+    {
+      "error": "text_too_long",
+      "json_fill": {
+        "count": 10667,
+        "fill": "日",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"final\",\"text\":\"",
+        "suffix": "\",\"ts\":0}"
+      },
+      "name": "utt text 10667 three-byte chars = 32001 bytes",
+      "result": "error"
+    },
+    {
+      "json_fill": {
+        "count": 32000,
+        "fill": "\\n",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"final\",\"text\":\"",
+        "suffix": "\",\"ts\":0}"
+      },
+      "name": "utt text 32000 escaped newlines (length counts decoded bytes)",
+      "result": "message",
+      "text_bytes": 32000,
+      "type": "utt"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 3,
+        "t": "ack"
+      },
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":3}",
+      "name": "ack",
+      "result": "message",
+      "type": "ack"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\"}",
+      "name": "ack missing rev",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\"}",
+      "name": "ping",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "expected": {
+        "t": "pong"
+      },
+      "json": "{\"t\":\"pong\",\"seq\":1,\"x\":null}",
+      "name": "pong with extra fields",
+      "result": "message",
+      "type": "pong"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": " \n{ \"t\" : \"ping\" }\r\n ",
+      "name": "whitespace around and inside",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "json": "{\"t\":\"typing\",\"id\":\"x\"}",
+      "name": "unknown type",
+      "result": "unknown",
+      "type": "typing"
+    },
+    {
+      "json": "{\"t\":\"\"}",
+      "name": "unknown type empty string",
+      "result": "unknown",
+      "type": ""
+    },
+    {
+      "json": "{\"t\":\"PING\"}",
+      "name": "type is case sensitive",
+      "result": "unknown",
+      "type": "PING"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"id\":\"x\"}",
+      "name": "missing t",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":1}",
+      "name": "t is a number",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":null}",
+      "name": "t is null",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "[{\"t\":\"ping\"}]",
+      "name": "JSON array",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "\"ping\"",
+      "name": "JSON string",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "null",
+      "name": "JSON null",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "",
+      "name": "empty input",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\"",
+      "name": "truncated JSON",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\"}x",
+      "name": "trailing garbage",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\"}{\"t\":\"pong\"}",
+      "name": "two objects",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json_hex": "7b2274223a22757474222c2274657874223a22ff227d",
+      "name": "invalid UTF-8",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json_hex": "efbbbf7b2274223a2270696e67227d",
+      "name": "UTF-8 BOM prefix",
+      "result": "error"
+    },
+    {
+      "json_fill": {
+        "count": 65515,
+        "fill": "a",
+        "prefix": "{\"t\":\"ping\",\"pad\":\"",
+        "suffix": "\"}"
+      },
+      "name": "message of exactly 65536 bytes",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "message_too_large",
+      "json_fill": {
+        "count": 65516,
+        "fill": "a",
+        "prefix": "{\"t\":\"ping\",\"pad\":\"",
+        "suffix": "\"}"
+      },
+      "name": "message of 65537 bytes",
+      "result": "error"
+    },
+    {
+      "error": "message_too_large",
+      "json_fill": {
+        "count": 65517,
+        "fill": "a",
+        "prefix": "{\"t\":\"zzz\",\"pad\":\"",
+        "suffix": "\"}"
+      },
+      "name": "unknown type of 65537 bytes is still too large",
+      "result": "error"
+    }
+  ],
+  "description": "JSON messages (SPEC §4.1, §4.4–4.6). `decode`: the input is `json` (UTF-8 text), `json_hex` (raw bytes) or `json_fill` (prefix + fill repeated count times + suffix, as UTF-8). `result` is `message` (with canonical `expected` object to compare field-by-field; omitted for very large inputs), `unknown` (unknown `t`; log and drop), `hello_unsupported` (`hello` with integer v != 1; `peer_name` is the `name` if it was a string), or `error` with an error code. `encode`: the canonical compact encoding the Rust implementation emits (\"t\" first, then fields in the listed order). Byte-equality of encodings is NOT required across implementations; receivers must accept any valid JSON. `encode_errors`: encoding must fail.",
+  "encode": [
+    {
+      "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "object": {
+        "device_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "name": "Jon's iPhone",
+        "paired": true,
+        "pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "session_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "t": "hello",
+        "v": 1
+      },
+      "type": "hello"
+    },
+    {
+      "json": "{\"t\":\"pair_request\",\"nonce_p\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "object": {
+        "nonce_p": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "t": "pair_request"
+      },
+      "type": "pair_request"
+    },
+    {
+      "json": "{\"t\":\"pair_challenge\",\"nonce_d\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "object": {
+        "nonce_d": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "t": "pair_challenge"
+      },
+      "type": "pair_challenge"
+    },
+    {
+      "json": "{\"t\":\"pair_confirm\",\"mac\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "object": {
+        "mac": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "t": "pair_confirm"
+      },
+      "type": "pair_confirm"
+    },
+    {
+      "json": "{\"t\":\"pair_result\",\"ok\":true,\"mac\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+      "object": {
+        "mac": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "ok": true,
+        "t": "pair_result"
+      },
+      "type": "pair_result"
+    },
+    {
+      "json": "{\"t\":\"pair_result\",\"ok\":false}",
+      "object": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "type": "pair_result"
+    },
+    {
+      "json": "{\"t\":\"error\",\"code\":\"version\",\"msg\":\"Update Ventriloquist on Jon's Mac\"}",
+      "object": {
+        "code": "version",
+        "msg": "Update Ventriloquist on Jon's Mac",
+        "t": "error"
+      },
+      "type": "error"
+    },
+    {
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"line1\\nline2 \\\"quoted\\\" café\",\"ts\":1759500000000}",
+      "object": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 7,
+        "state": "partial",
+        "t": "utt",
+        "text": "line1\nline2 \"quoted\" café",
+        "ts": 1759500000000
+      },
+      "type": "utt"
+    },
+    {
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":3}",
+      "object": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 3,
+        "t": "ack"
+      },
+      "type": "ack"
+    },
+    {
+      "json": "{\"t\":\"ping\"}",
+      "object": {
+        "t": "ping"
+      },
+      "type": "ping"
+    },
+    {
+      "json": "{\"t\":\"pong\"}",
+      "object": {
+        "t": "pong"
+      },
+      "type": "pong"
+    }
+  ],
+  "encode_errors": [
+    {
+      "error": "text_too_long",
+      "name": "utt text 32001 bytes",
+      "text_fill": {
+        "count": 32001,
+        "fill": "a"
+      },
+      "type": "utt"
+    },
+    {
+      "error": "message_too_large",
+      "name": "utt of 32000 U+0001 chars escapes past 64 KiB",
+      "text_fill": {
+        "count": 32000,
+        "fill": "\u0001"
+      },
+      "type": "utt"
+    }
+  ],
+  "vectors_version": 1
+}

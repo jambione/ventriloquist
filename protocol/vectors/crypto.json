@@ -1,0 +1,395 @@
+{
+  "code_format": [
+    {
+      "string": "000000",
+      "value": 0
+    },
+    {
+      "string": "000007",
+      "value": 7
+    },
+    {
+      "string": "000042",
+      "value": 42
+    },
+    {
+      "string": "123456",
+      "value": 123456
+    },
+    {
+      "string": "999999",
+      "value": 999999
+    },
+    {
+      "string": "100000",
+      "value": 100000
+    }
+  ],
+  "code_parse": [
+    {
+      "input": "123456",
+      "valid": true,
+      "value": 123456
+    },
+    {
+      "input": "000000",
+      "valid": true,
+      "value": 0
+    },
+    {
+      "input": "000042",
+      "valid": true,
+      "value": 42
+    },
+    {
+      "input": "12345",
+      "valid": false
+    },
+    {
+      "input": "1234567",
+      "valid": false
+    },
+    {
+      "input": "12a456",
+      "valid": false
+    },
+    {
+      "input": "123 456",
+      "valid": false
+    },
+    {
+      "input": " 12345",
+      "valid": false
+    },
+    {
+      "input": "+12345",
+      "valid": false
+    },
+    {
+      "input": "-12345",
+      "valid": false
+    },
+    {
+      "input": "",
+      "valid": false
+    },
+    {
+      "input": "١٢٣٤٥٦",
+      "valid": false
+    },
+    {
+      "input": "１２３４５６",
+      "valid": false
+    }
+  ],
+  "description": "Identity, pairing and session crypto (SPEC §4.4, §4.5). All binary values are lowercase hex. X25519 per RFC 7748 (private keys are raw 32-byte scalars, clamped on use; an all-zero shared secret MUST be rejected). HKDF-SHA256 per RFC 5869 with the given salt/info, output length 32. MACs are HMAC-SHA256 with K_pair as key over the given *_mac_input bytes.",
+  "full_pairing": [
+    {
+      "code": "123456",
+      "desktop_device_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "desktop_mac": "e4532cc0841830d6db29a1262989ffc1095857ca0eeffe95bfcda93d33796e98",
+      "desktop_priv": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+      "desktop_pub": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "first_ack_envelope": "010000000000000000b099890a49088d98084a2ccb0a81cd53a4b230dd1c32551478d3aad620a9177b638685f081a7004ff33fd150b3e0ab16ee269e80b9388faee97a1c47f745444a7ee86e360e5c93a62e1eea0a88aac9",
+      "first_ack_plaintext_utf8": "{\"t\":\"ack\",\"id\":\"3b241101-e2bb-4255-8caf-4136c566a962\",\"rev\":0}",
+      "first_utt_envelope": "0100000000000000001cf2a3b5c14589b3a272081b3b2b4e4103d5dca156830aa73c939c442ff532d45fe45915a38bbef8451052ff0fc4ad5fd8a1aaba215bf3957aa8ecf780e3f2633bc66e61926069534d6e260dcc918f9d7820e49e0932825693ec452be4a03e64d4868f72ff0875f9ba74282931d1c8acd0a039d82fc220a58487c69af3f560c3e67958df0d1f302af656dfba",
+      "first_utt_plaintext_utf8": "{\"t\":\"utt\",\"id\":\"3b241101-e2bb-4255-8caf-4136c566a962\",\"rev\":0,\"state\":\"final\",\"text\":\"kubectl get pods\",\"ts\":1759500000000}",
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "k_sess": "a6fd799286df4b96c61291224f5b3717ff75750335f514da4a4ebd7685d75e6e",
+      "name": "fresh pairing then first encrypted exchange (RFC 7748 keys)",
+      "nonce_d": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "nonce_p": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "phone_device_id": "a1b2c3d4-e5f6-4789-8abc-def012345678",
+      "phone_mac": "3e1ba6a353b8abf1efa4d83933ff27d2fe7856247086ce1dbb867a542ec02161",
+      "phone_priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "phone_pub": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "session_nonce_desktop": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "session_nonce_phone": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742",
+      "transcript": [
+        {
+          "envelope": "007b2274223a2268656c6c6f222c2276223a312c226465766963655f6964223a2230663866616435622d643963622d343639662d613136352d373038363737323839353065222c226e616d65223a224a6f6e2773204d6163222c22707562223a2233703762665874397762545457324843374f51314e7a2b44513868626547644e7266782b46472b494b30383d222c22706169726564223a66616c73652c2273657373696f6e5f6e6f6e6365223a22594746695932526c5a6d646f615770726247317562334278636e4e3064585a3365486c3665337839666e383d227d",
+          "from": "desktop",
+          "json_utf8": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's Mac\",\"pub\":\"3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=\",\"paired\":false,\"session_nonce\":\"YGFiY2RlZmdoaWprbG1ub3BxcnN0dXZ3eHl6e3x9fn8=\"}"
+        },
+        {
+          "envelope": "007b2274223a2268656c6c6f222c2276223a312c226465766963655f6964223a2261316232633364342d653566362d343738392d386162632d646566303132333435363738222c226e616d65223a224a6f6e2773206950686f6e65222c22707562223a226853447743596b777031523069333363744437335767322f4f67306d4f427230363653706a717162546d6f3d222c22706169726564223a66616c73652c2273657373696f6e5f6e6f6e6365223a225145464351305246526b64495355704c5445314f54314252556c4e5556565a5857466c6157317864586c383d227d",
+          "from": "phone",
+          "json_utf8": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"a1b2c3d4-e5f6-4789-8abc-def012345678\",\"name\":\"Jon's iPhone\",\"pub\":\"hSDwCYkwp1R0i33ctD73Wg2/Og0mOBr066SpjqqbTmo=\",\"paired\":false,\"session_nonce\":\"QEFCQ0RFRkdISUpLTE1OT1BRUlNUVVZXWFlaW1xdXl8=\"}"
+        },
+        {
+          "envelope": "007b2274223a22706169725f72657175657374222c226e6f6e63655f70223a2241414543417751464267634943516f4c4441304f4478415245684d554652595847426b61477877644868383d227d",
+          "from": "phone",
+          "json_utf8": "{\"t\":\"pair_request\",\"nonce_p\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}"
+        },
+        {
+          "envelope": "007b2274223a22706169725f6368616c6c656e6765222c226e6f6e63655f64223a22494345694979516c4a69636f4b536f724c4330754c7a41784d6a4d304e5459334f446b364f7a7739506a383d227d",
+          "from": "desktop",
+          "json_utf8": "{\"t\":\"pair_challenge\",\"nonce_d\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}"
+        },
+        {
+          "envelope": "007b2274223a22706169725f636f6e6669726d222c226d6163223a225068756d6f314f34712f4876704e67354d2f386e30763534566952776873346475345a36564337414957453d227d",
+          "from": "phone",
+          "json_utf8": "{\"t\":\"pair_confirm\",\"mac\":\"Phumo1O4q/HvpNg5M/8n0v54ViRwhs4du4Z6VC7AIWE=\"}"
+        },
+        {
+          "envelope": "007b2274223a22706169725f726573756c74222c226f6b223a747275652c226d6163223a2235464d73774951594d4e62624b61456d4b596e2f77516c5956386f4f372f36567638327050544e356270673d227d",
+          "from": "desktop",
+          "json_utf8": "{\"t\":\"pair_result\",\"ok\":true,\"mac\":\"5FMswIQYMNbbKaEmKYn/wQlYV8oO7/6Vv82pPTN5bpg=\"}"
+        }
+      ]
+    }
+  ],
+  "pair_key": [
+    {
+      "code": "123456",
+      "info": "76712f706169722f7631313233343536",
+      "info_ascii": "vq/pair/v1123456",
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "length": 32,
+      "name": "RFC 7748 shared secret, code 123456",
+      "nonce_d": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "nonce_p": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "salt": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "code": "000000",
+      "info": "76712f706169722f7631303030303030",
+      "info_ascii": "vq/pair/v1000000",
+      "k_pair": "052a151573548e9948cd8cb8097e485438d1a00a8f211bb8c040dbc7a17cabae",
+      "length": 32,
+      "name": "code 000000",
+      "nonce_d": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "nonce_p": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "salt": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "code": "000042",
+      "info": "76712f706169722f7631303030303432",
+      "info_ascii": "vq/pair/v1000042",
+      "k_pair": "a7173f1842d633f274053022ea509d9acc6f75b498daa9d991141083f828524a",
+      "length": 32,
+      "name": "code 000042 (zero padding)",
+      "nonce_d": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "nonce_p": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "salt": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "code": "999999",
+      "info": "76712f706169722f7631393939393939",
+      "info_ascii": "vq/pair/v1999999",
+      "k_pair": "60b67577fb99c3bb43e9c88bee013eb3dc4af0a96d34e352ee9b9dc6abc95a3c",
+      "length": 32,
+      "name": "code 999999",
+      "nonce_d": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "nonce_p": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "salt": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "code": "123456",
+      "info": "76712f706169722f7631313233343536",
+      "info_ascii": "vq/pair/v1123456",
+      "k_pair": "670d9b13c022df68d2325787a62db5caa3f5b3a15dee1be3c6985912128f8ce5",
+      "length": 32,
+      "name": "nonces swapped vs. first case",
+      "nonce_d": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "nonce_p": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "salt": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "code": "314159",
+      "info": "76712f706169722f7631333134313539",
+      "info_ascii": "vq/pair/v1314159",
+      "k_pair": "fdc1aba98cf80e1cdb71702ea89990ad12aa4e6c95d58e725815f3065a21eee0",
+      "length": 32,
+      "name": "other shared secret",
+      "nonce_d": "1111111111111111111111111111111111111111111111111111111111111111",
+      "nonce_p": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "salt": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee1111111111111111111111111111111111111111111111111111111111111111",
+      "shared": "554efec8afb1a511b412d46d1b669b172fc785c140e590b39ba36c522c1f4619"
+    }
+  ],
+  "pair_mac": [
+    {
+      "desktop_mac": "e4532cc0841830d6db29a1262989ffc1095857ca0eeffe95bfcda93d33796e98",
+      "desktop_mac_input": "6465736b746f70de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "name": "RFC 7748 keys, K_pair from first pair_key case",
+      "phone_mac": "3e1ba6a353b8abf1efa4d83933ff27d2fe7856247086ce1dbb867a542ec02161",
+      "phone_mac_input": "70686f6e658520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6ade9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_desktop": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_phone": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a"
+    },
+    {
+      "desktop_mac": "e85670ee65bad91a7ed3cb7b4699d978d12555eff1f4b0dcf91f7b2cfe43b695",
+      "desktop_mac_input": "6465736b746f70847c0d2c375234f365e660955187a3735a0f7613d1609d3a6a4d8c53aeaa5a22605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c",
+      "k_pair": "55565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f7071727374",
+      "name": "patterned keys and K_pair",
+      "phone_mac": "4e2e12a0405863d7df2dd4319dfeaba8a7e4717e92d5fd4f31a1e980e6fa024f",
+      "phone_mac_input": "70686f6e65605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c847c0d2c375234f365e660955187a3735a0f7613d1609d3a6a4d8c53aeaa5a22",
+      "pub_desktop": "847c0d2c375234f365e660955187a3735a0f7613d1609d3a6a4d8c53aeaa5a22",
+      "pub_phone": "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c"
+    }
+  ],
+  "pair_mac_verify": [
+    {
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "kind": "phone",
+      "mac": "3e1ba6a353b8abf1efa4d83933ff27d2fe7856247086ce1dbb867a542ec02161",
+      "name": "phone MAC verifies",
+      "pub_desktop": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_phone": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "valid": true
+    },
+    {
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "kind": "desktop",
+      "mac": "e4532cc0841830d6db29a1262989ffc1095857ca0eeffe95bfcda93d33796e98",
+      "name": "desktop MAC verifies",
+      "pub_desktop": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_phone": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "valid": true
+    },
+    {
+      "k_pair": "634b6f6addc0a456490dd0c4b80e29a6110ed688ebb35e63227238e590902401",
+      "kind": "phone",
+      "mac": "3e1ba6a353b8abf1efa4d83933ff27d2fe7856247086ce1dbb867a542ec02161",
+      "name": "phone MAC made with code 123456, verified with K_pair for 123457",
+      "pub_desktop": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_phone": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "valid": false
+    },
+    {
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "kind": "desktop",
+      "mac": "3e1ba6a353b8abf1efa4d83933ff27d2fe7856247086ce1dbb867a542ec02161",
+      "name": "phone MAC presented as desktop MAC (role confusion)",
+      "pub_desktop": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_phone": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "valid": false
+    },
+    {
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "kind": "phone",
+      "mac": "e4532cc0841830d6db29a1262989ffc1095857ca0eeffe95bfcda93d33796e98",
+      "name": "desktop MAC presented as phone MAC",
+      "pub_desktop": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_phone": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "valid": false
+    },
+    {
+      "k_pair": "3ddb83b75b1aaca421f1fe2c9dfeed1a8f63eabc58d34aaabdef2dad02254f36",
+      "kind": "phone",
+      "mac": "3e1ba6a353b8abf1efa4d83933ff27d2fe7856247086ce1dbb867a542ec02160",
+      "name": "phone MAC with one bit flipped",
+      "pub_desktop": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "pub_phone": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "valid": false
+    }
+  ],
+  "session_key": [
+    {
+      "info": "76712f73657373696f6e2f7631",
+      "info_ascii": "vq/session/v1",
+      "k_sess": "a6fd799286df4b96c61291224f5b3717ff75750335f514da4a4ebd7685d75e6e",
+      "length": 32,
+      "name": "RFC 7748 shared secret",
+      "nonce_desktop": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "nonce_phone": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "salt": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "info": "76712f73657373696f6e2f7631",
+      "info_ascii": "vq/session/v1",
+      "k_sess": "0ab7a777d0e8bb22b3135f156914659bbc85dce46191b049a408c84f14a7b875",
+      "length": 32,
+      "name": "nonces swapped",
+      "nonce_desktop": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "nonce_phone": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "salt": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "info": "76712f73657373696f6e2f7631",
+      "info_ascii": "vq/session/v1",
+      "k_sess": "e1b473881dcd23bf120b4f4f118aa88fbd36c498371c6a76254be3cef3f5e4eb",
+      "length": 32,
+      "name": "other shared secret",
+      "nonce_desktop": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "nonce_phone": "0000000000000000000000000000000000000000000000000000000000000000",
+      "salt": "0000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "shared": "554efec8afb1a511b412d46d1b669b172fc785c140e590b39ba36c522c1f4619"
+    }
+  ],
+  "vectors_version": 1,
+  "x25519": [
+    {
+      "name": "RFC 7748 §6.1",
+      "priv_a": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "priv_b": "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb",
+      "pub_a": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "pub_b": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "name": "patterned keys (a0..bf and ff..ff; clamping applies)",
+      "priv_a": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "priv_b": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "pub_a": "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c",
+      "pub_b": "847c0d2c375234f365e660955187a3735a0f7613d1609d3a6a4d8c53aeaa5a22",
+      "shared": "554efec8afb1a511b412d46d1b669b172fc785c140e590b39ba36c522c1f4619"
+    },
+    {
+      "name": "RFC 7748 Alice with patterned key",
+      "priv_a": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "priv_b": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+      "pub_a": "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a",
+      "pub_b": "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c",
+      "shared": "1f7c355063e79bf8f8ab4ee1988f9da5563e07bd76df142cbbfbad1f52b56d0b"
+    }
+  ],
+  "x25519_errors": [
+    {
+      "error": "non_contributory",
+      "name": "all-zero public key",
+      "peer_pub": "0000000000000000000000000000000000000000000000000000000000000000",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "u = 1 (low order)",
+      "peer_pub": "0100000000000000000000000000000000000000000000000000000000000000",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "order-8 point",
+      "peer_pub": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "order-8 point (2)",
+      "peer_pub": "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "p-1",
+      "peer_pub": "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "p (non-canonical 0)",
+      "peer_pub": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    }
+  ]
+}

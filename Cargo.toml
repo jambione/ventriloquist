@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["protocol"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
