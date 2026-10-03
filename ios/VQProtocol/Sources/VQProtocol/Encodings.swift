@@ -74,11 +74,17 @@ public enum Base64 {
     /// Strictly decode `s` into exactly `length` bytes, or `nil`.
     ///
     /// Rejects whitespace, the URL-safe alphabet, missing / extra / misplaced
-    /// padding, non-zero trailing bits and any other decoded length.
+    /// padding, non-zero trailing bits and any other decoded length. Any
+    /// `length` (negative, or near `Int.max`) is safe and yields `nil` when
+    /// it cannot match.
     public static func decode(_ s: String, length: Int) -> [UInt8]? {
         let chars = Array(s.utf8)
+        // Bound `length` before any arithmetic on it: every 4 characters carry
+        // at most 3 bytes, so a valid `length` never exceeds `chars.count`
+        // (which also keeps `(length + 2) / 3 * 4` from overflowing).
+        guard length >= 0, length <= chars.count else { return nil }
         let pad = (3 - length % 3) % 3
-        guard length >= 0, chars.count == (length + 2) / 3 * 4 else { return nil }
+        guard chars.count == (length + 2) / 3 * 4 else { return nil }
         let dataChars = chars.count - pad
         for j in dataChars..<chars.count where chars[j] != UInt8(ascii: "=") { return nil }
         var vals = [UInt8]()

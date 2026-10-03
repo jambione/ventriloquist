@@ -48,13 +48,13 @@ struct MessageVectorTests {
                 case .unknown, .helloUnsupported: Issue.record("\(name): got \(m)")
                 default: break
                 }
-                #expect(m.typeName == c["type"].str, "\(name)")
+                #expect(sameBytes(m.typeName, c["type"].str), "\(name)")
                 try checkExpected(name, c, m)
             case ("unknown", .success(.unknown(let t))):
-                #expect(t == c["type"].str, "\(name)")
+                #expect(sameBytes(t, c["type"].str), "\(name)")
             case ("hello_unsupported", .success(.helloUnsupported(let h))):
                 #expect(h.v == c["v"].u64, "\(name)")
-                #expect(h.name == c["peer_name"].strOrNil, "\(name)")
+                #expect(sameBytes(h.name, c["peer_name"].strOrNil), "\(name)")
             case ("error", .failure(let e)):
                 #expect(e.code == c["error"].str, "\(name): \(e)")
             case (let want, let got):

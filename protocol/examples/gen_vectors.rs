@@ -1853,6 +1853,12 @@ fn messages() -> Value {
     let mut cases = cases;
     let ack = |rev: &str| t(&format!(r#"{{"t":"ack","id":"{id}","rev":{rev}}}"#));
     let ping_with = |member: &str| t(&format!(r#"{{"t":"ping","x":{member}}}"#));
+    let long_num = |prefix: &str, fill: &str, count: usize, suffix: &str| In::Fill {
+        prefix: prefix.to_owned(),
+        fill: fill.to_owned(),
+        count,
+        suffix: suffix.to_owned(),
+    };
     let arrays = |k: usize| format!("{}{}", "[".repeat(k), "]".repeat(k));
     let objects = |k: usize| format!("{}{{}}{}", "{\"a\":".repeat(k - 1), "}".repeat(k - 1));
     let zeros = b64::encode(&[0u8; 32]);
@@ -1925,6 +1931,49 @@ fn messages() -> Value {
         (
             "R1 1e400 in hello.v is invalid_json",
             t(r#"{"t":"hello","v":1e400}"#),
+        ),
+        // ---- R1: number tokens longer than 16 KiB (Swift's Double(String)
+        // limit). Finiteness depends only on the rounded value, not the length.
+        (
+            "R1 30000-digit fraction 1.000…0 is finite",
+            long_num(r#"{"t":"ping","x":1."#, "0", 30_000, "}"),
+        ),
+        (
+            "R1 0.000…01 with 30000 zeros is finite",
+            long_num(r#"{"t":"ping","x":0."#, "0", 30_000, "1}"),
+        ),
+        (
+            "R1 0.(30000 zeros)1e30300 ≈ 1e299 is finite",
+            long_num(r#"{"t":"ping","x":0."#, "0", 30_000, "1e30300}"),
+        ),
+        (
+            "R1 0.(30000 zeros)1e30310 ≈ 1e309 overflows",
+            long_num(r#"{"t":"ping","x":0."#, "0", 30_000, "1e30310}"),
+        ),
+        (
+            "R1 exponent with 20000 leading zeros, 1e308, is finite",
+            long_num(r#"{"t":"ping","x":1e"#, "0", 20_000, "308}"),
+        ),
+        (
+            "R1 exponent with 20000 leading zeros, 1e309, overflows",
+            long_num(r#"{"t":"ping","x":1e"#, "0", 20_000, "309}"),
+        ),
+        (
+            "R1 20000-digit integer 111…1e-19700 ≈ 1.1e299 is finite",
+            long_num(r#"{"t":"ping","x":"#, "1", 20_000, "e-19700}"),
+        ),
+        (
+            "R1 20000 nines overflow",
+            long_num(r#"{"t":"ping","x":"#, "9", 20_000, "}"),
+        ),
+        (
+            "tie: utt.rev 1.000… (20000 zeros) is finite, so invalid_message",
+            long_num(
+                &format!(r#"{{"t":"utt","id":"{id}","rev":1."#),
+                "0",
+                20_000,
+                r#","state":"partial","text":"x","ts":1759500000000}"#,
+            ),
         ),
         // ---- R1: lone surrogates
         (

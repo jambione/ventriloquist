@@ -395,10 +395,11 @@ struct CryptoTests {
 
     @Test func secretRoundtripAndRedaction() throws {
         let a = IdentityKeyPair.generate()
-        let b = try #require(IdentityKeyPair(secretBytes: a.secretBytes))
+        let raw = a.withSecretBytes { Array($0) }
+        let b = try #require(IdentityKeyPair(secretBytes: raw))
         #expect(a.publicBytes == b.publicBytes)
         #expect(IdentityKeyPair(secretBytes: [UInt8](repeating: 1, count: 31)) == nil)
-        let secretHex = hexString(a.secretBytes)
+        let secretHex = hexString(raw)
         #expect(!String(describing: a).contains(secretHex))
         let ss = try a.sharedSecret(peerPublic: IdentityKeyPair.generate().publicBytes)
         #expect(String(describing: ss) == "SharedSecret(..)")
@@ -476,12 +477,17 @@ struct CryptoTests {
         #expect(pairInfo(PairingCode(value: 1234)!) == Array("vq/pair/v1001234".utf8))
     }
 
-    @Test func codeGenerationIsUniform() {
+    /// Codes come from the standard library's unbiased bounded sampler
+    /// (`UInt32.random(in: 0..<1_000_000, using:)`, no modulo bias); this
+    /// checks the delegation exactly, plus a coarse range/bucket sanity check.
+    @Test func codeGenerationDelegatesToUnbiasedSampler() {
         var rng = SplitMix64(state: 1)
+        var mirror = rng
         var buckets = [Int](repeating: 0, count: 10)
         let n = 200_000
         for _ in 0..<n {
             let c = PairingCode.generate(using: &rng)
+            #expect(c.value == UInt32.random(in: 0..<1_000_000, using: &mirror))
             if c.value >= 1_000_000 { Issue.record("out of range: \(c.value)") }
             buckets[Int(c.value / 100_000)] += 1
         }

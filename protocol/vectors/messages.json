@@ -771,6 +771,120 @@
       "result": "error"
     },
     {
+      "expected": {
+        "t": "ping"
+      },
+      "json_fill": {
+        "count": 30000,
+        "fill": "0",
+        "prefix": "{\"t\":\"ping\",\"x\":1.",
+        "suffix": "}"
+      },
+      "name": "R1 30000-digit fraction 1.000…0 is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json_fill": {
+        "count": 30000,
+        "fill": "0",
+        "prefix": "{\"t\":\"ping\",\"x\":0.",
+        "suffix": "1}"
+      },
+      "name": "R1 0.000…01 with 30000 zeros is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json_fill": {
+        "count": 30000,
+        "fill": "0",
+        "prefix": "{\"t\":\"ping\",\"x\":0.",
+        "suffix": "1e30300}"
+      },
+      "name": "R1 0.(30000 zeros)1e30300 ≈ 1e299 is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json_fill": {
+        "count": 30000,
+        "fill": "0",
+        "prefix": "{\"t\":\"ping\",\"x\":0.",
+        "suffix": "1e30310}"
+      },
+      "name": "R1 0.(30000 zeros)1e30310 ≈ 1e309 overflows",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json_fill": {
+        "count": 20000,
+        "fill": "0",
+        "prefix": "{\"t\":\"ping\",\"x\":1e",
+        "suffix": "308}"
+      },
+      "name": "R1 exponent with 20000 leading zeros, 1e308, is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json_fill": {
+        "count": 20000,
+        "fill": "0",
+        "prefix": "{\"t\":\"ping\",\"x\":1e",
+        "suffix": "309}"
+      },
+      "name": "R1 exponent with 20000 leading zeros, 1e309, overflows",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json_fill": {
+        "count": 20000,
+        "fill": "1",
+        "prefix": "{\"t\":\"ping\",\"x\":",
+        "suffix": "e-19700}"
+      },
+      "name": "R1 20000-digit integer 111…1e-19700 ≈ 1.1e299 is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json_fill": {
+        "count": 20000,
+        "fill": "9",
+        "prefix": "{\"t\":\"ping\",\"x\":",
+        "suffix": "}"
+      },
+      "name": "R1 20000 nines overflow",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json_fill": {
+        "count": 20000,
+        "fill": "0",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1.",
+        "suffix": ",\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}"
+      },
+      "name": "tie: utt.rev 1.000… (20000 zeros) is finite, so invalid_message",
+      "result": "error"
+    },
+    {
       "error": "invalid_json",
       "json": "{\"t\":\"ping\",\"x\":\"\\ud800\"}",
       "name": "R1 lone high surrogate in an ignored member",

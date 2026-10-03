@@ -20,12 +20,12 @@ indirect enum JV: CustomStringConvertible {
     case obj([(String, JV)])
 
     subscript(_ k: String) -> JV {
-        if case .obj(let m) = self, let v = m.first(where: { $0.0 == k })?.1 { return v }
+        if case .obj(let m) = self, let v = m.first(where: { sameBytes($0.0, k) })?.1 { return v }
         return .null
     }
 
     func has(_ k: String) -> Bool {
-        if case .obj(let m) = self { return m.contains { $0.0 == k } }
+        if case .obj(let m) = self { return m.contains { sameBytes($0.0, k) } }
         return false
     }
 
@@ -332,4 +332,14 @@ func result<T>(_ body: () throws(VQError) -> T) -> Result<T, VQError> {
 extension Result where Failure == VQError {
     var errorCode: String? { if case .failure(let e) = self { e.code } else { nil } }
     var value: Success? { if case .success(let v) = self { v } else { nil } }
+}
+
+/// String equality as UTF-8 bytes (Q21), never Swift's canonical-equivalence
+/// `String ==`, so a precomposed/decomposed or KELVIN SIGN mismatch fails.
+func sameBytes(_ a: String?, _ b: String?) -> Bool {
+    switch (a, b) {
+    case (nil, nil): true
+    case (let x?, let y?): x.utf8.elementsEqual(y.utf8)
+    default: false
+    }
 }

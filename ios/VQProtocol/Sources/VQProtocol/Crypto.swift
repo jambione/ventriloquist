@@ -57,8 +57,21 @@ public struct IdentityKeyPair: Sendable, CustomStringConvertible {
         privateKey = k
     }
 
-    /// The raw 32-byte private key, for persistent (Keychain) storage.
-    public var secretBytes: Data { privateKey.rawRepresentation }
+    /// Lend the raw 32-byte private key to `body`, for writing it to
+    /// persistent storage (the Keychain, e.g. as a `kSecClassGenericPassword`
+    /// item's `kSecValueData`). The buffer is only valid inside `body`; do
+    /// not let it escape, log it or keep a copy in other long-lived memory.
+    /// Restore with ``init(secretBytes:)``, or keep the CryptoKit key and use
+    /// ``init(privateKey:)``.
+    ///
+    /// There is deliberately no `Data`/`[UInt8]` getter, so the secret is not
+    /// handed out as a value that silently outlives its one legitimate use.
+    /// (The buffer is CryptoKit's own `rawRepresentation`; it is not wiped
+    /// here, because mutating it could write through to the key's storage.)
+    public func withSecretBytes<R, E: Error>(_ body: (UnsafeRawBufferPointer) throws(E) -> R) throws(E) -> R {
+        let raw = privateKey.rawRepresentation
+        return try raw.withUnsafeBytes { (p) throws(E) -> R in try body(p) }
+    }
 
     /// The 32-byte public key (`hello.pub`).
     public var publicBytes: Bytes32 { Bytes32(privateKey.publicKey.rawRepresentation)! }
@@ -130,8 +143,10 @@ public struct PairingCode: Hashable, Sendable, CustomStringConvertible {
         return generate(using: &rng)
     }
 
-    /// Uniformly random code; `random(in:)` samples without modulo bias.
-    public static func generate(using rng: inout some RandomNumberGenerator) -> PairingCode {
+    /// Uniformly random code from `rng`; `random(in:)` samples without modulo
+    /// bias. Internal: production codes come only from ``generate()`` (the
+    /// system CSPRNG); this exists so tests can use a seeded generator.
+    static func generate(using rng: inout some RandomNumberGenerator) -> PairingCode {
         PairingCode(unchecked: UInt32.random(in: 0..<1_000_000, using: &rng))
     }
 

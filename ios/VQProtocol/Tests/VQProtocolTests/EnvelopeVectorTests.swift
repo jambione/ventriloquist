@@ -44,7 +44,7 @@ func checkInbound(_ name: String, _ c: JV, _ got: Result<Inbound, VQError>) thro
         case .unknown, .helloUnsupported: Issue.record("\(name): got \(m)")
         default: break
         }
-        #expect(m.typeName == c["type"].str, "\(name)")
+        #expect(sameBytes(m.typeName, c["type"].str), "\(name)")
         try checkExpected(name, c, m)
     case ("unknown", .success(let i)):
         auth(i)
@@ -52,16 +52,16 @@ func checkInbound(_ name: String, _ c: JV, _ got: Result<Inbound, VQError>) thro
             Issue.record("\(name): want unknown, got \(i)")
             return
         }
-        #expect(t == c["type"].str, "\(name)")
+        #expect(sameBytes(t, c["type"].str), "\(name)")
     case ("hello_unsupported", .success(let i)):
         auth(i)
         guard case .helloUnsupported(let h) = i.message else {
             Issue.record("\(name): want hello_unsupported, got \(i)")
             return
         }
-        #expect(i.message.typeName == c["type"].str, "\(name)")
+        #expect(sameBytes(i.message.typeName, c["type"].str), "\(name)")
         #expect(h.v == c["v"].u64, "\(name)")
-        #expect(h.name == c["peer_name"].strOrNil, "\(name)")
+        #expect(sameBytes(h.name, c["peer_name"].strOrNil), "\(name)")
     case ("error", .failure(let e)):
         #expect(e.code == c["error"].str, "\(name): \(e)")
     case (let want, let got):
@@ -158,7 +158,7 @@ struct EnvelopeVectorTests {
             }
             switch (c["result"].str, got) {
             case ("ok", .success(let i)):
-                #expect(i.message.typeName == c["type"].str, "\(name)")
+                #expect(sameBytes(i.message.typeName, c["type"].str), "\(name)")
                 #expect(i.isAuthenticated == c["authenticated"].bool, "\(name)")
             case ("error", .failure(let e)):
                 #expect(e.code == c["error"].str, "\(name)")

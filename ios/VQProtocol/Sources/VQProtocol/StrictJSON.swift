@@ -90,6 +90,44 @@ enum StrictJSON {
         return true
     }
 
+    /// Whether a grammar-checked number, rounded to the nearest binary64
+    /// (ties to even), is finite. Works for tokens of any length.
+    ///
+    /// `Double(String)` alone is not enough: it returns `nil` for any string
+    /// longer than 16,384 bytes, where Rust's `f64` parser accepts the token.
+    /// So the decision is made on the digits: with the significand written
+    /// as `0.d1d2… × 10^E` (d1 ≠ 0), the value is below 10^308 (finite) when
+    /// E ≤ 308 and at least 10^309 (infinite) when E ≥ 310. Only E = 309 is
+    /// close to the overflow threshold 2^1024 − 2^970; then a short token —
+    /// at most 800 significant digits, plus a sticky `1` if non-zero digits
+    /// were dropped — is rounded by `Double(String)`. No binary64 rounding
+    /// boundary near 10^308 needs more than 309 significant digits, so the
+    /// shortened token rounds exactly like the original.
+    static func isFinite(_ b: [UInt8], int: Range<Int>, frac: Range<Int>,
+                         expNegative: Bool, exp: Range<Int>) -> Bool {
+        let digitCount = int.count + frac.count
+        func digit(_ k: Int) -> UInt8 { k < int.count ? b[int.lowerBound + k] : b[frac.lowerBound + k - int.count] }
+        // First non-zero significand digit; all zeros means the value is ±0.
+        var first = 0
+        while first < digitCount && digit(first) == 0x30 { first += 1 }
+        if first == digitCount { return true }
+        // Saturating exponent: anything beyond ±10^12 is far outside range.
+        let cap = 1_000_000_000_000
+        var e = 0
+        for k in exp where e < cap { e = min(cap, e * 10 + Int(b[k] - 0x30)) }
+        if expNegative { e = -e }
+        let decimalExponent = int.count - first + e
+        if decimalExponent <= 308 { return true }
+        if decimalExponent >= 310 { return false }
+        var token = [UInt8]("0.".utf8)
+        let keep = min(digitCount, first + 800)
+        for k in first..<keep { token.append(digit(k)) }
+        if (keep..<digitCount).contains(where: { digit($0) != 0x30 }) { token.append(0x31) }
+        token.append(contentsOf: "e\(decimalExponent)".utf8)
+        guard let d = Double(String(decoding: token, as: UTF8.self)) else { return false }
+        return d.isFinite
+    }
+
     fileprivate static func bad(_ why: String) -> VQError { .invalidJSON(why) }
 
     private struct Parser {
@@ -210,28 +248,36 @@ enum StrictJSON {
         mutating func number() throws(VQError) -> String {
             let start = i
             if peek() == UInt8(ascii: "-") { i += 1 }
+            let intStart = i
             switch peek() {
             case UInt8(ascii: "0"): i += 1
             case let c? where c >= 0x31 && c <= 0x39: _ = digits()
             default: throw bad("invalid number")
             }
+            let intDigits = intStart..<i
+            var fracDigits = i..<i
             if peek() == UInt8(ascii: ".") {
                 i += 1
+                let f = i
                 guard digits() > 0 else { throw bad("invalid number") }
+                fracDigits = f..<i
             }
+            var expNegative = false
+            var expDigits = i..<i
             if peek() == UInt8(ascii: "e") || peek() == UInt8(ascii: "E") {
                 i += 1
-                if peek() == UInt8(ascii: "+") || peek() == UInt8(ascii: "-") { i += 1 }
+                if peek() == UInt8(ascii: "+") || peek() == UInt8(ascii: "-") {
+                    expNegative = b[i] == UInt8(ascii: "-")
+                    i += 1
+                }
+                let e = i
                 guard digits() > 0 else { throw bad("invalid number") }
+                expDigits = e..<i
             }
-            let raw = String(decoding: b[start..<i], as: UTF8.self)
-            // Swift's Double(String) is correctly rounded (round-to-nearest-even)
-            // and yields ±infinity on overflow. The token is already
-            // grammar-checked, so the hex / "nan" / "inf" forms it would
-            // otherwise accept cannot reach it.
-            guard let d = Double(raw) else { throw bad("invalid number") }
-            guard d.isFinite else { throw bad("number is not finite as a binary64 double") }
-            return raw
+            guard StrictJSON.isFinite(b, int: intDigits, frac: fracDigits,
+                                      expNegative: expNegative, exp: expDigits)
+            else { throw bad("number is not finite as a binary64 double") }
+            return String(decoding: b[start..<i], as: UTF8.self)
         }
 
         mutating func hex4() throws(VQError) -> UInt32 {

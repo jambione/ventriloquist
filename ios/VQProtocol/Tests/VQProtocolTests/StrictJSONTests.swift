@@ -80,6 +80,28 @@ struct StrictJSONTests {
         err("1e999999999999999999999")
         ok("1e-999999999999999999999")
         ok("-0.0")
+        // Tokens longer than Swift's 16,384-byte Double(String) limit (C1):
+        // finiteness is decided from the digits, as Rust's f64 parser does.
+        let z = { (n: Int) in String(repeating: "0", count: n) }
+        ok("1." + z(65_000))
+        ok("0." + z(65_000) + "1")
+        ok("0." + z(60_000) + "1e60300") // ≈ 1e299
+        err("0." + z(60_000) + "1e60310") // ≈ 1e309
+        ok("1e" + z(20_000) + "308")
+        err("1e" + z(20_000) + "309")
+        ok("1e-" + z(20_000) + "400")
+        ok(String(repeating: "1", count: 20_000) + "e-19700") // ≈ 1.1e299
+        err(String(repeating: "1", count: 20_000) + "e-19600") // ≈ 1.1e399
+        ok(String(repeating: "9", count: 20_000) + "e-19692") // 9.99…e307
+        // Around the overflow midpoint 2^1024 − 2^970 with long tails.
+        let mid = "179769313486231580793728971405303415079934132710037826936173778980444968292764750946649017977587207096330286416692887910946555547851940402630657488671505820681908902000708383676273854845817711531764475730270069855571366959622842914819860834936475292719074168444365510704342711559699508093042880177904174497792"
+        let below = String(mid.dropLast()) + "1." + String(repeating: "9", count: 20_000)
+        err(mid)                              // exactly the midpoint: ties-to-even → ∞
+        ok(below)                             // just below the midpoint
+        err(mid + "." + z(20_000) + "1")      // just above
+        ok("0." + String(mid.dropLast()) + "1" + String(repeating: "9", count: 20_000) + "e309")
+        err("0." + mid + z(20_000) + "e309")
+        err("0." + mid + z(20_000) + "1e309")
     }
 
     @Test func surrogates() {
@@ -122,9 +144,11 @@ struct StrictJSONTests {
     }
 
     @Test func messageLevelUsesBytes() throws {
-        // A `t` canonically equivalent to, but not byte-equal to, a known type is unknown.
-        let m = try Message.fromJSON(Array("{\"t\":\"pin\u{0067}\"}".utf8))
+        // A JSON `\u` escape is decoded before `t` is matched: `\u0070ing` is
+        // byte-equal to "ping" after unescaping.
+        let m = try Message.fromJSON(Array(#"{"t":"\u0070ing"}"#.utf8))
         #expect(m == .ping)
+        // A `t` canonically equivalent to, but not byte-equal to, a known type is unknown.
         let k = try Message.fromJSON(Array("{\"t\":\"\u{212A}\"}".utf8))
         guard case .unknown(let t) = k else {
             Issue.record("want unknown")
