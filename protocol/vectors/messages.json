@@ -405,6 +405,13 @@
       "result": "error"
     },
     {
+      "expected_without_text": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 1,
+        "state": "final",
+        "t": "utt",
+        "ts": 0
+      },
       "json_fill": {
         "count": 32000,
         "fill": "a",
@@ -428,6 +435,13 @@
       "result": "error"
     },
     {
+      "expected_without_text": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 1,
+        "state": "final",
+        "t": "utt",
+        "ts": 0
+      },
       "json_fill": {
         "count": 8000,
         "fill": "😀",
@@ -451,6 +465,13 @@
       "result": "error"
     },
     {
+      "expected_without_text": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 1,
+        "state": "final",
+        "t": "utt",
+        "ts": 0
+      },
       "json_fill": {
         "count": 32000,
         "fill": "\\n",
@@ -597,6 +618,9 @@
       "result": "error"
     },
     {
+      "expected": {
+        "t": "ping"
+      },
       "json_fill": {
         "count": 65515,
         "fill": "a",
@@ -628,9 +652,503 @@
       },
       "name": "unknown type of 65537 bytes is still too large",
       "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\",\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "name": "R1 depth 32 (31 nested arrays in an ignored member) is allowed",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "name": "R1 depth 33 (32 nested arrays in an ignored member) is invalid_json",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\",\"x\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "name": "R1 depth 32 with nested objects is allowed",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "name": "R1 depth 33 with nested objects is invalid_json",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"future\",\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "name": "R1 depth 200 in an unknown type is invalid_json",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "name": "R1 top-level array of depth 33 is invalid_json (not invalid_message)",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]",
+      "name": "R1 top-level array of depth 32 is invalid_message (valid JSON, not an object)",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":1e400}",
+      "name": "R1 1e400 in an ignored member",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":[{\"y\":-1e400}]}",
+      "name": "R1 -1e400 nested in an ignored member",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":1e309}",
+      "name": "R1 1e309 overflows binary64",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\",\"x\":1.7976931348623157e308}",
+      "name": "R1 1.7976931348623157e308 (max double) is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":1.7976931348623159e308}",
+      "name": "R1 1.7976931348623159e308 rounds to infinity",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\",\"x\":1e-400}",
+      "name": "R1 1e-400 underflows to 0 and is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\",\"x\":123456789012345678901234567890123456789}",
+      "name": "R1 39-digit integer in an ignored member is finite",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"future\",\"x\":1e400}",
+      "name": "R1 1e400 in unknown type",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1e400,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "R1 1e400 in utt.rev is invalid_json, not invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"hello\",\"v\":1e400}",
+      "name": "R1 1e400 in hello.v is invalid_json",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":\"\\ud800\"}",
+      "name": "R1 lone high surrogate in an ignored member",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":\"\\udfff\"}",
+      "name": "R1 lone low surrogate in an ignored member",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":\"\\ud800A\"}",
+      "name": "R1 high surrogate followed by a non-escape",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":\"\\ud800A\"}",
+      "name": "R1 high surrogate followed by a non-low escape",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":\"\\udc00\\ud800\"}",
+      "name": "R1 reversed surrogate pair",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"\\ud800\":1}",
+      "name": "R1 lone surrogate in a key",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"a\\ud83d\",\"ts\":1759500000000}",
+      "name": "R1 lone surrogate in utt.text",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\",\"x\":\"😀\"}",
+      "name": "R1 valid surrogate pair in an ignored member",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"t\":\"pong\"}",
+      "name": "R1 duplicate t",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"t\":\"utt\"}",
+      "name": "R1 duplicate t, second spelled with an escape",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"rev\":2}",
+      "name": "R1 duplicate field in a known type",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"ping\",\"x\":[{\"k\":1,\"k\":1}]}",
+      "name": "R1 duplicate key nested in an ignored member",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"future\",\"a\":1,\"a\":1}",
+      "name": "R1 duplicate key in an unknown type",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "t": "ping"
+      },
+      "json": "{\"t\":\"ping\",\"x\":{\"a\":{\"k\":1},\"b\":{\"k\":1}}}",
+      "name": "R1 same key in sibling objects is fine",
+      "result": "message",
+      "type": "ping"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":-0}",
+      "name": "integer field -0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1.0}",
+      "name": "integer field 1.0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1e0}",
+      "name": "integer field 1e0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":0.0}",
+      "name": "integer field 0.0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":4294967296}",
+      "name": "integer field 4294967296 (u32 max + 1) is invalid_message",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 0,
+        "t": "ack"
+      },
+      "json": "{\"t\":\"ack\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":0}",
+      "name": "integer field 0 is fine",
+      "result": "message",
+      "type": "ack"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":-0}",
+      "name": "hello v -0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1.0,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello v 1.0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":1e0,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
+      "name": "hello v 1e0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"hello\",\"v\":18446744073709551616}",
+      "name": "hello v 2^64 is invalid_message",
+      "result": "error"
+    },
+    {
+      "json": "{\"t\":\"hello\",\"v\":18446744073709551615,\"name\":5}",
+      "name": "hello v 2^64-1 is hello_unsupported",
+      "peer_name": null,
+      "result": "hello_unsupported",
+      "v": 18446744073709551615
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"x\",\"ts\":18446744073709551616}",
+      "name": "utt ts 2^64 is invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":7,\"state\":\"partial\",\"text\":\"x\",\"ts\":-0}",
+      "name": "utt ts -0 is invalid_message",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "code": "bad_mac",
+        "msg": "",
+        "t": "error"
+      },
+      "json": "{\"t\":\"error\",\"code\":\"bad_mac\",\"msg\":null}",
+      "name": "error msg null is the same as absent",
+      "result": "message",
+      "type": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"error\",\"code\":\"bad_mac\",\"msg\":5}",
+      "name": "error msg of the wrong type",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"error\",\"code\":null}",
+      "name": "error code null is invalid",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"pair_result\",\"ok\":true,\"mac\":null}",
+      "name": "pair_result ok:true with null mac",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":false,\"mac\":\"garbage\"}",
+      "name": "pair_result fail with non-base64 mac is ignored",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "expected": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":false,\"mac\":123}",
+      "name": "pair_result fail with numeric mac is ignored",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "expected": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":false,\"mac\":{}}",
+      "name": "pair_result fail with object mac is ignored",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "expected": {
+        "ok": false,
+        "t": "pair_result"
+      },
+      "json": "{\"t\":\"pair_result\",\"ok\":false,\"mac\":\"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw==\"}",
+      "name": "pair_result fail with 31-byte mac is ignored",
+      "result": "message",
+      "type": "pair_result"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"pair_result\",\"ok\":true,\"mac\":\"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw==\"}",
+      "name": "pair_result ok:true with 31-byte mac",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":\"pair_result\",\"ok\":\"false\"}",
+      "name": "pair_result ok as string",
+      "result": "error"
+    },
+    {
+      "expected": {
+        "nonce_p": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+        "t": "pair_request"
+      },
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\",\"t\":\"pair_request\"}",
+      "name": "base64 canonical all-zero value",
+      "result": "message",
+      "type": "pair_request"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB=\",\"t\":\"pair_request\"}",
+      "name": "base64 non-zero trailing bits (B=)",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD=\",\"t\":\"pair_request\"}",
+      "name": "base64 non-zero trailing bits (D=)",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\",\"t\":\"pair_request\"}",
+      "name": "base64 extra '='",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\",\"t\":\"pair_request\"}",
+      "name": "base64 '==' padding at the 32-byte length",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"t\":\"pair_request\"}",
+      "name": "base64 missing padding",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\\n\",\"t\":\"pair_request\"}",
+      "name": "base64 trailing newline",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAA AAAAAAAAAAAAAAAAAAAAA=\",\"t\":\"pair_request\"}",
+      "name": "base64 embedded space",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"AAAAAAAAAAAAAAAAAAAAAA\\r\\nAAAAAAAAAAAAAAAAAAAAA=\",\"t\":\"pair_request\"}",
+      "name": "base64 embedded CRLF",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"nonce_p\":\"\",\"t\":\"pair_request\"}",
+      "name": "base64 empty string",
+      "result": "error"
+    },
+    {
+      "error": "message_too_large",
+      "json_fill": {
+        "count": 65536,
+        "fill": "a",
+        "prefix": "{\"t\":\"ping\",\"pad\":\"",
+        "suffix": ""
+      },
+      "name": "tie: >65536 bytes AND invalid JSON → message_too_large",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":-1,\"x\":1e400,\"state\":\"partial\",\"text\":\"x\",\"ts\":1759500000000}",
+      "name": "tie: invalid JSON (1e400) AND bad field → invalid_json",
+      "result": "error"
+    },
+    {
+      "error": "invalid_json",
+      "json": "{\"t\":5,\"t\":5}",
+      "name": "tie: duplicate key AND t not a string → invalid_json",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json": "{\"t\":1,\"rev\":-1}",
+      "name": "tie: t not a string AND bad fields → invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "invalid_message",
+      "json_fill": {
+        "count": 32001,
+        "fill": "a",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":-1,\"state\":\"final\",\"text\":\"",
+        "suffix": "\",\"ts\":0}"
+      },
+      "name": "tie: bad field AND text over 32000 bytes → invalid_message",
+      "result": "error"
+    },
+    {
+      "error": "text_too_long",
+      "json_fill": {
+        "count": 32001,
+        "fill": "a",
+        "prefix": "{\"t\":\"utt\",\"id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"rev\":1,\"state\":\"final\",\"text\":\"",
+        "suffix": "\",\"ts\":0}"
+      },
+      "name": "tie: text over 32000 bytes AND every field valid → text_too_long",
+      "result": "error"
+    },
+    {
+      "json": "{\"t\":\"hello\",\"v\":3,\"device_id\":7,\"pub\":\"x\",\"paired\":\"no\"}",
+      "name": "tie: hello v != 1 AND every other field invalid → hello_unsupported",
+      "peer_name": null,
+      "result": "hello_unsupported",
+      "v": 3
     }
   ],
-  "description": "JSON messages (SPEC §4.1, §4.4–4.6). `decode`: the input is `json` (UTF-8 text), `json_hex` (raw bytes) or `json_fill` (prefix + fill repeated count times + suffix, as UTF-8). `result` is `message` (with canonical `expected` object to compare field-by-field; omitted for very large inputs), `unknown` (unknown `t`; log and drop), `hello_unsupported` (`hello` with integer v != 1; `peer_name` is the `name` if it was a string), or `error` with an error code. `encode`: the canonical compact encoding the Rust implementation emits (\"t\" first, then fields in the listed order). Byte-equality of encodings is NOT required across implementations; receivers must accept any valid JSON. `encode_errors`: encoding must fail.",
+  "description": "JSON messages (SPEC §4.1, §4.4–4.6; schema in README §10.6). `decode`: the input is `json` (UTF-8 text), `json_hex` (raw bytes) or `json_fill` (prefix + fill repeated count times + suffix, as UTF-8). `result` is `message` (compare the re-encoded message as a JSON object with `expected`, or for large utts with `expected_without_text` plus `text_bytes`), `unknown` (unknown `t`; log and drop), `hello_unsupported` (`hello` with integer v != 1; `peer_name` is the `name` if it was a string), or `error` with an error code. Names starting `R1` exercise the JSON strictness rules of README §5.1; names starting `tie:` the error precedence of README §9.1. `encode`: the canonical compact encoding the Rust implementation emits (informative). `encode_errors`: encoding `message` (wire-form object; `text_fill` gives utt.text) must fail with `error`. `utt_fits`: the sender size rule of README §5.8.",
   "encode": [
     {
       "json": "{\"t\":\"hello\",\"v\":1,\"device_id\":\"0f8fad5b-d9cb-469f-a165-70867728950e\",\"name\":\"Jon's iPhone\",\"pub\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"paired\":true,\"session_nonce\":\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\"}",
@@ -734,22 +1252,181 @@
   "encode_errors": [
     {
       "error": "text_too_long",
+      "message": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 0,
+        "state": "final",
+        "t": "utt",
+        "ts": 0
+      },
       "name": "utt text 32001 bytes",
       "text_fill": {
         "count": 32001,
         "fill": "a"
-      },
-      "type": "utt"
+      }
     },
     {
       "error": "message_too_large",
+      "message": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 0,
+        "state": "final",
+        "t": "utt",
+        "ts": 0
+      },
       "name": "utt of 32000 U+0001 chars escapes past 64 KiB",
       "text_fill": {
         "count": 32000,
         "fill": "\u0001"
+      }
+    },
+    {
+      "error": "text_too_long",
+      "message": {
+        "id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "rev": 0,
+        "state": "final",
+        "t": "utt",
+        "ts": 0
       },
-      "type": "utt"
+      "name": "tie: text over the limit AND escapes past 64 KiB → text_too_long",
+      "text_fill": {
+        "count": 32001,
+        "fill": "\u0001"
+      }
+    },
+    {
+      "error": "not_encodable",
+      "message": {
+        "device_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+        "name": "Jon's iPhone",
+        "paired": true,
+        "pub": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "session_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+        "t": "hello",
+        "v": 2
+      },
+      "name": "hello with v 2 cannot be encoded"
+    },
+    {
+      "error": "not_encodable",
+      "message": {
+        "mac": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "ok": false,
+        "t": "pair_result"
+      },
+      "name": "pair_result ok:false with a mac"
+    },
+    {
+      "error": "not_encodable",
+      "message": {
+        "ok": true,
+        "t": "pair_result"
+      },
+      "name": "pair_result ok:true without a mac"
     }
   ],
+  "utt_fits": [
+    {
+      "fits": true,
+      "max_prefix_bytes": 0,
+      "name": "empty text",
+      "text_fill": {
+        "count": 0,
+        "fill": "a"
+      }
+    },
+    {
+      "fits": true,
+      "max_prefix_bytes": 32000,
+      "name": "32000 ASCII bytes",
+      "text_fill": {
+        "count": 32000,
+        "fill": "a"
+      }
+    },
+    {
+      "fits": false,
+      "max_prefix_bytes": 32000,
+      "name": "32001 ASCII bytes",
+      "text_fill": {
+        "count": 32001,
+        "fill": "a"
+      }
+    },
+    {
+      "fits": true,
+      "max_prefix_bytes": 32000,
+      "name": "32000 quotes escape to 64000 bytes and still fit",
+      "text_fill": {
+        "count": 32000,
+        "fill": "\""
+      }
+    },
+    {
+      "fits": true,
+      "max_prefix_bytes": 10897,
+      "name": "10897 U+0001 chars (6 bytes each) fit exactly",
+      "text_fill": {
+        "count": 10897,
+        "fill": "\u0001"
+      }
+    },
+    {
+      "fits": false,
+      "max_prefix_bytes": 10897,
+      "name": "10898 U+0001 chars do not fit",
+      "text_fill": {
+        "count": 10898,
+        "fill": "\u0001"
+      }
+    },
+    {
+      "fits": false,
+      "max_prefix_bytes": 10897,
+      "name": "32000 U+0001 chars do not fit",
+      "text_fill": {
+        "count": 32000,
+        "fill": "\u0001"
+      }
+    },
+    {
+      "fits": true,
+      "max_prefix_bytes": 32000,
+      "name": "8000 four-byte emoji",
+      "text_fill": {
+        "count": 8000,
+        "fill": "😀"
+      }
+    },
+    {
+      "fits": false,
+      "max_prefix_bytes": 32000,
+      "name": "8001 four-byte emoji",
+      "text_fill": {
+        "count": 8001,
+        "fill": "😀"
+      }
+    },
+    {
+      "fits": false,
+      "max_prefix_bytes": 31998,
+      "name": "10667 three-byte chars (32001 bytes)",
+      "text_fill": {
+        "count": 10667,
+        "fill": "日"
+      }
+    },
+    {
+      "fits": true,
+      "max_prefix_bytes": 32000,
+      "name": "newlines escape to 2 bytes",
+      "text_fill": {
+        "count": 32000,
+        "fill": "\n"
+      }
+    }
+  ],
+  "utt_max_overhead_bytes": 126,
   "vectors_version": 1
 }

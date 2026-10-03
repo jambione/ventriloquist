@@ -4,6 +4,10 @@
 //! ([`Error::code`]). Those codes are what `protocol/vectors/*.json` uses to
 //! describe expected failures, so the Swift implementation can map its own
 //! errors onto the same names.
+//!
+//! The `Display` text of an error is for local logs only. It never contains
+//! more than a short, bounded excerpt of peer-supplied data, and it MUST NOT
+//! be copied into the `msg` of an outgoing `error` message (README §5.7).
 
 use thiserror::Error;
 
@@ -85,6 +89,10 @@ pub enum Error {
     /// An encrypted envelope arrived but no session key is established.
     #[error("encrypted envelope received without an established session")]
     NoSession,
+    /// A `hello` or pairing message arrived on a connection that is already
+    /// Secure (see [`crate::check_in_session`]).
+    #[error("message type `{0}` is not allowed once a session is established")]
+    NotAllowedInSession(String),
 
     // ---- crypto / pairing ----
     /// X25519 produced the all-zero shared secret (peer sent a low-order point).
@@ -120,10 +128,26 @@ impl Error {
             Error::CounterExhausted => "counter_exhausted",
             Error::PlaintextNotAllowed(_) => "plaintext_not_allowed",
             Error::NoSession => "no_session",
+            Error::NotAllowedInSession(_) => "not_allowed_in_session",
             Error::NonContributory => "non_contributory",
             Error::InvalidCode => "invalid_code",
             Error::BadMac => "bad_mac",
         }
+    }
+}
+
+/// At most this many characters of peer-controlled text are ever placed in
+/// an error's `Display` output.
+pub(crate) const EXCERPT_CHARS: usize = 64;
+
+/// Bounded, quoted excerpt of untrusted input for error messages.
+pub(crate) fn excerpt(s: &str) -> String {
+    let mut it = s.chars();
+    let head: String = it.by_ref().take(EXCERPT_CHARS).collect();
+    if it.next().is_some() {
+        format!("{head:?}…")
+    } else {
+        format!("{head:?}")
     }
 }
 

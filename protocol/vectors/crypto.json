@@ -390,6 +390,46 @@
       "name": "p (non-canonical 0)",
       "peer_pub": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
       "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "all-zero with bit 255 set (bit 255 is masked)",
+      "peer_pub": "0000000000000000000000000000000000000000000000000000000000000080",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "u = 1 with bit 255 set",
+      "peer_pub": "0100000000000000000000000000000000000000000000000000000000000080",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "order-8 point with bit 255 set",
+      "peer_pub": "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    },
+    {
+      "error": "non_contributory",
+      "name": "p with bit 255 set",
+      "peer_pub": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    }
+  ],
+  "x25519_high_bit": [
+    {
+      "name": "RFC 7748 desktop public key with bit 255 set",
+      "peer_pub": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882bcf",
+      "peer_pub_masked": "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "shared": "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    },
+    {
+      "name": "patterned public key with bit 255 set",
+      "peer_pub": "847c0d2c375234f365e660955187a3735a0f7613d1609d3a6a4d8c53aeaa5aa2",
+      "peer_pub_masked": "847c0d2c375234f365e660955187a3735a0f7613d1609d3a6a4d8c53aeaa5a22",
+      "priv": "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a",
+      "shared": "859c3ab3783eea98a8627a1b37740bea866a9bc1d40003c365bb229917b65a2e"
     }
   ]
 }

@@ -13,7 +13,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use rand::rngs::OsRng;
 use rand::{CryptoRng, Rng, RngCore};
@@ -22,7 +21,9 @@ use uuid::Uuid;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
+use crate::envelope::Role;
 use crate::error::{Error, Result};
+use crate::message::{PairChallenge, PairConfirm, PairRequest, PairResult};
 
 /// HKDF info prefix for the pairing key; the 6 code digits are appended.
 pub const PAIR_INFO_PREFIX: &[u8] = b"vq/pair/v1";
@@ -52,12 +53,16 @@ impl IdentityKeyPair {
     pub fn generate_with<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
         let mut bytes = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(bytes.as_mut());
-        Self::from_secret_bytes(*bytes)
+        Self::from_secret_bytes(bytes)
     }
 
     /// Restore from the 32-byte private key (RFC 7748 scalar; clamped on use).
-    pub fn from_secret_bytes(secret: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(secret);
+    ///
+    /// Accepts either a plain array or a `Zeroizing<[u8; 32]>` (pass the
+    /// latter when loading from storage so the buffer is wiped).
+    pub fn from_secret_bytes(secret: impl Into<Zeroizing<[u8; 32]>>) -> Self {
+        let secret: Zeroizing<[u8; 32]> = secret.into();
+        let secret = StaticSecret::from(*secret);
         let public = PublicKey::from(&secret);
         Self { secret, public }
     }
@@ -78,7 +83,7 @@ impl IdentityKeyPair {
         if !ss.was_contributory() {
             return Err(Error::NonContributory);
         }
-        Ok(SharedSecret(Zeroizing::new(ss.to_bytes())))
+        Ok(SharedSecret(Zeroizing::new(*ss.as_bytes())))
     }
 }
 
@@ -90,16 +95,21 @@ impl fmt::Debug for IdentityKeyPair {
     }
 }
 
-/// The X25519 shared secret between two identities.
-#[derive(Clone)]
+/// The X25519 shared secret between two identities. Opaque: it is only
+/// consumed by [`PairKey::derive`] and [`crate::SessionCipher::establish`].
 pub struct SharedSecret(Zeroizing<[u8; 32]>);
 
 impl SharedSecret {
-    /// Wrap raw bytes (tests / vectors).
+    /// Wrap raw bytes (test vectors only).
+    #[cfg(any(test, feature = "test-vectors"))]
+    #[doc(hidden)]
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(Zeroizing::new(bytes))
     }
-    /// Raw bytes.
+
+    /// Raw bytes (test vectors only).
+    #[cfg(any(test, feature = "test-vectors"))]
+    #[doc(hidden)]
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
@@ -116,11 +126,41 @@ pub fn new_device_id() -> Uuid {
     Uuid::new_v4()
 }
 
-/// 32 random bytes from the OS CSPRNG (for `nonce_p`, `nonce_d`, `session_nonce`).
+/// 32 random bytes from the OS CSPRNG (for `nonce_p` and `nonce_d`).
+///
+/// Session nonces use [`SessionNonce`] instead, which cannot be reused.
 pub fn random_nonce() -> [u8; 32] {
     let mut n = [0u8; 32];
     OsRng.fill_bytes(&mut n);
     n
+}
+
+/// This side's `hello.session_nonce` for one connection.
+///
+/// It can only be created from the OS CSPRNG ([`SessionNonce::generate`],
+/// usually via [`crate::Hello::new`]). It is neither `Clone` nor `Copy`, and
+/// [`crate::SessionCipher::establish`] takes it by value, so one nonce can
+/// key at most one session.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SessionNonce([u8; 32]);
+
+impl SessionNonce {
+    /// A fresh nonce from the OS CSPRNG.
+    pub fn generate() -> Self {
+        Self(random_nonce())
+    }
+
+    /// The public nonce bytes (what goes into `hello.session_nonce`).
+    pub fn bytes(&self) -> [u8; 32] {
+        self.0
+    }
+
+    /// Fixed nonce (test vectors only).
+    #[cfg(any(test, feature = "test-vectors"))]
+    #[doc(hidden)]
+    pub fn from_bytes_for_tests(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
 }
 
 /// A 6-digit pairing code, 000000–999999.
@@ -193,98 +233,250 @@ pub fn pair_info(code: &PairingCode) -> Vec<u8> {
     info
 }
 
-fn hkdf32(ikm: &[u8; 32], salt_a: &[u8; 32], salt_b: &[u8; 32], info: &[u8]) -> [u8; 32] {
+fn hmac(key: &[u8], parts: &[&[u8]]) -> HmacSha256 {
+    let mut m = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    for p in parts {
+        m.update(p);
+    }
+    m
+}
+
+/// RFC 5869 HKDF-SHA256 with `salt = salt_a ‖ salt_b` and L = 32.
+///
+/// Implemented directly on HMAC so that PRK and OKM live only in
+/// `Zeroizing` buffers: `PRK = HMAC(salt, ikm)`, `OKM = T(1) = HMAC(PRK, info ‖ 0x01)`.
+fn hkdf32(
+    ikm: &[u8; 32],
+    salt_a: &[u8; 32],
+    salt_b: &[u8; 32],
+    info: &[u8],
+) -> Zeroizing<[u8; 32]> {
     let mut salt = [0u8; 64];
     salt[..32].copy_from_slice(salt_a);
     salt[32..].copy_from_slice(salt_b);
-    let hk = Hkdf::<Sha256>::new(Some(&salt), ikm);
-    let mut okm = [0u8; 32];
-    hk.expand(info, &mut okm)
-        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    let mut prk = Zeroizing::new([0u8; 32]);
+    prk.copy_from_slice(&hmac(&salt, &[ikm]).finalize().into_bytes());
+    let mut okm = Zeroizing::new([0u8; 32]);
+    okm.copy_from_slice(&hmac(prk.as_ref(), &[info, &[1u8]]).finalize().into_bytes());
     okm
 }
 
-/// `K_pair = HKDF-SHA256(ss, salt = nonce_p ‖ nonce_d, info = "vq/pair/v1" ‖ C)`, 32 bytes.
+fn mac_bytes(k: &[u8; 32], label: &[u8], a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+    hmac(k, &[label, a, b]).finalize().into_bytes().into()
+}
+
+fn mac_verify(
+    k: &[u8; 32],
+    label: &[u8],
+    a: &[u8; 32],
+    b: &[u8; 32],
+    mac: &[u8; 32],
+) -> Result<()> {
+    hmac(k, &[label, a, b])
+        .verify_slice(mac)
+        .map_err(|_| Error::BadMac)
+}
+
+/// `K_sess` for a shared secret and the two session nonces (phone's first).
+pub(crate) fn session_key(
+    ss: &SharedSecret,
+    nonce_phone: &[u8; 32],
+    nonce_desktop: &[u8; 32],
+) -> Zeroizing<[u8; 32]> {
+    hkdf32(&ss.0, nonce_phone, nonce_desktop, SESSION_INFO)
+}
+
+/// The pairing key `K_pair` together with the pairing transcript it was
+/// derived for. Opaque: the key bytes never leave this type.
+///
+/// Both sides call [`PairKey::derive`] with their **own** role; the type
+/// works out which public key is the phone's and which is the desktop's, and
+/// takes the nonces from the typed `pair_request` / `pair_challenge`, so the
+/// argument-order mistakes of a raw-bytes API cannot compile.
+pub struct PairKey {
+    key: Zeroizing<[u8; 32]>,
+    pub_phone: [u8; 32],
+    pub_desktop: [u8; 32],
+}
+
+impl fmt::Debug for PairKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PairKey(..)")
+    }
+}
+
+impl PairKey {
+    /// `K_pair = HKDF-SHA256(ss, salt = nonce_p ‖ nonce_d, info = "vq/pair/v1" ‖ C)`.
+    ///
+    /// `own_role` is the caller's role; `peer_public` is the peer's
+    /// `hello.pub`. Fails with `non_contributory` for a low-order peer key.
+    pub fn derive(
+        identity: &IdentityKeyPair,
+        own_role: Role,
+        peer_public: &[u8; 32],
+        request: &PairRequest,
+        challenge: &PairChallenge,
+        code: &PairingCode,
+    ) -> Result<Self> {
+        let ss = identity.shared_secret(peer_public)?;
+        let own = identity.public_bytes();
+        let (pub_phone, pub_desktop) = match own_role {
+            Role::Phone => (own, *peer_public),
+            Role::Desktop => (*peer_public, own),
+        };
+        Ok(Self {
+            key: hkdf32(
+                &ss.0,
+                &request.nonce_p,
+                &challenge.nonce_d,
+                &pair_info(code),
+            ),
+            pub_phone,
+            pub_desktop,
+        })
+    }
+
+    /// `mac_p = HMAC-SHA256(K_pair, "phone" ‖ pub_p ‖ pub_d)`.
+    pub fn phone_mac(&self) -> [u8; 32] {
+        mac_bytes(
+            &self.key,
+            PHONE_MAC_LABEL,
+            &self.pub_phone,
+            &self.pub_desktop,
+        )
+    }
+
+    /// `mac_d = HMAC-SHA256(K_pair, "desktop" ‖ pub_d ‖ pub_p)`.
+    pub fn desktop_mac(&self) -> [u8; 32] {
+        mac_bytes(
+            &self.key,
+            DESKTOP_MAC_LABEL,
+            &self.pub_desktop,
+            &self.pub_phone,
+        )
+    }
+
+    /// The phone's `pair_confirm`.
+    pub fn confirm_message(&self) -> PairConfirm {
+        PairConfirm {
+            mac: self.phone_mac(),
+        }
+    }
+
+    /// The desktop's successful `pair_result`.
+    pub fn success_message(&self) -> PairResult {
+        PairResult::success(self.desktop_mac())
+    }
+
+    /// Desktop side: constant-time check of the phone's `pair_confirm.mac`.
+    pub fn verify_phone_mac(&self, mac: &[u8; 32]) -> Result<()> {
+        mac_verify(
+            &self.key,
+            PHONE_MAC_LABEL,
+            &self.pub_phone,
+            &self.pub_desktop,
+            mac,
+        )
+    }
+
+    /// Phone side: constant-time check of the desktop's `pair_result.mac`.
+    pub fn verify_desktop_mac(&self, mac: &[u8; 32]) -> Result<()> {
+        mac_verify(
+            &self.key,
+            DESKTOP_MAC_LABEL,
+            &self.pub_desktop,
+            &self.pub_phone,
+            mac,
+        )
+    }
+
+    /// Raw key bytes (test vectors only).
+    #[cfg(any(test, feature = "test-vectors"))]
+    #[doc(hidden)]
+    pub fn key_bytes_for_tests(&self) -> [u8; 32] {
+        *self.key
+    }
+}
+
+// ---- raw-bytes primitives: test vectors only -------------------------------
+//
+// These take and return raw keys, so every argument is a `[u8; 32]` and an
+// ordering mistake compiles. Production code uses `PairKey` and
+// `SessionCipher::establish`.
+
+/// `K_pair` as raw bytes (test vectors only).
+#[cfg(any(test, feature = "test-vectors"))]
+#[doc(hidden)]
 pub fn derive_pair_key(
     ss: &SharedSecret,
     nonce_p: &[u8; 32],
     nonce_d: &[u8; 32],
     code: &PairingCode,
 ) -> [u8; 32] {
-    hkdf32(ss.as_bytes(), nonce_p, nonce_d, &pair_info(code))
+    *hkdf32(&ss.0, nonce_p, nonce_d, &pair_info(code))
 }
 
-/// `K_sess = HKDF-SHA256(ss, salt = nonce_phone ‖ nonce_desktop, info = "vq/session/v1")`, 32 bytes.
+/// `K_sess` as raw bytes (test vectors only).
+#[cfg(any(test, feature = "test-vectors"))]
+#[doc(hidden)]
 pub fn derive_session_key(
     ss: &SharedSecret,
     nonce_phone: &[u8; 32],
     nonce_desktop: &[u8; 32],
 ) -> [u8; 32] {
-    hkdf32(ss.as_bytes(), nonce_phone, nonce_desktop, SESSION_INFO)
+    *session_key(ss, nonce_phone, nonce_desktop)
 }
 
-fn mac_over(k: &[u8; 32], label: &[u8], a: &[u8; 32], b: &[u8; 32]) -> HmacSha256 {
-    let mut m = <HmacSha256 as Mac>::new_from_slice(k).expect("HMAC accepts any key length");
-    m.update(label);
-    m.update(a);
-    m.update(b);
-    m
-}
-
-/// `pair_confirm.mac = HMAC-SHA256(K_pair, "phone" ‖ pub_p ‖ pub_d)`.
+/// `mac_p` from a raw key (test vectors only).
+#[cfg(any(test, feature = "test-vectors"))]
+#[doc(hidden)]
 pub fn phone_confirm_mac(
     k_pair: &[u8; 32],
     pub_phone: &[u8; 32],
     pub_desktop: &[u8; 32],
 ) -> [u8; 32] {
-    mac_over(k_pair, PHONE_MAC_LABEL, pub_phone, pub_desktop)
-        .finalize()
-        .into_bytes()
-        .into()
+    mac_bytes(k_pair, PHONE_MAC_LABEL, pub_phone, pub_desktop)
 }
 
-/// `pair_result.mac = HMAC-SHA256(K_pair, "desktop" ‖ pub_d ‖ pub_p)`.
-///
-/// Note the argument order is (phone, desktop) for both MAC helpers; the
-/// concatenation order differs internally as the spec requires.
+/// `mac_d` from a raw key (test vectors only). Arguments are (phone, desktop).
+#[cfg(any(test, feature = "test-vectors"))]
+#[doc(hidden)]
 pub fn desktop_result_mac(
     k_pair: &[u8; 32],
     pub_phone: &[u8; 32],
     pub_desktop: &[u8; 32],
 ) -> [u8; 32] {
-    mac_over(k_pair, DESKTOP_MAC_LABEL, pub_desktop, pub_phone)
-        .finalize()
-        .into_bytes()
-        .into()
+    mac_bytes(k_pair, DESKTOP_MAC_LABEL, pub_desktop, pub_phone)
 }
 
-/// Constant-time verification of the phone's `pair_confirm` MAC.
+/// Verify `mac_p` with a raw key (test vectors only).
+#[cfg(any(test, feature = "test-vectors"))]
+#[doc(hidden)]
 pub fn verify_phone_confirm_mac(
     k_pair: &[u8; 32],
     pub_phone: &[u8; 32],
     pub_desktop: &[u8; 32],
     mac: &[u8; 32],
 ) -> Result<()> {
-    mac_over(k_pair, PHONE_MAC_LABEL, pub_phone, pub_desktop)
-        .verify_slice(mac)
-        .map_err(|_| Error::BadMac)
+    mac_verify(k_pair, PHONE_MAC_LABEL, pub_phone, pub_desktop, mac)
 }
 
-/// Constant-time verification of the desktop's `pair_result` MAC.
+/// Verify `mac_d` with a raw key (test vectors only). Arguments are (phone, desktop).
+#[cfg(any(test, feature = "test-vectors"))]
+#[doc(hidden)]
 pub fn verify_desktop_result_mac(
     k_pair: &[u8; 32],
     pub_phone: &[u8; 32],
     pub_desktop: &[u8; 32],
     mac: &[u8; 32],
 ) -> Result<()> {
-    mac_over(k_pair, DESKTOP_MAC_LABEL, pub_desktop, pub_phone)
-        .verify_slice(mac)
-        .map_err(|_| Error::BadMac)
+    mac_verify(k_pair, DESKTOP_MAC_LABEL, pub_desktop, pub_phone, mac)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hkdf::Hkdf;
 
     fn h32(s: &str) -> [u8; 32] {
         hex::decode(s).unwrap().try_into().unwrap()
@@ -331,11 +523,82 @@ mod tests {
     }
 
     #[test]
-    fn secret_roundtrip() {
+    fn secret_roundtrip_and_debug_redaction() {
         let a = IdentityKeyPair::generate();
-        let b = IdentityKeyPair::from_secret_bytes(*a.secret_bytes());
+        let b = IdentityKeyPair::from_secret_bytes(a.secret_bytes());
         assert_eq!(a.public_bytes(), b.public_bytes());
-        assert!(!format!("{a:?}").contains("secret:"));
+        let dbg = format!("{a:?}");
+        let secret = *a.secret_bytes();
+        assert!(!dbg.contains(&hex::encode(secret)), "{dbg}");
+        assert!(!dbg.contains(&format!("{secret:?}")), "{dbg}");
+        assert!(!dbg.contains(&format!("{:?}", &secret[..])), "{dbg}");
+        let ss = a
+            .shared_secret(&IdentityKeyPair::generate().public_bytes())
+            .unwrap();
+        let dbg = format!("{ss:?}");
+        assert_eq!(dbg, "SharedSecret(..)");
+        assert!(!dbg.contains(&hex::encode(ss.as_bytes())));
+    }
+
+    /// Our HMAC-based HKDF equals the `hkdf` crate's RFC 5869 implementation.
+    #[test]
+    fn hkdf32_matches_rfc5869() {
+        for (ikm, a, b, info) in [
+            ([0u8; 32], [1u8; 32], [2u8; 32], &b"vq/session/v1"[..]),
+            ([0xFF; 32], [0x10; 32], [0x77; 32], &b"vq/pair/v1123456"[..]),
+        ] {
+            let salt = [a, b].concat();
+            let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
+            let mut okm = [0u8; 32];
+            hk.expand(info, &mut okm).unwrap();
+            assert_eq!(*hkdf32(&ikm, &a, &b, info), okm);
+        }
+    }
+
+    #[test]
+    fn pair_key_api_matches_raw_and_fixes_order() {
+        use crate::message::{PairChallenge, PairRequest};
+        let phone = IdentityKeyPair::generate();
+        let desk = IdentityKeyPair::generate();
+        let req = PairRequest::generate();
+        let ch = PairChallenge::generate();
+        let code = PairingCode::generate();
+        let kp =
+            PairKey::derive(&phone, Role::Phone, &desk.public_bytes(), &req, &ch, &code).unwrap();
+        let kd = PairKey::derive(
+            &desk,
+            Role::Desktop,
+            &phone.public_bytes(),
+            &req,
+            &ch,
+            &code,
+        )
+        .unwrap();
+        assert_eq!(kp.key_bytes_for_tests(), kd.key_bytes_for_tests());
+        let ss = phone.shared_secret(&desk.public_bytes()).unwrap();
+        assert_eq!(
+            kp.key_bytes_for_tests(),
+            derive_pair_key(&ss, &req.nonce_p, &ch.nonce_d, &code)
+        );
+        let (pp, pd) = (phone.public_bytes(), desk.public_bytes());
+        assert_eq!(
+            kp.phone_mac(),
+            phone_confirm_mac(&kp.key_bytes_for_tests(), &pp, &pd)
+        );
+        assert_eq!(
+            kd.desktop_mac(),
+            desktop_result_mac(&kd.key_bytes_for_tests(), &pp, &pd)
+        );
+        kd.verify_phone_mac(&kp.confirm_message().mac).unwrap();
+        kp.verify_desktop_mac(&kd.success_message().mac.unwrap())
+            .unwrap();
+        assert_eq!(kd.verify_desktop_mac(&kp.phone_mac()), Err(Error::BadMac));
+        assert_eq!(format!("{kp:?}"), "PairKey(..)");
+        // low-order peer key
+        assert_eq!(
+            PairKey::derive(&phone, Role::Phone, &[0; 32], &req, &ch, &code).unwrap_err(),
+            Error::NonContributory
+        );
     }
 
     /// RFC 5869 A.1 checks that our HKDF wiring is standard HKDF-SHA256.

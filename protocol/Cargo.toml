@@ -22,3 +22,10 @@ zeroize = "1.8"
 
 [dev-dependencies]
 hex = "0.4"
+# Test-only hooks (raw keys, fixed counters, stateless seal/open). Enabled
+# automatically for this crate's own tests, examples and vectors via the
+# self dev-dependency below; production consumers MUST NOT enable it.
+vq-protocol = { path = ".", features = ["test-vectors"] }
+
+[features]
+test-vectors = []

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 use vq_protocol::crypto::{self, pair_info, PairingCode, SESSION_INFO};
-use vq_protocol::envelope::{self, nonce, seal_with, Direction};
+use vq_protocol::envelope::{nonce, seal_with, Direction};
 use vq_protocol::{
     b64, encode_plaintext, Error, FrameSplitter, IdentityKeyPair, Message, Reassembler,
     SessionCipher,
@@ -49,6 +49,38 @@ fn fill(prefix: &[u8], byte: u8, count: usize, suffix: &[u8]) -> (Value, Vec<u8>
         o.insert("suffix_hex".into(), json!(hx(suffix)));
     }
     (Value::Object(o), v)
+}
+
+/// Hex, or for large inputs dominated by one repeated byte, the
+/// `{prefix_hex, fill_hex, fill_count, suffix_hex}` form.
+fn bytes_value(b: &[u8]) -> Value {
+    if b.len() <= 4096 {
+        return json!(hx(b));
+    }
+    // longest run of one byte value
+    let (mut best_start, mut best_len, mut i) = (0, 0, 0);
+    while i < b.len() {
+        let mut j = i;
+        while j < b.len() && b[j] == b[i] {
+            j += 1;
+        }
+        if j - i > best_len {
+            best_start = i;
+            best_len = j - i;
+        }
+        i = j;
+    }
+    if best_len < 1024 {
+        return json!(hx(b));
+    }
+    let (v, rebuilt) = fill(
+        &b[..best_start],
+        b[best_start],
+        best_len,
+        &b[best_start + best_len..],
+    );
+    assert_eq!(rebuilt, b);
+    v
 }
 
 fn dir_name(d: Direction) -> &'static str {
@@ -708,25 +740,226 @@ fn envelope_vectors() -> Value {
             "invalid_json",
         ),
     ];
+    // More decode cases: size/limits, provenance, and error-precedence ties.
+    let d_seal = |c: u64, pt: &[u8]| seal_with(&ENV_KEY, Direction::PhoneToDesktop, c, pt).unwrap();
+    let max_ping = {
+        let prefix = br#"{"t":"ping","pad":""#;
+        let mut j = prefix.to_vec();
+        j.resize(vq_protocol::MAX_ENCRYPTED_JSON_BYTES - 2, b'a');
+        j.extend_from_slice(br#""}"#);
+        j
+    };
+    let max_enc = d_seal(0, &max_ping);
+    assert_eq!(max_enc.len(), vq_protocol::MAX_MESSAGE_BYTES);
+    let mut too_big_pt = vec![0u8];
+    too_big_pt.extend_from_slice(br#"{"t":"pair_result","ok":false,"pad":""#);
+    too_big_pt.resize(vq_protocol::MAX_MESSAGE_BYTES - 1, b'a');
+    too_big_pt.extend_from_slice(br#""}"#);
+    assert_eq!(too_big_pt.len(), vq_protocol::MAX_MESSAGE_BYTES + 1);
+    let mut max_pt = too_big_pt.clone();
+    max_pt.remove(40);
+    let mut too_big_enc = vec![0x01u8];
+    too_big_enc.resize(vq_protocol::MAX_MESSAGE_BYTES + 1, 0);
+    let mut too_big_kind2 = vec![0x02u8];
+    too_big_kind2.resize(vq_protocol::MAX_MESSAGE_BYTES + 1, 0);
+    let garbage_ct = |c: u64| [vec![0x01], c.to_be_bytes().to_vec(), vec![0xEE; 30]].concat();
+    let prior5 = vec![d_seal(5, br#"{"t":"ping"}"#)];
+    #[allow(clippy::type_complexity)]
+    let more: Vec<(&str, Vec<u8>, Option<Vec<Vec<u8>>>, &str, &str)> = vec![
+        (
+            "plaintext envelope of exactly 65536 bytes",
+            max_pt,
+            None,
+            "message",
+            "pair_result",
+        ),
+        (
+            "plaintext envelope of 65537 bytes",
+            too_big_pt,
+            None,
+            "error",
+            "message_too_large",
+        ),
+        (
+            "encrypted envelope of exactly 65536 bytes (65511-byte JSON)",
+            max_enc,
+            Some(vec![]),
+            "message",
+            "ping",
+        ),
+        (
+            "encrypted envelope of 65537 bytes",
+            too_big_enc,
+            Some(vec![]),
+            "error",
+            "message_too_large",
+        ),
+        (
+            "plaintext hello with v 2 → hello_unsupported",
+            p(r#"{"t":"hello","v":2,"name":"Future Mac"}"#),
+            None,
+            "hello_unsupported",
+            "hello",
+        ),
+        (
+            "encrypted: good tag, invalid JSON still advances the window",
+            d_seal(4, b"{\"t\":"),
+            Some(vec![]),
+            "error",
+            "invalid_json",
+        ),
+        (
+            "encrypted: good tag, invalid message still advances the window",
+            d_seal(4, br#"{"t":"ack"}"#),
+            Some(vec![]),
+            "error",
+            "invalid_message",
+        ),
+        (
+            "tie: >65536 bytes AND unknown kind → message_too_large",
+            too_big_kind2,
+            None,
+            "error",
+            "message_too_large",
+        ),
+        (
+            "tie: unknown kind AND short → unknown_envelope_kind",
+            vec![0x02, 0x00],
+            Some(vec![]),
+            "error",
+            "unknown_envelope_kind",
+        ),
+        (
+            "tie: encrypted too short AND no session → envelope_too_short",
+            vec![0x01; 10],
+            None,
+            "error",
+            "envelope_too_short",
+        ),
+        (
+            "tie: no session AND garbage ciphertext → no_session",
+            garbage_ct(0),
+            None,
+            "error",
+            "no_session",
+        ),
+        (
+            "tie: older counter AND garbage ciphertext → replay",
+            garbage_ct(3),
+            Some(prior5.clone()),
+            "error",
+            "replay",
+        ),
+        (
+            "tie: equal counter AND garbage ciphertext → replay",
+            garbage_ct(5),
+            Some(prior5.clone()),
+            "error",
+            "replay",
+        ),
+        (
+            "tie: fresh counter AND garbage ciphertext → decrypt_failed",
+            garbage_ct(6),
+            Some(prior5.clone()),
+            "error",
+            "decrypt_failed",
+        ),
+        (
+            "tie: plaintext utt with 1e400 → invalid_json before plaintext_not_allowed",
+            p(r#"{"t":"utt","x":1e400}"#),
+            None,
+            "error",
+            "invalid_json",
+        ),
+        (
+            "tie: plaintext utt with a duplicate key → invalid_json",
+            p(r#"{"t":"utt","t":"utt"}"#),
+            None,
+            "error",
+            "invalid_json",
+        ),
+        (
+            "tie: plaintext utt with bad fields → plaintext_not_allowed before invalid_message",
+            p(r#"{"t":"utt","rev":-1}"#),
+            None,
+            "error",
+            "plaintext_not_allowed",
+        ),
+        (
+            "tie: plaintext non-object → invalid_message",
+            p("[]"),
+            None,
+            "error",
+            "invalid_message",
+        ),
+        (
+            "tie: plaintext ping with t not a string → invalid_message",
+            p(r#"{"t":["ping"]}"#),
+            None,
+            "error",
+            "invalid_message",
+        ),
+    ];
+    let mut all: Vec<(&str, Vec<u8>, Option<Vec<Vec<u8>>>, &str, &str)> = decode_cases
+        .into_iter()
+        .map(|(n, e, ws, r, w)| (n, e, ws.then(Vec::new), r, w))
+        .collect();
+    all.extend(more);
     let mut decode = vec![];
-    for (name, env, with_session, result, what) in decode_cases {
+    for (name, env, session, result, what) in all {
         let mut sess = SessionCipher::new(&ENV_KEY, vq_protocol::Role::Desktop);
-        let got =
-            envelope::decode_envelope(&env, if with_session { Some(&mut sess) } else { None });
+        if let Some(prior) = &session {
+            for e in prior {
+                sess.open(e).unwrap();
+            }
+        }
+        let got = vq_protocol::decode_inbound(
+            &env,
+            if session.is_some() {
+                Some(&mut sess)
+            } else {
+                None
+            },
+        );
         let mut o = json!({
-            "name": name, "envelope": hx(&env),
-            "session": if with_session { json!({"key": hx(&ENV_KEY), "role": "desktop"}) } else { Value::Null },
+            "name": name, "envelope": bytes_value(&env),
+            "session": match &session {
+                Some(prior) => json!({
+                    "key": hx(&ENV_KEY), "role": "desktop",
+                    "prior": prior.iter().map(|e| hx(e)).collect::<Vec<_>>(),
+                }),
+                None => Value::Null,
+            },
             "result": result,
         });
         match (result, got) {
-            ("message", Ok(m)) => {
-                assert!(!matches!(m, Message::Unknown { .. }));
+            ("message", Ok(inb)) => {
+                o["authenticated"] = json!(inb.is_authenticated());
+                let m = inb.into_message();
+                assert!(!matches!(
+                    m,
+                    Message::Unknown { .. } | Message::HelloUnsupported(_)
+                ));
                 assert_eq!(m.type_name(), what, "{name}");
                 o["type"] = json!(what);
+                o["expected"] = serde_json::from_slice(&m.to_json().unwrap()).unwrap();
             }
-            ("unknown", Ok(Message::Unknown { t })) => {
+            ("unknown", Ok(inb)) => {
+                o["authenticated"] = json!(inb.is_authenticated());
+                let Message::Unknown { t } = inb.into_message() else {
+                    panic!("{name}")
+                };
                 assert_eq!(t, what);
                 o["type"] = json!(what);
+            }
+            ("hello_unsupported", Ok(inb)) => {
+                o["authenticated"] = json!(inb.is_authenticated());
+                let Message::HelloUnsupported(h) = inb.into_message() else {
+                    panic!("{name}")
+                };
+                o["type"] = json!(what);
+                o["v"] = json!(h.v);
+                o["peer_name"] = json!(h.name);
             }
             ("error", Err(e)) => {
                 assert_eq!(e.code(), what, "{name}");
@@ -734,7 +967,98 @@ fn envelope_vectors() -> Value {
             }
             (r, g) => panic!("{name}: expected {r}, got {g:?}"),
         }
+        if session.is_some() {
+            o["last_accepted_after"] = sess
+                .last_received_counter()
+                .map(|n| json!(n.to_string()))
+                .unwrap_or(Value::Null);
+        }
         decode.push(o);
+    }
+
+    // Secure-state policy (check_in_session) on a desktop receiver.
+    let mut in_session = vec![];
+    let hello_v1 = p(&hello_json);
+    let enc_pr = d_seal(
+        0,
+        br#"{"t":"pair_request","nonce_p":"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="}"#,
+    );
+    let enc_hello = d_seal(0, hello_json.as_bytes());
+    for (name, env, result, what) in [
+        (
+            "plaintext error passes (unauthenticated)",
+            p(r#"{"t":"error","code":"unknown_peer"}"#),
+            "ok",
+            "error",
+        ),
+        (
+            "plaintext unknown type passes (dropped by caller)",
+            p(r#"{"t":"future_thing"}"#),
+            "ok",
+            "future_thing",
+        ),
+        ("encrypted utt passes", d_seal(0, utt), "ok", "utt"),
+        (
+            "encrypted ping passes",
+            d_seal(0, br#"{"t":"ping"}"#),
+            "ok",
+            "ping",
+        ),
+        (
+            "plaintext hello (second hello) is rejected",
+            hello_v1,
+            "error",
+            "not_allowed_in_session",
+        ),
+        (
+            "plaintext hello with another version is rejected",
+            p(r#"{"t":"hello","v":2}"#),
+            "error",
+            "not_allowed_in_session",
+        ),
+        (
+            "encrypted hello is rejected",
+            enc_hello,
+            "error",
+            "not_allowed_in_session",
+        ),
+        (
+            "plaintext pair_result is rejected",
+            p(r#"{"t":"pair_result","ok":false}"#),
+            "error",
+            "not_allowed_in_session",
+        ),
+        (
+            "encrypted pair_request is rejected",
+            enc_pr,
+            "error",
+            "not_allowed_in_session",
+        ),
+        (
+            "plaintext utt is still plaintext_not_allowed (decode fails first)",
+            p(std::str::from_utf8(utt).unwrap()),
+            "error",
+            "plaintext_not_allowed",
+        ),
+    ] {
+        let mut sess = SessionCipher::new(&ENV_KEY, vq_protocol::Role::Desktop);
+        let got = vq_protocol::decode_inbound(&env, Some(&mut sess))
+            .and_then(|i| vq_protocol::check_in_session(&i).map(|()| i));
+        let mut o = json!({ "name": name, "envelope": hx(&env),
+            "session": {"key": hx(&ENV_KEY), "role": "desktop", "prior": []}, "result": result });
+        match (result, got) {
+            ("ok", Ok(i)) => {
+                assert_eq!(i.message().type_name(), what, "{name}");
+                o["type"] = json!(what);
+                o["authenticated"] = json!(i.is_authenticated());
+            }
+            ("error", Err(e)) => {
+                assert_eq!(e.code(), what, "{name}");
+                o["error"] = json!(what);
+            }
+            (r, g) => panic!("{name}: expected {r}, got {g:?}"),
+        }
+        in_session.push(o);
     }
 
     // full stack: JSON → encrypted envelope → frames
@@ -779,11 +1103,12 @@ fn envelope_vectors() -> Value {
     }
 
     json!({
-        "description": "Envelopes (SPEC §4.3). Plaintext = 00 ‖ JSON. Encrypted = 01 ‖ counter(u64 BE) ‖ ChaCha20-Poly1305(key, nonce, plaintext, aad=01) where nonce = direction byte ‖ 000000 ‖ counter(u64 BE); direction phone_to_desktop=01, desktop_to_phone=02. Counters are decimal strings. `open_errors`: open `envelope` with a FRESH receiver of `receiver_role` (which receives the opposite direction of its own sends). `decode`: full decode policy on a fresh receiver; `session` null means no session key established. `stack`: plaintext → envelope (sender's counter) → frames (splitter at `seq`, `mtu`).",
+        "description": "Envelopes (SPEC §4.3; schema in README §10.3). Plaintext = 00 ‖ JSON. Encrypted = 01 ‖ counter(u64 BE) ‖ ChaCha20-Poly1305(key, nonce, plaintext, aad=01) where nonce = direction byte ‖ 000000 ‖ counter(u64 BE); direction phone_to_desktop=01, desktop_to_phone=02. Counters are decimal strings. `open_errors`: open `envelope` with a FRESH receiver of `receiver_role`. `decode`: full receive path; `session` null = no session key, else {key, role, prior} where the receiver first opens every `prior` envelope; `authenticated` = arrived encrypted; `expected` compared as a JSON object with the re-encoded message; `last_accepted_after` (only with a session) is the receiver's last accepted counter afterwards. Names starting `tie:` exercise the error precedence of README §9.1. `in_session`: decode, then apply the Secure-state policy (README §7.4). `stack`: plaintext → envelope (sender's counter) → frames (splitter at `seq`, `mtu`).",
         "plaintext": plaintext,
         "encrypt": encrypt,
         "open_errors": open_errors,
         "decode": decode,
+        "in_session": in_session,
         "stack": stack,
     })
 }
@@ -958,6 +1283,22 @@ fn crypto_vectors() -> Value {
             "p (non-canonical 0)",
             h32("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
         ),
+        (
+            "all-zero with bit 255 set (bit 255 is masked)",
+            h32("0000000000000000000000000000000000000000000000000000000000000080"),
+        ),
+        (
+            "u = 1 with bit 255 set",
+            h32("0100000000000000000000000000000000000000000000000000000000000080"),
+        ),
+        (
+            "order-8 point with bit 255 set",
+            h32("e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b880"),
+        ),
+        (
+            "p with bit 255 set",
+            h32("edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"),
+        ),
     ] {
         assert_eq!(
             phone.shared_secret(&peer).unwrap_err(),
@@ -965,6 +1306,31 @@ fn crypto_vectors() -> Value {
             "{name}"
         );
         x25519_errors.push(json!({ "name": name, "priv": hx(&*phone.secret_bytes()), "peer_pub": hx(&peer), "error": "non_contributory" }));
+    }
+
+    // RFC 7748 §5: the receiver masks bit 255 of a peer's u-coordinate.
+    let mut x25519_high_bit = vec![];
+    for (name, me, peer) in [
+        (
+            "RFC 7748 desktop public key with bit 255 set",
+            &phone,
+            &desk,
+        ),
+        ("patterned public key with bit 255 set", &phone, &k4),
+    ] {
+        let masked = peer.public_bytes();
+        assert_eq!(masked[31] & 0x80, 0);
+        let mut high = masked;
+        high[31] |= 0x80;
+        let ss_hi = me.shared_secret(&high).unwrap();
+        assert_eq!(
+            ss_hi.as_bytes(),
+            me.shared_secret(&masked).unwrap().as_bytes()
+        );
+        x25519_high_bit.push(json!({
+            "name": name, "priv": hx(&*me.secret_bytes()), "peer_pub": hx(&high),
+            "peer_pub_masked": hx(&masked), "shared": hx(ss_hi.as_bytes()),
+        }));
     }
 
     let ss = phone.shared_secret(&desk.public_bytes()).unwrap();
@@ -1184,6 +1550,7 @@ fn crypto_vectors() -> Value {
         "description": "Identity, pairing and session crypto (SPEC §4.4, §4.5). All binary values are lowercase hex. X25519 per RFC 7748 (private keys are raw 32-byte scalars, clamped on use; an all-zero shared secret MUST be rejected). HKDF-SHA256 per RFC 5869 with the given salt/info, output length 32. MACs are HMAC-SHA256 with K_pair as key over the given *_mac_input bytes.",
         "x25519": x25519,
         "x25519_errors": x25519_errors,
+        "x25519_high_bit": x25519_high_bit,
         "pair_key": pair_key,
         "session_key": session_key,
         "pair_mac": pair_mac,
@@ -1483,6 +1850,281 @@ fn messages() -> Value {
             sized(r#"{"t":"zzz","pad":""#, 65_537),
         ),
     ];
+    let mut cases = cases;
+    let ack = |rev: &str| t(&format!(r#"{{"t":"ack","id":"{id}","rev":{rev}}}"#));
+    let ping_with = |member: &str| t(&format!(r#"{{"t":"ping","x":{member}}}"#));
+    let arrays = |k: usize| format!("{}{}", "[".repeat(k), "]".repeat(k));
+    let objects = |k: usize| format!("{}{{}}{}", "{\"a\":".repeat(k - 1), "}".repeat(k - 1));
+    let zeros = b64::encode(&[0u8; 32]);
+    let pr =
+        |nonce: &str| t(&serde_json::json!({"t": "pair_request", "nonce_p": nonce}).to_string());
+    let utt_rev_text = |rev: &str, n: usize| In::Fill {
+        prefix: format!(r#"{{"t":"utt","id":"{id}","rev":{rev},"state":"final","text":""#),
+        fill: "a".into(),
+        count: n,
+        suffix: r#"","ts":0}"#.into(),
+    };
+    cases.extend([
+        // ---- R1: depth (outermost object = depth 1)
+        (
+            "R1 depth 32 (31 nested arrays in an ignored member) is allowed",
+            ping_with(&arrays(31)),
+        ),
+        (
+            "R1 depth 33 (32 nested arrays in an ignored member) is invalid_json",
+            ping_with(&arrays(32)),
+        ),
+        (
+            "R1 depth 32 with nested objects is allowed",
+            ping_with(&objects(31)),
+        ),
+        (
+            "R1 depth 33 with nested objects is invalid_json",
+            ping_with(&objects(32)),
+        ),
+        (
+            "R1 depth 200 in an unknown type is invalid_json",
+            t(&format!(r#"{{"t":"future","x":{}}}"#, arrays(200))),
+        ),
+        (
+            "R1 top-level array of depth 33 is invalid_json (not invalid_message)",
+            t(&arrays(33)),
+        ),
+        (
+            "R1 top-level array of depth 32 is invalid_message (valid JSON, not an object)",
+            t(&arrays(32)),
+        ),
+        // ---- R1: finite numbers
+        ("R1 1e400 in an ignored member", ping_with("1e400")),
+        (
+            "R1 -1e400 nested in an ignored member",
+            ping_with(r#"[{"y":-1e400}]"#),
+        ),
+        ("R1 1e309 overflows binary64", ping_with("1e309")),
+        (
+            "R1 1.7976931348623157e308 (max double) is finite",
+            ping_with("1.7976931348623157e308"),
+        ),
+        (
+            "R1 1.7976931348623159e308 rounds to infinity",
+            ping_with("1.7976931348623159e308"),
+        ),
+        (
+            "R1 1e-400 underflows to 0 and is finite",
+            ping_with("1e-400"),
+        ),
+        (
+            "R1 39-digit integer in an ignored member is finite",
+            ping_with("123456789012345678901234567890123456789"),
+        ),
+        ("R1 1e400 in unknown type", t(r#"{"t":"future","x":1e400}"#)),
+        (
+            "R1 1e400 in utt.rev is invalid_json, not invalid_message",
+            t(&utt("x").replace(r#""rev":7"#, r#""rev":1e400"#)),
+        ),
+        (
+            "R1 1e400 in hello.v is invalid_json",
+            t(r#"{"t":"hello","v":1e400}"#),
+        ),
+        // ---- R1: lone surrogates
+        (
+            "R1 lone high surrogate in an ignored member",
+            ping_with(r#""\ud800""#),
+        ),
+        (
+            "R1 lone low surrogate in an ignored member",
+            ping_with(r#""\udfff""#),
+        ),
+        (
+            "R1 high surrogate followed by a non-escape",
+            ping_with(r#""\ud800A""#),
+        ),
+        (
+            "R1 high surrogate followed by a non-low escape",
+            ping_with(r#""\ud800A""#),
+        ),
+        ("R1 reversed surrogate pair", ping_with(r#""\udc00\ud800""#)),
+        (
+            "R1 lone surrogate in a key",
+            t(r#"{"t":"ping","\ud800":1}"#),
+        ),
+        (
+            "R1 lone surrogate in utt.text",
+            t(&utt("x").replace(r#""text":"x""#, r#""text":"a\ud83d""#)),
+        ),
+        (
+            "R1 valid surrogate pair in an ignored member",
+            ping_with(r#""😀""#),
+        ),
+        // ---- R1: duplicate keys
+        ("R1 duplicate t", t(r#"{"t":"ping","t":"pong"}"#)),
+        (
+            "R1 duplicate t, second spelled with an escape",
+            t(r#"{"t":"ping","t":"utt"}"#),
+        ),
+        (
+            "R1 duplicate field in a known type",
+            t(&format!(r#"{{"t":"ack","id":"{id}","rev":1,"rev":2}}"#)),
+        ),
+        (
+            "R1 duplicate key nested in an ignored member",
+            ping_with(r#"[{"k":1,"k":1}]"#),
+        ),
+        (
+            "R1 duplicate key in an unknown type",
+            t(r#"{"t":"future","a":1,"a":1}"#),
+        ),
+        (
+            "R1 same key in sibling objects is fine",
+            ping_with(r#"{"a":{"k":1},"b":{"k":1}}"#),
+        ),
+        // ---- R1: integer fields
+        ("integer field -0 is invalid_message", ack("-0")),
+        ("integer field 1.0 is invalid_message", ack("1.0")),
+        ("integer field 1e0 is invalid_message", ack("1e0")),
+        ("integer field 0.0 is invalid_message", ack("0.0")),
+        (
+            "integer field 4294967296 (u32 max + 1) is invalid_message",
+            ack("4294967296"),
+        ),
+        ("integer field 0 is fine", ack("0")),
+        (
+            "hello v -0 is invalid_message",
+            t(r#"{"t":"hello","v":-0}"#),
+        ),
+        (
+            "hello v 1.0 is invalid_message",
+            t(&hello.replace(r#""v":1"#, r#""v":1.0"#)),
+        ),
+        (
+            "hello v 1e0 is invalid_message",
+            t(&hello.replace(r#""v":1"#, r#""v":1e0"#)),
+        ),
+        (
+            "hello v 2^64 is invalid_message",
+            t(r#"{"t":"hello","v":18446744073709551616}"#),
+        ),
+        (
+            "hello v 2^64-1 is hello_unsupported",
+            t(r#"{"t":"hello","v":18446744073709551615,"name":5}"#),
+        ),
+        (
+            "utt ts 2^64 is invalid_message",
+            t(&utt("x").replace("1759500000000", "18446744073709551616")),
+        ),
+        (
+            "utt ts -0 is invalid_message",
+            t(&utt("x").replace("1759500000000", "-0")),
+        ),
+        // ---- null for optional fields
+        (
+            "error msg null is the same as absent",
+            t(r#"{"t":"error","code":"bad_mac","msg":null}"#),
+        ),
+        (
+            "error msg of the wrong type",
+            t(r#"{"t":"error","code":"bad_mac","msg":5}"#),
+        ),
+        (
+            "error code null is invalid",
+            t(r#"{"t":"error","code":null}"#),
+        ),
+        (
+            "pair_result ok:true with null mac",
+            t(r#"{"t":"pair_result","ok":true,"mac":null}"#),
+        ),
+        // ---- pair_result ok:false ignores mac entirely
+        (
+            "pair_result fail with non-base64 mac is ignored",
+            t(r#"{"t":"pair_result","ok":false,"mac":"garbage"}"#),
+        ),
+        (
+            "pair_result fail with numeric mac is ignored",
+            t(r#"{"t":"pair_result","ok":false,"mac":123}"#),
+        ),
+        (
+            "pair_result fail with object mac is ignored",
+            t(r#"{"t":"pair_result","ok":false,"mac":{}}"#),
+        ),
+        (
+            "pair_result fail with 31-byte mac is ignored",
+            t(&format!(
+                r#"{{"t":"pair_result","ok":false,"mac":"{}"}}"#,
+                b64::encode(&[7; 31])
+            )),
+        ),
+        (
+            "pair_result ok:true with 31-byte mac",
+            t(&format!(
+                r#"{{"t":"pair_result","ok":true,"mac":"{}"}}"#,
+                b64::encode(&[7; 31])
+            )),
+        ),
+        (
+            "pair_result ok as string",
+            t(r#"{"t":"pair_result","ok":"false"}"#),
+        ),
+        // ---- strict base64
+        ("base64 canonical all-zero value", pr(&zeros)),
+        (
+            "base64 non-zero trailing bits (B=)",
+            pr(&format!("{}B=", &zeros[..42])),
+        ),
+        (
+            "base64 non-zero trailing bits (D=)",
+            pr(&format!("{}D=", &zeros[..42])),
+        ),
+        ("base64 extra '='", pr(&format!("{zeros}="))),
+        (
+            "base64 '==' padding at the 32-byte length",
+            pr(&format!("{}==", &zeros[..42])),
+        ),
+        ("base64 missing padding", pr(zeros.trim_end_matches('='))),
+        ("base64 trailing newline", pr(&format!("{zeros}\n"))),
+        (
+            "base64 embedded space",
+            pr(&format!("{} {}", &zeros[..22], &zeros[22..])),
+        ),
+        (
+            "base64 embedded CRLF",
+            pr(&format!("{}\r\n{}", &zeros[..22], &zeros[22..])),
+        ),
+        ("base64 empty string", pr("")),
+        // ---- error precedence ties (README §9.1)
+        (
+            "tie: >65536 bytes AND invalid JSON → message_too_large",
+            In::Fill {
+                prefix: r#"{"t":"ping","pad":""#.into(),
+                fill: "a".into(),
+                count: 65_536,
+                suffix: String::new(),
+            },
+        ),
+        (
+            "tie: invalid JSON (1e400) AND bad field → invalid_json",
+            t(&utt("x").replace(r#""rev":7"#, r#""rev":-1,"x":1e400"#)),
+        ),
+        (
+            "tie: duplicate key AND t not a string → invalid_json",
+            t(r#"{"t":5,"t":5}"#),
+        ),
+        (
+            "tie: t not a string AND bad fields → invalid_message",
+            t(r#"{"t":1,"rev":-1}"#),
+        ),
+        (
+            "tie: bad field AND text over 32000 bytes → invalid_message",
+            utt_rev_text("-1", 32_001),
+        ),
+        (
+            "tie: text over 32000 bytes AND every field valid → text_too_long",
+            utt_rev_text("1", 32_001),
+        ),
+        (
+            "tie: hello v != 1 AND every other field invalid → hello_unsupported",
+            t(r#"{"t":"hello","v":3,"device_id":7,"pub":"x","paired":"no"}"#),
+        ),
+    ]);
 
     let mut decode = vec![];
     for (name, input) in cases {
@@ -1516,14 +2158,15 @@ fn messages() -> Value {
             Ok(m) => {
                 o["result"] = json!("message");
                 o["type"] = json!(m.type_name());
-                let canon: Value = serde_json::from_slice(&m.to_json().unwrap()).unwrap();
+                let mut canon: Value = serde_json::from_slice(&m.to_json().unwrap()).unwrap();
                 // keep huge canonical texts out of the file; the fill already describes them
-                if bytes.len() > 4096 {
-                    if let Message::Utt(u) = &m {
+                match &m {
+                    Message::Utt(u) if u.text.len() > 1024 => {
                         o["text_bytes"] = json!(u.text.len());
+                        canon.as_object_mut().unwrap().remove("text");
+                        o["expected_without_text"] = canon;
                     }
-                } else {
-                    o["expected"] = canon;
+                    _ => o["expected"] = canon,
                 }
             }
             Err(e) => {
@@ -1555,40 +2198,124 @@ fn messages() -> Value {
         encode.push(json!({ "type": m.type_name(), "json": j, "object": serde_json::from_str::<Value>(j).unwrap() }));
     }
     let mut encode_errors = vec![];
-    for (name, m, err) in [
+    let uid = b64::parse_uuid(id).unwrap();
+    let utt_msg = |text: String| {
+        Message::Utt(vq_protocol::Utt {
+            id: uid,
+            rev: 0,
+            state: vq_protocol::UttState::Final,
+            text,
+            ts: 0,
+        })
+    };
+    let utt_obj = json!({"t": "utt", "id": id, "rev": 0, "state": "final", "ts": 0});
+    let mut hello_v2 = vq_protocol::Hello {
+        v: 1,
+        device_id: uid,
+        name: "Jon's iPhone".into(),
+        public_key: pattern(0x00),
+        paired: true,
+        session_nonce: pattern(0x20),
+    };
+    hello_v2.v = 2;
+    let cases: Vec<(&str, Message, Value, Option<(&str, usize)>, &str)> = vec![
         (
             "utt text 32001 bytes",
-            Message::Utt(vq_protocol::Utt {
-                id: b64::parse_uuid(id).unwrap(),
-                rev: 0,
-                state: vq_protocol::UttState::Final,
-                text: "a".repeat(32_001),
-                ts: 0,
-            }),
+            utt_msg("a".repeat(32_001)),
+            utt_obj.clone(),
+            Some(("a", 32_001)),
             "text_too_long",
         ),
         (
             "utt of 32000 U+0001 chars escapes past 64 KiB",
-            Message::Utt(vq_protocol::Utt {
-                id: b64::parse_uuid(id).unwrap(),
-                rev: 0,
-                state: vq_protocol::UttState::Final,
-                text: "\u{1}".repeat(32_000),
-                ts: 0,
-            }),
+            utt_msg("\u{1}".repeat(32_000)),
+            utt_obj.clone(),
+            Some(("\u{1}", 32_000)),
             "message_too_large",
         ),
+        (
+            "tie: text over the limit AND escapes past 64 KiB → text_too_long",
+            utt_msg("\u{1}".repeat(32_001)),
+            utt_obj.clone(),
+            Some(("\u{1}", 32_001)),
+            "text_too_long",
+        ),
+        (
+            "hello with v 2 cannot be encoded",
+            Message::Hello(hello_v2),
+            json!({"t": "hello", "v": 2, "device_id": id, "name": "Jon's iPhone", "pub": k, "paired": true, "session_nonce": n}),
+            None,
+            "not_encodable",
+        ),
+        (
+            "pair_result ok:false with a mac",
+            Message::PairResult(vq_protocol::PairResult {
+                ok: false,
+                mac: Some(pattern(0x00)),
+            }),
+            json!({"t": "pair_result", "ok": false, "mac": k}),
+            None,
+            "not_encodable",
+        ),
+        (
+            "pair_result ok:true without a mac",
+            Message::PairResult(vq_protocol::PairResult {
+                ok: true,
+                mac: None,
+            }),
+            json!({"t": "pair_result", "ok": true}),
+            None,
+            "not_encodable",
+        ),
+    ];
+    for (name, m, obj, fill, err) in cases {
+        assert_eq!(m.to_json().unwrap_err().code(), err, "{name}");
+        let mut o = json!({ "name": name, "message": obj, "error": err });
+        if let Some((f, count)) = fill {
+            o["text_fill"] = json!({ "fill": f, "count": count });
+        }
+        encode_errors.push(o);
+    }
+
+    // utt sizing helper (README §5.8): fits / max_prefix_bytes
+    let mut utt_fits = vec![];
+    for (name, f, count) in [
+        ("empty text", "a", 0usize),
+        ("32000 ASCII bytes", "a", 32_000),
+        ("32001 ASCII bytes", "a", 32_001),
+        (
+            "32000 quotes escape to 64000 bytes and still fit",
+            "\"",
+            32_000,
+        ),
+        (
+            "10897 U+0001 chars (6 bytes each) fit exactly",
+            "\u{1}",
+            10_897,
+        ),
+        ("10898 U+0001 chars do not fit", "\u{1}", 10_898),
+        ("32000 U+0001 chars do not fit", "\u{1}", 32_000),
+        ("8000 four-byte emoji", "\u{1F600}", 8_000),
+        ("8001 four-byte emoji", "\u{1F600}", 8_001),
+        ("10667 three-byte chars (32001 bytes)", "日", 10_667),
+        ("newlines escape to 2 bytes", "\n", 32_000),
     ] {
-        assert_eq!(m.to_json().unwrap_err().code(), err);
-        let Message::Utt(u) = &m else { unreachable!() };
-        encode_errors.push(json!({ "name": name, "type": "utt", "text_fill": { "fill": u.text.chars().next().unwrap().to_string(), "count": u.text.chars().count() }, "error": err }));
+        let text = f.repeat(count);
+        utt_fits.push(json!({
+            "name": name,
+            "text_fill": { "fill": f, "count": count },
+            "fits": vq_protocol::utt_text_fits(&text),
+            "max_prefix_bytes": vq_protocol::max_text_prefix(&text).len(),
+        }));
     }
 
     json!({
-        "description": "JSON messages (SPEC §4.1, §4.4–4.6). `decode`: the input is `json` (UTF-8 text), `json_hex` (raw bytes) or `json_fill` (prefix + fill repeated count times + suffix, as UTF-8). `result` is `message` (with canonical `expected` object to compare field-by-field; omitted for very large inputs), `unknown` (unknown `t`; log and drop), `hello_unsupported` (`hello` with integer v != 1; `peer_name` is the `name` if it was a string), or `error` with an error code. `encode`: the canonical compact encoding the Rust implementation emits (\"t\" first, then fields in the listed order). Byte-equality of encodings is NOT required across implementations; receivers must accept any valid JSON. `encode_errors`: encoding must fail.",
+        "description": "JSON messages (SPEC §4.1, §4.4–4.6; schema in README §10.6). `decode`: the input is `json` (UTF-8 text), `json_hex` (raw bytes) or `json_fill` (prefix + fill repeated count times + suffix, as UTF-8). `result` is `message` (compare the re-encoded message as a JSON object with `expected`, or for large utts with `expected_without_text` plus `text_bytes`), `unknown` (unknown `t`; log and drop), `hello_unsupported` (`hello` with integer v != 1; `peer_name` is the `name` if it was a string), or `error` with an error code. Names starting `R1` exercise the JSON strictness rules of README §5.1; names starting `tie:` the error precedence of README §9.1. `encode`: the canonical compact encoding the Rust implementation emits (informative). `encode_errors`: encoding `message` (wire-form object; `text_fill` gives utt.text) must fail with `error`. `utt_fits`: the sender size rule of README §5.8.",
         "decode": decode,
         "encode": encode,
         "encode_errors": encode_errors,
+        "utt_max_overhead_bytes": vq_protocol::message::UTT_MAX_OVERHEAD_BYTES,
+        "utt_fits": utt_fits,
     })
 }
 

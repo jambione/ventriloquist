@@ -11,6 +11,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use uuid::Uuid;
 
+use crate::error::excerpt;
+
 /// Encode bytes as standard, padded base64.
 pub fn encode(bytes: &[u8]) -> String {
     STANDARD.encode(bytes)
@@ -18,6 +20,8 @@ pub fn encode(bytes: &[u8]) -> String {
 
 /// Strictly decode standard, padded base64 into exactly `N` bytes.
 pub fn decode_fixed<const N: usize>(s: &str) -> Result<[u8; N], String> {
+    // The base64 crate's errors name one offending byte and its offset, so
+    // they are bounded; the input itself is never echoed.
     let v = STANDARD
         .decode(s.as_bytes())
         .map_err(|e| format!("invalid base64: {e}"))?;
@@ -34,9 +38,9 @@ pub fn parse_uuid(s: &str) -> Result<Uuid, String> {
             _ => c.is_ascii_hexdigit(),
         });
     if !hyphenated {
-        return Err(format!("expected a hyphenated UUID, got {s:?}"));
+        return Err(format!("expected a hyphenated UUID, got {}", excerpt(s)));
     }
-    Uuid::try_parse(s).map_err(|e| format!("invalid UUID: {e}"))
+    Uuid::try_parse(s).map_err(|_| format!("invalid UUID {}", excerpt(s)))
 }
 
 /// Format a UUID in lowercase hyphenated form.
@@ -44,61 +48,26 @@ pub fn format_uuid(u: &Uuid) -> String {
     u.hyphenated().to_string()
 }
 
-/// `#[serde(with = "b64::bytes32")]` for `[u8; 32]` fields.
-pub mod bytes32 {
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+/// `#[serde(serialize_with = "b64::bytes32")]` for `[u8; 32]` fields.
+pub(crate) fn bytes32<S: serde::Serializer>(v: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&encode(v))
+}
 
-    /// Serialize as base64.
-    pub fn serialize<S: Serializer>(v: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&super::encode(v))
-    }
-
-    /// Deserialize from base64, requiring exactly 32 bytes.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
-        let s = String::deserialize(d)?;
-        super::decode_fixed::<32>(&s).map_err(D::Error::custom)
+/// `#[serde(serialize_with = "b64::opt_bytes32")]` for `Option<[u8; 32]>` fields
+/// (callers skip `None`).
+pub(crate) fn opt_bytes32<S: serde::Serializer>(
+    v: &Option<[u8; 32]>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
+    match v {
+        Some(b) => s.serialize_str(&encode(b)),
+        None => s.serialize_none(),
     }
 }
 
-/// `#[serde(with = "b64::opt_bytes32")]` for `Option<[u8; 32]>` fields
-/// (absent and `null` both mean `None`; use with `#[serde(default)]`).
-pub mod opt_bytes32 {
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
-
-    /// Serialize `Some` as base64 (callers skip `None`).
-    pub fn serialize<S: Serializer>(v: &Option<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
-        match v {
-            Some(b) => s.serialize_str(&super::encode(b)),
-            None => s.serialize_none(),
-        }
-    }
-
-    /// Deserialize optional base64 of exactly 32 bytes.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[u8; 32]>, D::Error> {
-        match Option::<String>::deserialize(d)? {
-            None => Ok(None),
-            Some(s) => super::decode_fixed::<32>(&s)
-                .map(Some)
-                .map_err(D::Error::custom),
-        }
-    }
-}
-
-/// `#[serde(with = "b64::uuid_str")]` for strict hyphenated, lowercase-emitted UUIDs.
-pub mod uuid_str {
-    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
-    use uuid::Uuid;
-
-    /// Serialize lowercase hyphenated.
-    pub fn serialize<S: Serializer>(v: &Uuid, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&super::format_uuid(v))
-    }
-
-    /// Deserialize hyphenated, case-insensitive.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Uuid, D::Error> {
-        let s = String::deserialize(d)?;
-        super::parse_uuid(&s).map_err(D::Error::custom)
-    }
+/// `#[serde(serialize_with = "b64::uuid_str")]`: lowercase hyphenated UUID.
+pub(crate) fn uuid_str<S: serde::Serializer>(v: &Uuid, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&format_uuid(v))
 }
 
 #[cfg(test)]
@@ -139,5 +108,9 @@ mod tests {
         assert!(parse_uuid("urn:uuid:1a2b3c4d-0000-4000-8000-00000000000f").is_err());
         assert!(parse_uuid("1a2b3c4d-0000-4000-8000-00000000000g").is_err());
         assert!(parse_uuid("").is_err());
+        // error text never echoes unbounded input
+        let long = "x".repeat(10_000);
+        assert!(parse_uuid(&long).unwrap_err().len() < 200);
+        assert!(decode_fixed::<32>(&long).unwrap_err().len() < 200);
     }
 }

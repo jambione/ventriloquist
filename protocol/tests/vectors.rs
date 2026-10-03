@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use serde_json::Value;
 use vq_protocol::crypto::{self, pair_info, PairingCode, SharedSecret, SESSION_INFO};
 use vq_protocol::envelope::{decode_envelope, encode_plaintext, nonce, seal_with, Direction};
-use vq_protocol::{FrameSplitter, IdentityKeyPair, Message, Reassembler, Role, SessionCipher};
+use vq_protocol::{
+    check_in_session, decode_inbound, FrameSplitter, IdentityKeyPair, Inbound, Message, PairKey,
+    Reassembler, Role, SessionCipher, SessionNonce,
+};
 
 fn load(name: &str) -> Value {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -38,10 +41,7 @@ fn bytes(v: &Value) -> Vec<u8> {
             let fill = h("fill_hex");
             assert_eq!(fill.len(), 1);
             let mut out = h("prefix_hex");
-            out.extend(std::iter::repeat_n(
-                fill[0],
-                o["fill_count"].as_u64().unwrap() as usize,
-            ));
+            out.extend(std::iter::repeat_n(fill[0], usz(&o["fill_count"])));
             out.extend(h("suffix_hex"));
             out
         }
@@ -59,6 +59,16 @@ fn s(v: &Value) -> &str {
 
 fn u64s(v: &Value) -> u64 {
     s(v).parse().unwrap()
+}
+
+/// A JSON number that must fit `usize` exactly (no truncating casts).
+fn usz(v: &Value) -> usize {
+    usize::try_from(v.as_u64().unwrap()).unwrap()
+}
+
+/// A JSON number that must fit `u16` exactly.
+fn u16n(v: &Value) -> u16 {
+    u16::try_from(v.as_u64().unwrap()).unwrap()
 }
 
 fn role(v: &Value) -> Role {
@@ -82,10 +92,8 @@ fn framing_vectors() {
     let v = load("framing");
     for c in arr(&v, "split") {
         let name = s(&c["name"]);
-        let mut sp = FrameSplitter::with_seq(c["seq"].as_u64().unwrap() as u16);
-        let frames = sp
-            .split(&bytes(&c["message"]), c["mtu"].as_u64().unwrap() as usize)
-            .unwrap();
+        let mut sp = FrameSplitter::with_seq(u16n(&c["seq"]));
+        let frames = sp.split(&bytes(&c["message"]), usz(&c["mtu"])).unwrap();
         let want: Vec<Vec<u8>> = c["frames"].as_array().unwrap().iter().map(bytes).collect();
         assert_eq!(frames, want, "{name}");
         assert_eq!(
@@ -103,20 +111,18 @@ fn framing_vectors() {
     }
     for c in arr(&v, "split_large") {
         let msg = bytes(&c["message"]);
-        let frames = FrameSplitter::with_seq(c["seq"].as_u64().unwrap() as u16)
-            .split(&msg, c["mtu"].as_u64().unwrap() as usize)
+        let frames = FrameSplitter::with_seq(u16n(&c["seq"]))
+            .split(&msg, usz(&c["mtu"]))
             .unwrap();
-        assert_eq!(frames.len() as u64, c["frame_count"].as_u64().unwrap());
+        assert_eq!(frames.len(), usz(&c["frame_count"]));
         assert_eq!(hex::encode(&frames[0][..3]), s(&c["first_frame_header"]));
         let last = frames.last().unwrap();
         assert_eq!(hex::encode(&last[..3]), s(&c["last_frame_header"]));
-        assert_eq!(last.len() as u64, c["last_frame_len"].as_u64().unwrap());
+        assert_eq!(last.len(), usz(&c["last_frame_len"]));
     }
     for c in arr(&v, "split_errors") {
         let mut sp = FrameSplitter::new();
-        let e = sp
-            .split(&bytes(&c["message"]), c["mtu"].as_u64().unwrap() as usize)
-            .unwrap_err();
+        let e = sp.split(&bytes(&c["message"]), usz(&c["mtu"])).unwrap_err();
         assert_eq!(e.code(), s(&c["error"]), "{}", s(&c["name"]));
         assert_eq!(sp.next_seq(), 0);
     }
@@ -188,17 +194,38 @@ fn envelope_vectors() {
     }
     for c in arr(&v, "decode") {
         let name = s(&c["name"]);
-        let mut sess = match &c["session"] {
-            Value::Null => None,
-            o => Some(SessionCipher::new(&b32(&o["key"]), role(&o["role"]))),
-        };
-        let got = decode_envelope(&bytes(&c["envelope"]), sess.as_mut());
+        let mut sess = session_from(&c["session"]);
+        let got = decode_inbound(&bytes(&c["envelope"]), sess.as_mut());
+        check_inbound(name, c, got);
+        if let Some(rx) = &sess {
+            let want = match &c["last_accepted_after"] {
+                Value::Null => None,
+                x => Some(u64s(x)),
+            };
+            assert_eq!(rx.last_received_counter(), want, "{name}");
+        } else {
+            assert!(c.get("last_accepted_after").is_none(), "{name}");
+        }
+        // the provenance-free test helper agrees
+        let mut sess2 = session_from(&c["session"]);
+        let r2 = decode_envelope(&bytes(&c["envelope"]), sess2.as_mut());
+        assert_eq!(r2.is_ok(), s(&c["result"]) != "error", "{name}");
+    }
+    for c in arr(&v, "in_session") {
+        let name = s(&c["name"]);
+        let mut sess = session_from(&c["session"]);
+        assert!(sess.is_some(), "{name}");
+        let got = decode_inbound(&bytes(&c["envelope"]), sess.as_mut())
+            .and_then(|i| check_in_session(&i).map(|()| i));
         match (s(&c["result"]), got) {
-            ("message", Ok(m)) => {
-                assert!(!matches!(m, Message::Unknown { .. }), "{name}");
-                assert_eq!(m.type_name(), s(&c["type"]), "{name}");
+            ("ok", Ok(i)) => {
+                assert_eq!(i.message().type_name(), s(&c["type"]), "{name}");
+                assert_eq!(
+                    i.is_authenticated(),
+                    c["authenticated"].as_bool().unwrap(),
+                    "{name}"
+                );
             }
-            ("unknown", Ok(Message::Unknown { t })) => assert_eq!(t, s(&c["type"]), "{name}"),
             ("error", Err(e)) => assert_eq!(e.code(), s(&c["error"]), "{name}"),
             (want, got) => panic!("{name}: want {want}, got {got:?}"),
         }
@@ -211,8 +238,8 @@ fn envelope_vectors() {
         let mut tx = SessionCipher::new(&key, sender).with_send_counter(u64s(&c["counter"]));
         let env = tx.seal(pt).unwrap();
         assert_eq!(env, bytes(&c["envelope"]), "{name}");
-        let frames = FrameSplitter::with_seq(c["seq"].as_u64().unwrap() as u16)
-            .split(&env, c["mtu"].as_u64().unwrap() as usize)
+        let frames = FrameSplitter::with_seq(u16n(&c["seq"]))
+            .split(&env, usz(&c["mtu"]))
             .unwrap();
         let want: Vec<Vec<u8>> = c["frames"].as_array().unwrap().iter().map(bytes).collect();
         assert_eq!(frames, want, "{name}");
@@ -230,6 +257,87 @@ fn envelope_vectors() {
         let mut rx = SessionCipher::new(&key, receiver);
         let m = decode_envelope(&out.unwrap(), Some(&mut rx)).unwrap();
         assert_eq!(m, Message::from_json(pt).unwrap(), "{name}");
+    }
+}
+
+/// A desktop/phone receiver for `session` (null = no session), after opening
+/// every envelope in `session.prior`.
+fn session_from(v: &Value) -> Option<SessionCipher> {
+    match v {
+        Value::Null => None,
+        o => {
+            let mut c = SessionCipher::new(&b32(&o["key"]), role(&o["role"]));
+            for e in o["prior"].as_array().unwrap() {
+                c.open(&bytes(e)).unwrap();
+            }
+            Some(c)
+        }
+    }
+}
+
+/// Compare a decoded message with a vector's canonical `expected` object
+/// (and, for large utts, `expected_without_text` + `text_bytes`).
+fn check_expected(name: &str, c: &Value, m: &Message) {
+    let mut canon: Value = serde_json::from_slice(&m.to_json().unwrap()).unwrap();
+    if let Some(exp) = c.get("expected") {
+        assert_eq!(&canon, exp, "{name}");
+        // the canonical form decodes to the same message
+        assert_eq!(
+            &Message::from_json(&serde_json::to_vec(exp).unwrap()).unwrap(),
+            m,
+            "{name}"
+        );
+    } else {
+        let Message::Utt(u) = m else {
+            panic!("{name}: no `expected` on a non-utt")
+        };
+        assert_eq!(u.text.len(), usz(&c["text_bytes"]), "{name}");
+        canon.as_object_mut().unwrap().remove("text");
+        assert_eq!(&canon, &c["expected_without_text"], "{name}");
+    }
+}
+
+fn check_inbound(name: &str, c: &Value, got: vq_protocol::Result<Inbound>) {
+    let auth = |i: &Inbound| {
+        assert_eq!(
+            i.is_authenticated(),
+            c["authenticated"].as_bool().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            matches!(i, Inbound::Encrypted(_)),
+            bytes(&c["envelope"])[0] == 0x01,
+            "{name}"
+        );
+    };
+    match (s(&c["result"]), got) {
+        ("message", Ok(i)) => {
+            auth(&i);
+            let m = i.into_message();
+            assert!(
+                !matches!(m, Message::Unknown { .. } | Message::HelloUnsupported(_)),
+                "{name}"
+            );
+            assert_eq!(m.type_name(), s(&c["type"]), "{name}");
+            check_expected(name, c, &m);
+        }
+        ("unknown", Ok(i)) => {
+            auth(&i);
+            let Message::Unknown { t } = i.into_message() else {
+                panic!("{name}: want unknown")
+            };
+            assert_eq!(t, s(&c["type"]), "{name}");
+        }
+        ("hello_unsupported", Ok(i)) => {
+            auth(&i);
+            let Message::HelloUnsupported(h) = i.into_message() else {
+                panic!("{name}: want hello_unsupported")
+            };
+            assert_eq!(h.v, c["v"].as_u64().unwrap(), "{name}");
+            assert_eq!(h.name.as_deref(), c["peer_name"].as_str(), "{name}");
+        }
+        ("error", Err(e)) => assert_eq!(e.code(), s(&c["error"]), "{name}"),
+        (want, got) => panic!("{name}: want {want}, got {got:?}"),
     }
 }
 
@@ -293,6 +401,25 @@ fn crypto_vectors() {
             "{}",
             s(&c["name"])
         );
+    }
+    for c in arr(&v, "x25519_high_bit") {
+        let a = IdentityKeyPair::from_secret_bytes(b32(&c["priv"]));
+        let hi = b32(&c["peer_pub"]);
+        let lo = b32(&c["peer_pub_masked"]);
+        assert_eq!(hi[31] & 0x80, 0x80);
+        assert_eq!(lo, {
+            let mut m = hi;
+            m[31] &= 0x7F;
+            m
+        });
+        for p in [hi, lo] {
+            assert_eq!(
+                a.shared_secret(&p).unwrap().as_bytes(),
+                &b32(&c["shared"]),
+                "{}",
+                s(&c["name"])
+            );
+        }
     }
     for c in arr(&v, "pair_key") {
         let code: PairingCode = s(&c["code"]).parse().unwrap();
@@ -366,7 +493,8 @@ fn crypto_vectors() {
         }
     }
     for c in arr(&v, "code_format") {
-        let code = PairingCode::from_u32(c["value"].as_u64().unwrap() as u32).unwrap();
+        let code =
+            PairingCode::from_u32(u32::try_from(c["value"].as_u64().unwrap()).unwrap()).unwrap();
         assert_eq!(code.to_string(), s(&c["string"]));
         assert_eq!(&code.ascii(), s(&c["string"]).as_bytes());
     }
@@ -423,12 +551,42 @@ fn crypto_vectors() {
         let k_sess = crypto::derive_session_key(&ss_d, &hp.session_nonce, &hd.session_nonce);
         assert_eq!(k_sess, b32(&c["k_sess"]));
 
-        let mut phone_c = SessionCipher::new(&k_sess, Role::Phone);
-        let mut desk_c = SessionCipher::new(&k_sess, Role::Desktop);
+        // The production API reproduces the same keys and MACs.
+        let pk_phone = PairKey::derive(&phone, Role::Phone, &pd, req, ch, &code).unwrap();
+        let pk_desk = PairKey::derive(&desk, Role::Desktop, &pp, req, ch, &code).unwrap();
+        assert_eq!(pk_phone.key_bytes_for_tests(), b32(&c["k_pair"]));
+        assert_eq!(pk_desk.key_bytes_for_tests(), b32(&c["k_pair"]));
+        assert_eq!(&pk_phone.confirm_message(), conf);
+        assert_eq!(&pk_desk.success_message(), res);
+        pk_desk.verify_phone_mac(&conf.mac).unwrap();
+        pk_phone.verify_desktop_mac(&res.mac.unwrap()).unwrap();
+
+        let mut phone_c = SessionCipher::establish(
+            &phone,
+            Role::Phone,
+            &hd.public_key,
+            SessionNonce::from_bytes_for_tests(hp.session_nonce),
+            &hd.session_nonce,
+        )
+        .unwrap();
+        let mut desk_c = SessionCipher::establish(
+            &desk,
+            Role::Desktop,
+            &hp.public_key,
+            SessionNonce::from_bytes_for_tests(hd.session_nonce),
+            &hp.session_nonce,
+        )
+        .unwrap();
+        // ...and agrees with the raw key from the vector
+        let mut raw_rx = SessionCipher::new(&k_sess, Role::Desktop);
         let utt_env = phone_c
             .seal(s(&c["first_utt_plaintext_utf8"]).as_bytes())
             .unwrap();
         assert_eq!(utt_env, bytes(&c["first_utt_envelope"]));
+        assert_eq!(
+            raw_rx.open(&utt_env).unwrap(),
+            s(&c["first_utt_plaintext_utf8"]).as_bytes()
+        );
         assert!(matches!(
             decode_envelope(&utt_env, Some(&mut desk_c)).unwrap(),
             Message::Utt(_)
@@ -454,7 +612,7 @@ fn message_input(c: &Value) -> Vec<u8> {
         format!(
             "{}{}{}",
             s(&f["prefix"]),
-            s(&f["fill"]).repeat(f["count"].as_u64().unwrap() as usize),
+            s(&f["fill"]).repeat(usz(&f["count"])),
             s(&f["suffix"])
         )
         .into_bytes()
@@ -474,21 +632,7 @@ fn message_vectors() {
                     "{name}"
                 );
                 assert_eq!(m.type_name(), s(&c["type"]), "{name}");
-                if let Some(exp) = c.get("expected") {
-                    let canon: Value = serde_json::from_slice(&m.to_json().unwrap()).unwrap();
-                    assert_eq!(&canon, exp, "{name}");
-                    // the canonical form decodes to the same message
-                    assert_eq!(
-                        Message::from_json(&serde_json::to_vec(exp).unwrap()).unwrap(),
-                        m,
-                        "{name}"
-                    );
-                } else if let Some(n) = c.get("text_bytes") {
-                    let Message::Utt(u) = &m else {
-                        panic!("{name}: text_bytes on non-utt")
-                    };
-                    assert_eq!(u.text.len() as u64, n.as_u64().unwrap(), "{name}");
-                }
+                check_expected(name, c, &m);
             }
             ("unknown", Ok(Message::Unknown { t })) => assert_eq!(t, s(&c["type"]), "{name}"),
             ("hello_unsupported", Ok(Message::HelloUnsupported(h))) => {
@@ -507,16 +651,7 @@ fn message_vectors() {
         assert_eq!(&serde_json::from_str::<Value>(j).unwrap(), &c["object"]);
     }
     for c in arr(&v, "encode_errors") {
-        let f = &c["text_fill"];
-        let text = s(&f["fill"]).repeat(f["count"].as_u64().unwrap() as usize);
-        assert_eq!(s(&c["type"]), "utt");
-        let m = Message::Utt(vq_protocol::Utt {
-            id: uuid_nil(),
-            rev: 0,
-            state: vq_protocol::UttState::Final,
-            text,
-            ts: 0,
-        });
+        let m = message_from_object(&c["message"], c.get("text_fill"));
         assert_eq!(
             m.to_json().unwrap_err().code(),
             s(&c["error"]),
@@ -524,10 +659,72 @@ fn message_vectors() {
             s(&c["name"])
         );
     }
+    let overhead = usz(&v["utt_max_overhead_bytes"]);
+    assert_eq!(overhead, vq_protocol::message::UTT_MAX_OVERHEAD_BYTES);
+    for c in arr(&v, "utt_fits") {
+        let name = s(&c["name"]);
+        let f = &c["text_fill"];
+        let text = s(&f["fill"]).repeat(usz(&f["count"]));
+        assert_eq!(
+            vq_protocol::utt_text_fits(&text),
+            c["fits"].as_bool().unwrap(),
+            "{name}"
+        );
+        let prefix = vq_protocol::max_text_prefix(&text);
+        assert_eq!(prefix.len(), usz(&c["max_prefix_bytes"]), "{name}");
+        // the prefix always encodes and seals with worst-case other fields
+        let m = Message::Utt(vq_protocol::Utt {
+            id: uuid::Uuid::nil(),
+            rev: u32::MAX,
+            state: vq_protocol::UttState::Partial,
+            text: prefix.to_owned(),
+            ts: u64::MAX,
+        });
+        assert!(
+            m.to_json().unwrap().len() <= vq_protocol::MAX_ENCRYPTED_JSON_BYTES,
+            "{name}"
+        );
+    }
 }
 
-fn uuid_nil() -> uuid::Uuid {
-    uuid::Uuid::nil()
+/// Build a message (possibly one that cannot be encoded) from a vector's
+/// wire-form object; `text_fill` supplies `utt.text`.
+fn message_from_object(o: &Value, text_fill: Option<&Value>) -> Message {
+    let uuid = |k: &str| vq_protocol::b64::parse_uuid(s(&o[k])).unwrap();
+    let b = |k: &str| vq_protocol::b64::decode_fixed::<32>(s(&o[k])).unwrap();
+    match s(&o["t"]) {
+        "utt" => {
+            let text = match text_fill {
+                Some(f) => s(&f["fill"]).repeat(usz(&f["count"])),
+                None => s(&o["text"]).to_owned(),
+            };
+            Message::Utt(vq_protocol::Utt {
+                id: uuid("id"),
+                rev: u32::try_from(o["rev"].as_u64().unwrap()).unwrap(),
+                state: match s(&o["state"]) {
+                    "partial" => vq_protocol::UttState::Partial,
+                    "final" => vq_protocol::UttState::Final,
+                    "edit" => vq_protocol::UttState::Edit,
+                    x => panic!("state {x}"),
+                },
+                text,
+                ts: o["ts"].as_u64().unwrap(),
+            })
+        }
+        "hello" => Message::Hello(vq_protocol::Hello {
+            v: u32::try_from(o["v"].as_u64().unwrap()).unwrap(),
+            device_id: uuid("device_id"),
+            name: s(&o["name"]).to_owned(),
+            public_key: b("pub"),
+            paired: o["paired"].as_bool().unwrap(),
+            session_nonce: b("session_nonce"),
+        }),
+        "pair_result" => Message::PairResult(vq_protocol::PairResult {
+            ok: o["ok"].as_bool().unwrap(),
+            mac: o.get("mac").map(|_| b("mac")),
+        }),
+        t => panic!("encode_errors: unsupported type {t}"),
+    }
 }
 
 /// Every vector file in the directory is covered by a test above.

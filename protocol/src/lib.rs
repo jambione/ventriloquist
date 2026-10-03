@@ -11,6 +11,23 @@
 //!
 //! `protocol/README.md` is the normative byte-level description; the
 //! vectors in `protocol/vectors/` are authoritative examples.
+//!
+//! # Intended use on a connection
+//!
+//! 1. Send `hello` built with [`Hello::new`], which draws a fresh
+//!    [`crypto::SessionNonce`]. Keep that nonce for this connection only.
+//! 2. Decode every reassembled envelope with [`decode_inbound`]. The result
+//!    says whether the message was authenticated ([`Inbound::Encrypted`]) or
+//!    not ([`Inbound::Plaintext`]). A plaintext `error` is unauthenticated: it
+//!    may end the connection but must never change stored pairing state.
+//! 3. Pair with [`PairKey::derive`] (both sides, each with its own role).
+//! 4. Once both sides know each other, call [`SessionCipher::establish`] with
+//!    the nonce from step 1 (consumed) and the peer's `session_nonce`. Never
+//!    keep a `SessionCipher` across connections.
+//! 5. While Secure, also apply [`check_in_session`] to every decoded message.
+//!
+//! Raw-key helpers (`SessionCipher::new`, `seal_with`, `derive_pair_key`, …)
+//! exist only with the `test-vectors` feature, for vectors and tests.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -20,19 +37,19 @@ pub mod crypto;
 pub mod envelope;
 mod error;
 pub mod framing;
+mod json;
 pub mod message;
 
-pub use crypto::{
-    derive_pair_key, derive_session_key, desktop_result_mac, phone_confirm_mac,
-    verify_desktop_result_mac, verify_phone_confirm_mac, IdentityKeyPair, PairingCode,
-    SharedSecret,
+pub use crypto::{IdentityKeyPair, PairKey, PairingCode, SessionNonce, SharedSecret};
+pub use envelope::{
+    check_in_session, decode_inbound, encode_plaintext, Direction, Envelope, Inbound, Role,
+    SessionCipher,
 };
-pub use envelope::{decode_envelope, encode_plaintext, Direction, Envelope, Role, SessionCipher};
 pub use error::{Error, Result};
 pub use framing::{FrameSplitter, Reassembler};
 pub use message::{
-    Ack, ErrorMsg, Hello, HelloUnsupported, Message, PairChallenge, PairConfirm, PairRequest,
-    PairResult, Utt, UttState,
+    max_text_prefix, utt_text_fits, Ack, ErrorMsg, Hello, HelloUnsupported, Message, PairChallenge,
+    PairConfirm, PairRequest, PairResult, Utt, UttState,
 };
 
 use uuid::{uuid, Uuid};
@@ -43,6 +60,23 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Maximum size, in bytes, of a decoded message: a reassembled envelope or a
 /// JSON message body (64 KiB). Anything strictly larger is rejected.
 pub const MAX_MESSAGE_BYTES: usize = 65_536;
+
+/// Maximum JSON body of an encrypted envelope: 65,536 − 25 bytes of
+/// envelope overhead.
+pub const MAX_ENCRYPTED_JSON_BYTES: usize = MAX_MESSAGE_BYTES - 25;
+
+/// Maximum nesting depth of objects and arrays in a received JSON document
+/// (the outermost object is depth 1). Deeper input is `invalid_json`.
+pub const MAX_JSON_DEPTH: usize = 32;
+
+/// Frame size limit (`mtu`) used on the TCP dev transport.
+pub const TCP_MTU: usize = 512;
+
+/// Default TCP port of the phone side (the server) of the TCP dev transport.
+pub const TCP_DEFAULT_PORT: u16 = 47_800;
+
+/// `mtu` the desktop uses when the negotiated ATT MTU is unknown.
+pub const FALLBACK_MTU: usize = MIN_MTU;
 
 /// Maximum length of `utt.text`, in UTF-8 bytes.
 pub const MAX_TEXT_BYTES: usize = 32_000;
@@ -99,5 +133,9 @@ mod tests {
         assert_eq!(MAX_MESSAGE_BYTES, 64 * 1024);
         const { assert!(MIN_MTU > FRAME_HEADER_BYTES) };
         const { assert!(MAX_TEXT_BYTES < MAX_MESSAGE_BYTES) };
+        assert_eq!(
+            MAX_ENCRYPTED_JSON_BYTES,
+            MAX_MESSAGE_BYTES - envelope::MIN_ENCRYPTED_BYTES
+        );
     }
 }

@@ -531,6 +531,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
+ "vq-protocol",
  "x25519-dalek",
  "zeroize",
 ]
