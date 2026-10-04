@@ -5,9 +5,9 @@
 //
 // CryptoKit only, no third-party dependencies. `VQPhoneCore` is the
 // transport-agnostic phone engine (Foundation + VQProtocol only) shared by the
-// iOS app and PhoneSim. The `PhoneSim` executable
-// target (SPEC §8, milestone M4) will be added to this package later as
-// `.executableTarget(name: "PhoneSim", dependencies: ["VQPhoneCore", "VQProtocol"])`.
+// iOS app and PhoneSim. `PhoneSim` (SPEC §8, milestone M4) is a macOS
+// command-line fake phone that runs the real `PhoneEngine` over the TCP dev
+// transport for the E2E test (tests/e2e/run.sh; see PhoneSim-README.md).
 
 import PackageDescription
 
@@ -20,6 +20,7 @@ let package = Package(
     products: [
         .library(name: "VQProtocol", targets: ["VQProtocol"]),
         .library(name: "VQPhoneCore", targets: ["VQPhoneCore"]),
+        .executable(name: "PhoneSim", targets: ["PhoneSim"]),
     ],
     targets: [
         .target(
@@ -30,6 +31,11 @@ let package = Package(
             name: "VQPhoneCore",
             dependencies: ["VQProtocol"],
             path: "Sources/VQPhoneCore"
+        ),
+        .executableTarget(
+            name: "PhoneSim",
+            dependencies: ["VQPhoneCore", "VQProtocol"],
+            path: "Sources/PhoneSim"
         ),
         .testTarget(
             name: "VQPhoneCoreTests",

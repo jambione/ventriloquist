@@ -39,6 +39,15 @@ gate2_desktop_core() {
   fi
 }
 
+# Gate 3: end-to-end over the TCP dev transport: vq-host (debug, dev-tcp)
+# against PhoneSim (the real PhoneEngine). run.sh builds both itself.
+gate3_e2e() {
+  step "gate 3: swift build --product PhoneSim (ios/VQProtocol)"
+  (cd ios/VQProtocol && swift build --product PhoneSim)
+  step "gate 3: tests/e2e/run.sh"
+  tests/e2e/run.sh
+}
+
 # Gate 4 (desktop half): the Tauri app. Clippy over the whole workspace
 # (default features: the app must never get dev-tcp), then the bundle.
 gate4_desktop() {
@@ -73,7 +82,7 @@ gate5_frontend() {
   (cd desktop/app && npm run build)
 }
 
-GATES=(gate1_protocol gate2_desktop_core gate4_desktop gate5_frontend)
+GATES=(gate1_protocol gate2_desktop_core gate3_e2e gate4_desktop gate5_frontend)
 
 # Run all gates, or only those named on the command line.
 if [ "$#" -gt 0 ]; then
