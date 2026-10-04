@@ -530,14 +530,18 @@ impl Ble {
         if !candidate {
             return;
         }
-        if self.blocked.get(&id).is_some_and(|until| now < *until) {
+        // The block only holds back name-only matches. An advertisement that
+        // carries the service UUID means the phone app is (again) in the
+        // foreground with its service published, so it clears the block at once.
+        let name_only = policy::is_name_only(&services, name.as_deref());
+        if name_only && self.blocked.get(&id).is_some_and(|until| now < *until) {
             return;
         }
         self.blocked.remove(&id);
         let slot = self.slots.entry(id.clone()).or_insert_with(|| Slot::new(now));
         slot.wanted = true;
         slot.last_seen = now;
-        slot.name_only = policy::is_name_only(&services, name.as_deref());
+        slot.name_only = name_only;
         self.try_connect(&id);
     }
 

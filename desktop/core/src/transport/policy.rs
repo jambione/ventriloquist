@@ -60,8 +60,11 @@ pub fn idle_drop_due(secure: bool, last_pairing_activity: Duration, now: Duratio
 pub const BLE_LOCAL_NAME: &str = "Ventriloquist";
 
 /// A name-only candidate that turned out not to have the Ventriloquist GATT
-/// service is not tried again for this long.
-pub const NAME_ONLY_BLOCK: Duration = Duration::from_secs(5 * 60);
+/// service is not tried again *by name* for this long. Kept short: the iPhone
+/// removes its service while the app is in the background, and the user
+/// expects a reconnect within seconds of reopening it. Any advertisement that
+/// carries the service UUID bypasses the block.
+pub const NAME_ONLY_BLOCK: Duration = Duration::from_secs(20);
 
 /// Every discovered device is logged at most once per id per this long.
 pub const DEVICE_LOG_INTERVAL: Duration = Duration::from_secs(60);
