@@ -518,3 +518,14 @@ Windows connects and discovers RX/TX but the TX CCCD write fails (0x80650003); m
 - Engine-initiated `disconnect` cancels the link and reconnects with backoff that is not reset on the next connect, so a desktop the engine keeps rejecting is not retried every second. Radio-initiated loss resets the backoff on the next confirmed subscription.
 - Scan runs continuously in the foreground (no duplicates); discovery of a known peripheral with no pending reconnect connects at once. Foreground return resets backoff and reconnects known peripherals immediately.
 - The app's background wait (`enterBackground`) also waits for the central's write queue to drain.
+
+## v2.3 (Windows reversed roles)
+
+### P1. BlePeripheralTransport decisions (Windows)
+- **Adapter states.** Added `AdapterState::Advertising` (toolbar "Waiting for the iPhone — open Ventriloquist on it") and `AdapterState::PeripheralUnsupported` (the spec's text). Radio off maps to `PoweredOff` via the provider's `BluetoothError`; consent/policy errors to `Unauthorized`. An unsupported adapter is rechecked every 15 s.
+- **Per-client notify.** `NotifyValueForSubscribedClientAsync(value, client)` is the WinRT name of the per-client notify. The WinRT async future is not `Send`, so completion is awaited through a completion handler and a oneshot (adds the `windows-future` dependency; no `unsafe`).
+- **Disconnect.** WinRT has no way to drop a central. A peer dropped by us (overflow, timeout, host request) is banned in `ClientBook` until it leaves the subscribed list; the phone sees notifications stop and its own link logic applies. The session-closed case is not banned.
+- **Write ordering.** The `H_RX` handler delivers a frame to the host while holding the client-book lock, so a frame never precedes `Connected` or follows `Disconnected`. Writes from a device that is not subscribed get a protocol error (`UnlikelyError`).
+- **Restart.** Backoff 1, 2, 4, 8, 15 s; reset to 1 s after an advertisement that ran at least 30 s. `phone_app_not_open` is never sent by this transport.
+- **Mode.** `VQ_BLE_MODE=central|peripheral` (default peripheral on Windows, central elsewhere; peripheral off Windows falls back to central) via `policy::ble_mode`.
+

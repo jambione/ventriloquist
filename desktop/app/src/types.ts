@@ -21,7 +21,7 @@ export interface Entry {
 
 export type PeerState = "connected" | "hello_exchanged" | "pairing" | "secure" | "closed";
 
-export type AdapterState = "unknown" | "no_adapter" | "powered_off" | "unauthorized" | "scanning";
+export type AdapterState = "unknown" | "no_adapter" | "powered_off" | "unauthorized" | "scanning" | "advertising" | "peripheral_unsupported";
 
 export type CodeEndReason = "expired" | "too_many_failures" | "cancelled" | "disconnected";
 

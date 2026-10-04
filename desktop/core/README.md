@@ -113,7 +113,15 @@ The crate keeps to the portable APIs:
 - The unix permission code is behind `cfg(unix)`.
 - Config files live in the per-user, non-roaming `%LOCALAPPDATA%` and rely on its ACL.
 
-No Windows build is run by the agents.
+On Windows the host uses `transport::ble_peripheral::BlePeripheralTransport` (v2.3) **instead of** the btleplug central, under the same `ble` feature; macOS keeps `BleCentralTransport`. `transport::platform_ble_transport()` picks it, and `VQ_BLE_MODE=central|peripheral` overrides it for diagnostics (logged at info).
+
+No Windows build is run by the agents (CI cross-checks with `--target x86_64-pc-windows-msvc`).
+
+### Windows peripheral transport (v2.3)
+
+- A WinRT `GattServiceProvider` publishes `HOST_SERVICE_UUID` with `H_RX` (Write with response, Plain) and `H_TX` (Notify, Plain) and advertises it (connectable, discoverable). `BluetoothAdapter.IsPeripheralRoleSupported == false` is reported as `AdapterState::PeripheralUnsupported` (toolbar: "This PC's Bluetooth adapter can't accept connections from the iPhone (peripheral role not supported)"); advertising is `AdapterState::Advertising`.
+- Each client subscribing to `H_TX` is a peer `ble-h:<session DeviceId>#<n>` (`policy::ClientBook`), `Connected` with `mtu = MaxPduSize − 3` capped at 512 (`policy::peripheral_frame_mtu`); the core then sends `hello`. `H_RX` writes from that client's session are its frames (every write is answered). Sends are `NotifyValueForSubscribedClientAsync` per frame, in order, from a per-peer writer task with a bounded queue; overflow or a 10 s notification is a disconnect. Unsubscribe or GATT session close is a disconnect. WinRT cannot drop a central, so a dropped client that stays subscribed is ignored until it unsubscribes.
+- An aborted or failed advertisement restarts with backoff (`policy::advertising_restart_delay`); the provider is released on shutdown.
 
 ## BLE scanning and diagnostics
 

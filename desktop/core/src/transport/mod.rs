@@ -16,6 +16,8 @@ pub mod policy;
 
 #[cfg(feature = "ble")]
 pub mod ble;
+#[cfg(all(windows, feature = "ble"))]
+pub mod ble_peripheral;
 #[cfg(feature = "dev-tcp")]
 pub mod tcp;
 
@@ -88,4 +90,20 @@ pub trait Transport: Send + 'static {
         commands: mpsc::UnboundedReceiver<TransportCommand>,
         events: mpsc::Sender<TransportEvent>,
     ) -> JoinHandle<()>;
+}
+
+/// The BLE transport for this platform (v2.3): on Windows the GATT
+/// peripheral ([`ble_peripheral::BlePeripheralTransport`]), elsewhere the
+/// btleplug central. `VQ_BLE_MODE=central|peripheral` overrides it for
+/// diagnostics (peripheral only exists on Windows). The choice is logged.
+#[cfg(feature = "ble")]
+pub fn platform_ble_transport() -> Box<dyn Transport> {
+    let env = std::env::var("VQ_BLE_MODE").ok();
+    let mode = policy::ble_mode(env.as_deref(), cfg!(windows));
+    log::info!("ble: mode {mode:?} (VQ_BLE_MODE={env:?}, windows={})", cfg!(windows));
+    match mode {
+        #[cfg(all(windows, feature = "ble"))]
+        policy::BleMode::Peripheral => Box::new(ble_peripheral::BlePeripheralTransport::new()),
+        _ => Box::new(ble::BleCentralTransport::new()),
+    }
 }

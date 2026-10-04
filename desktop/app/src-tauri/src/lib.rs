@@ -32,7 +32,6 @@ use uuid::Uuid;
 use delivery::{DeliveryEvent, DeliveryManager, Notice, Sink, SlotsView};
 use hotkeys::{HotkeyConfig, HotkeyView};
 use vq_host_core::config::default_config_dir;
-use vq_host_core::transport::ble::BleCentralTransport;
 use vq_host_core::{spawn_host, CoreOptions, HostCommand, HostEvent, HostHandle, SystemClock};
 
 /// The Tauri event that carries every host event (`HostEvent` as JSON,
@@ -500,7 +499,7 @@ fn start_host(app: &AppHandle) -> std::io::Result<()> {
         // `spawn_host` spawns onto the current tokio runtime: Tauri's.
         let rt = tauri::async_runtime::handle();
         let _guard = rt.inner().enter();
-        spawn_host(opts, Box::new(BleCentralTransport::new()))?
+        spawn_host(opts, vq_host_core::transport::platform_ble_transport())?
     };
     {
         let host = app.state::<Host>();

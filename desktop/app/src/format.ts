@@ -84,6 +84,11 @@ export function connectionStatus(state: AppState, platform: Platform): StatusVie
       };
     case "no_adapter":
       return { tone: "warn", text: "No Bluetooth adapter" };
+    case "peripheral_unsupported":
+      return {
+        tone: "warn",
+        text: "This PC's Bluetooth adapter can't accept connections from the iPhone (peripheral role not supported)",
+      };
     default:
       break;
   }
@@ -102,6 +107,9 @@ export function connectionStatus(state: AppState, platform: Platform): StatusVie
   }
   if (state.phoneAppNotOpen) {
     return { tone: "busy", text: "iPhone found — open Ventriloquist on it" };
+  }
+  if (state.adapter === "advertising") {
+    return { tone: "idle", text: "Waiting for the iPhone — open Ventriloquist on it" };
   }
   if (state.adapter === "scanning") {
     const n = state.devicesSeen;

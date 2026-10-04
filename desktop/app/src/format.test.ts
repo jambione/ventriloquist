@@ -60,6 +60,20 @@ describe("connectionStatus", () => {
       } satisfies HostEvent,
     });
 
+  it("reports the peripheral-role states (Windows, v2.3)", () => {
+    expect(connectionStatus(snap("peripheral_unsupported", []), "windows")).toEqual({
+      tone: "warn",
+      text: "This PC's Bluetooth adapter can't accept connections from the iPhone (peripheral role not supported)",
+    });
+    expect(connectionStatus(snap("advertising", []), "windows")).toEqual({
+      tone: "idle",
+      text: "Waiting for the iPhone — open Ventriloquist on it",
+    });
+    expect(
+      connectionStatus(snap("advertising", [{ state: "secure", name: "P", paired: true }]), "windows").tone,
+    ).toBe("ok");
+  });
+
   it("reports the adapter and connections", () => {
     expect(connectionStatus(initialState(), "mac").text).toBe("Starting…");
     expect(connectionStatus(snap("scanning", []), "mac")).toEqual({ tone: "idle", text: "Scanning… (0 devices seen)" });

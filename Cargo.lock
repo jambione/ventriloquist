@@ -4878,6 +4878,8 @@ dependencies = [
  "tokio",
  "uuid",
  "vq-protocol",
+ "windows",
+ "windows-future",
  "zeroize",
 ]
 

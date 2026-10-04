@@ -49,6 +49,12 @@ pub enum AdapterState {
     Unauthorized,
     /// Scanning for phones.
     Scanning,
+    /// Advertising our GATT service and waiting for a phone to connect
+    /// (Windows peripheral transport, SPEC_V2 v2.3).
+    Advertising,
+    /// The adapter cannot act as a GATT peripheral, so the iPhone cannot
+    /// connect to this PC (SPEC_V2 v2.3).
+    PeripheralUnsupported,
 }
 
 /// Why a pairing code stopped being valid.

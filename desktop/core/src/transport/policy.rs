@@ -147,6 +147,153 @@ pub fn poll_wait(read_len: usize) -> Duration {
     }
 }
 
+/// Largest frame size on the Windows peripheral transport (v2.3).
+pub const PERIPHERAL_MAX_MTU: usize = 512;
+
+/// Frame `mtu` for a notification to a subscribed client (v2.3): the
+/// client session's `MaxPduSize` − 3, capped at [`PERIPHERAL_MAX_MTU`], and
+/// 20 when the size is unknown (0) or would be below 20.
+pub fn peripheral_frame_mtu(max_pdu_size: u16) -> usize {
+    let usable = usize::from(max_pdu_size).saturating_sub(3);
+    if usable < MIN_MTU {
+        FALLBACK_MTU
+    } else {
+        usable.min(PERIPHERAL_MAX_MTU)
+    }
+}
+
+/// An advertising session that ran at least this long is considered healthy:
+/// the restart backoff starts over after it ends.
+pub const ADVERTISING_HEALTHY_AFTER: Duration = Duration::from_secs(30);
+
+/// Consecutive-failure count after an advertising session (or a failed
+/// start) that ran for `ran_for`.
+pub fn advertising_failures_after(failures: u32, ran_for: Duration) -> u32 {
+    if ran_for >= ADVERTISING_HEALTHY_AFTER {
+        1
+    } else {
+        failures.saturating_add(1)
+    }
+}
+
+/// Delay before restarting advertising after `failures` consecutive
+/// failures: 1, 2, 4, 8, then 15 s (never immediate).
+pub fn advertising_restart_delay(failures: u32) -> Duration {
+    backoff_delay(failures.max(1))
+}
+
+/// Which BLE transport the host uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BleMode {
+    /// The PC scans and connects to the phone (macOS).
+    Central,
+    /// The PC advertises and the phone connects to it (Windows, v2.3).
+    Peripheral,
+}
+
+/// Choose the BLE mode from `VQ_BLE_MODE` (`central` or `peripheral`, any
+/// case) and the platform default (peripheral on Windows, central
+/// elsewhere). Unknown values and a peripheral request off Windows fall
+/// back to the platform default.
+pub fn ble_mode(env: Option<&str>, windows: bool) -> BleMode {
+    let default = if windows { BleMode::Peripheral } else { BleMode::Central };
+    match env.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("central") => BleMode::Central,
+        Some("peripheral") if windows => BleMode::Peripheral,
+        _ => default,
+    }
+}
+
+/// What changed when the current list of subscribed clients was compared
+/// with the bookkeeping.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ClientDiff {
+    /// New clients: `(device id, peer id)`.
+    pub added: Vec<(String, String)>,
+    /// Peers whose client is no longer subscribed: `(device id, peer id)`.
+    pub removed: Vec<(String, String)>,
+}
+
+/// Client → peer bookkeeping of the peripheral transport (v2.3). A peer id
+/// is `ble-h:<device id>#<counter>`; a client that unsubscribes and
+/// subscribes again gets a new one.
+#[derive(Debug, Default)]
+pub struct ClientBook {
+    counter: u64,
+    peers: std::collections::HashMap<String, String>,
+    /// Clients we dropped (overflow, write failure, host request) that are
+    /// still subscribed: ignored until they disappear from the list.
+    banned: std::collections::HashSet<String>,
+}
+
+impl ClientBook {
+    /// An empty book.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reconcile with the devices that are subscribed right now.
+    pub fn sync(&mut self, subscribed: &[String]) -> ClientDiff {
+        let mut diff = ClientDiff::default();
+        let present: std::collections::HashSet<&String> = subscribed.iter().collect();
+        self.banned.retain(|d| present.contains(d));
+        let gone: Vec<String> = self
+            .peers
+            .keys()
+            .filter(|d| !present.contains(d))
+            .cloned()
+            .collect();
+        for d in gone {
+            if let Some(p) = self.peers.remove(&d) {
+                diff.removed.push((d, p));
+            }
+        }
+        for d in subscribed {
+            if self.peers.contains_key(d) || self.banned.contains(d) {
+                continue;
+            }
+            self.counter += 1;
+            let peer = format!("ble-h:{d}#{}", self.counter);
+            self.peers.insert(d.clone(), peer.clone());
+            diff.added.push((d.clone(), peer));
+        }
+        diff
+    }
+
+    /// The peer for a device, if it is a connected client.
+    pub fn peer_for(&self, device: &str) -> Option<&str> {
+        self.peers.get(device).map(String::as_str)
+    }
+
+    /// Remove a device's peer (session closed); returns its peer id.
+    pub fn remove(&mut self, device: &str) -> Option<String> {
+        self.peers.remove(device)
+    }
+
+    /// Drop a peer we ended: it stays ignored while still subscribed.
+    /// Returns its device id.
+    pub fn ban_peer(&mut self, peer: &str) -> Option<String> {
+        let device = self
+            .peers
+            .iter()
+            .find(|(_, p)| p.as_str() == peer)
+            .map(|(d, _)| d.clone())?;
+        self.peers.remove(&device);
+        self.banned.insert(device.clone());
+        Some(device)
+    }
+
+    /// Number of connected clients.
+    pub fn len(&self) -> usize {
+        self.peers.len()
+    }
+
+    /// Whether no client is connected.
+    pub fn is_empty(&self) -> bool {
+        self.peers.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +412,91 @@ mod tests {
         assert_eq!(poll_wait(0), Duration::from_millis(50));
         assert_eq!(poll_wait(1), Duration::ZERO);
         assert_eq!(poll_wait(512), Duration::ZERO);
+    }
+
+    #[test]
+    fn peripheral_mtu() {
+        assert_eq!(peripheral_frame_mtu(0), 20);
+        assert_eq!(peripheral_frame_mtu(23), 20);
+        assert_eq!(peripheral_frame_mtu(22), 20);
+        assert_eq!(peripheral_frame_mtu(24), 21);
+        assert_eq!(peripheral_frame_mtu(185), 182);
+        assert_eq!(peripheral_frame_mtu(515), 512);
+        assert_eq!(peripheral_frame_mtu(517), 512);
+        assert_eq!(peripheral_frame_mtu(u16::MAX), 512);
+    }
+
+    #[test]
+    fn advertising_restart_backoff() {
+        let s = Duration::from_secs;
+        let secs: Vec<u64> = (0..7).map(|n| advertising_restart_delay(n).as_secs()).collect();
+        assert_eq!(secs, vec![1, 1, 2, 4, 8, 15, 15]);
+        assert_eq!(advertising_failures_after(0, s(0)), 1);
+        assert_eq!(advertising_failures_after(3, s(5)), 4);
+        assert_eq!(advertising_failures_after(3, s(30)), 1);
+        assert_eq!(advertising_failures_after(u32::MAX, s(1)), u32::MAX);
+    }
+
+    #[test]
+    fn ble_mode_choice() {
+        assert_eq!(ble_mode(None, true), BleMode::Peripheral);
+        assert_eq!(ble_mode(None, false), BleMode::Central);
+        assert_eq!(ble_mode(Some("central"), true), BleMode::Central);
+        assert_eq!(ble_mode(Some(" Peripheral "), true), BleMode::Peripheral);
+        assert_eq!(ble_mode(Some("peripheral"), false), BleMode::Central);
+        assert_eq!(ble_mode(Some("nonsense"), true), BleMode::Peripheral);
+        assert_eq!(ble_mode(Some(""), false), BleMode::Central);
+    }
+
+    #[test]
+    fn client_book_tracks_subscriptions() {
+        let mut b = ClientBook::new();
+        let a = "A".to_owned();
+        let c = "C".to_owned();
+        let d = b.sync(std::slice::from_ref(&a));
+        assert_eq!(d.added, vec![(a.clone(), "ble-h:A#1".to_owned())]);
+        assert!(d.removed.is_empty());
+        assert_eq!(b.peer_for("A"), Some("ble-h:A#1"));
+        // Unchanged list: no diff.
+        assert_eq!(b.sync(std::slice::from_ref(&a)), ClientDiff::default());
+        // A second client.
+        let d = b.sync(&[a.clone(), c.clone()]);
+        assert_eq!(d.added, vec![(c.clone(), "ble-h:C#2".to_owned())]);
+        assert_eq!(b.len(), 2);
+        // A unsubscribes, then subscribes again: new peer id.
+        let d = b.sync(std::slice::from_ref(&c));
+        assert_eq!(d.removed, vec![(a.clone(), "ble-h:A#1".to_owned())]);
+        assert_eq!(b.peer_for("A"), None);
+        let d = b.sync(&[a.clone(), c.clone()]);
+        assert_eq!(d.added, vec![(a.clone(), "ble-h:A#3".to_owned())]);
+        let d = b.sync(&[]);
+        assert_eq!(d.removed.len(), 2);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn client_book_ban_lasts_until_unsubscribe() {
+        let mut b = ClientBook::new();
+        let a = "A".to_owned();
+        b.sync(std::slice::from_ref(&a));
+        assert_eq!(b.ban_peer("ble-h:A#1"), Some("A".to_owned()));
+        assert_eq!(b.ban_peer("ble-h:A#1"), None);
+        assert_eq!(b.peer_for("A"), None);
+        // Still subscribed: stays ignored.
+        assert_eq!(b.sync(std::slice::from_ref(&a)), ClientDiff::default());
+        // Gone: the ban is lifted, a new subscription is a new peer.
+        assert_eq!(b.sync(&[]), ClientDiff::default());
+        let d = b.sync(std::slice::from_ref(&a));
+        assert_eq!(d.added, vec![(a, "ble-h:A#2".to_owned())]);
+    }
+
+    #[test]
+    fn client_book_remove_on_session_close() {
+        let mut b = ClientBook::new();
+        b.sync(&["A".to_owned()]);
+        assert_eq!(b.remove("A"), Some("ble-h:A#1".to_owned()));
+        assert_eq!(b.remove("A"), None);
+        // Not banned: a fresh subscription is accepted.
+        assert_eq!(b.sync(&["A".to_owned()]).added.len(), 1);
     }
 }

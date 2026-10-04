@@ -8,8 +8,9 @@ publish = false
 
 [features]
 default = ["ble"]
-# BLE central transport (btleplug). On by default.
-ble = ["dep:btleplug", "dep:futures"]
+# BLE transports: the btleplug central (macOS; Windows with
+# VQ_BLE_MODE=central) and, on Windows, the WinRT GATT peripheral. On by default.
+ble = ["dep:btleplug", "dep:futures", "dep:windows", "dep:windows-future"]
 # TCP dev transport (desktop = client). Tests and the `vq-host` binary only;
 # MUST NOT be enabled in release builds of the app.
 dev-tcp = []
@@ -35,6 +36,17 @@ thiserror = "2.0"
 log = "0.4"
 btleplug = { version = "0.13", optional = true }
 futures = { version = "0.3", optional = true }
+
+# WinRT GATT server (transport::ble_peripheral); only built on Windows.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", optional = true, features = [
+    "Devices_Bluetooth",
+    "Devices_Bluetooth_GenericAttributeProfile",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+] }
+windows-future = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.23"

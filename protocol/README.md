@@ -80,6 +80,28 @@ iOS 26.1+ can refuse a third-party central's write to the `TX` CCCD (Windows: HR
 6. **Desktop:** after discovering services it tries to subscribe to `TX`; if that fails for any reason it uses poll mode for that connection. Poll loop: read `TX`; if data came back, deliver it as a received frame and read again immediately; if empty, wait 50 ms. A read error is a disconnect. `VQ_BLE_FORCE_POLL=1` forces poll mode (testing).
 7. The TCP dev transport (§2.1) is unaffected.
 
+### 2.3 Reversed roles on Windows (v2.3)
+
+iOS 26.1+ refuses app-level GATT access from non-Apple centrals, so a **Windows** desktop is the GATT **peripheral** and the iPhone is the **central**. macOS desktops keep §2 (the iPhone is the peripheral).
+
+| Item | UUID (`vq-protocol`) |
+|---|---|
+| Service `HOST_SERVICE_UUID` (advertised by the PC, connectable, discoverable) | `63431f70-7c79-402d-8f72-77621879d200` |
+| `H_RX` `HOST_RX_CHAR_UUID`: Write **with** response, phone → desktop | `bb4ae2cb-17d6-4a2b-8f54-c8cbe6051923` |
+| `H_TX` `HOST_TX_CHAR_UUID`: Notify, desktop → phone | `ded38a53-a1e3-4113-bb80-f577d057e5f3` |
+
+Both characteristics use protection level **Plain** (no OS bonding; remove any OS-level pairing between the phone and the PC).
+
+Flow:
+1. The phone scans for `HOST_SERVICE_UUID`, connects, discovers, subscribes to `H_TX`.
+2. The desktop treats the subscription as "connected" and sends its `hello` by notification to that client, exactly as it does on the other transports.
+3. The phone replies by writing to `H_RX`. Each write and each notification carries one frame (§3). The desktop always answers a write (a protocol error if it cannot accept it).
+4. A client that unsubscribes, or whose GATT session closes, is disconnected. Notifications are targeted per client, so several phones can be connected at once.
+
+Frame size: the desktop uses the client session's `MaxPduSize − 3`; the phone uses `maximumWriteValueLength(for: .withResponse)`; both are capped at **512** and never below 20.
+
+If the PC's adapter does not support the peripheral role (`BluetoothAdapter.IsPeripheralRoleSupported == false`) the desktop reports it and cannot accept phones. The desktop restarts advertising with backoff (1, 2, 4, 8, 15 s) if it aborts. `VQ_BLE_MODE=central|peripheral` selects the desktop transport for diagnostics.
+
 ## 3. Framing
 
 ```
