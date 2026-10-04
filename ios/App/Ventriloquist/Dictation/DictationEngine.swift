@@ -90,20 +90,32 @@ final class DictationEngine {
         }
     }
 
-    /// Route changes, engine configuration changes and media-services resets
-    /// end the recording gracefully, like an interruption (M5).
+    /// Input-device changes (headset/AirPods plugged in or removed), configuration
+    /// changes of OUR engine, and media-services resets end the recording
+    /// gracefully, like an interruption (M5).
+    ///
+    /// Only real device changes count. Starting a recording makes iOS post its own
+    /// notifications (a `.categoryChange` route change from `setCategory(.record)`,
+    /// and possibly an engine configuration change while the input settles), and
+    /// they arrive on the main queue *after* this runs. Reacting to those stopped
+    /// every recording ~0.5 s after it started on a real iPhone. So: never react to
+    /// `.categoryChange`, scope the engine notification to our own engine, and
+    /// ignore engine changes during a short settling window after start.
     private func observeAudio() {
         removeObservers()
         let center = NotificationCenter.default
+        let startedAt = Date()
         let fire: @Sendable (Notification) -> Void = { [weak self] _ in
             Task { @MainActor in self?.onInterrupted?() }
         }
-        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main, using: fire))
+        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: audioEngine, queue: .main) { note in
+            if Date().timeIntervalSince(startedAt) > 1.0 { fire(note) }
+        })
         observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main, using: fire))
         observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { note in
             let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
             let reason = AVAudioSession.RouteChangeReason(rawValue: raw)
-            if reason == .oldDeviceUnavailable || reason == .categoryChange { fire(note) }
+            if reason == .oldDeviceUnavailable || reason == .newDeviceAvailable { fire(note) }
         })
     }
 
