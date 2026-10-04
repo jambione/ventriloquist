@@ -49,7 +49,7 @@ The iPhone is the GATT **peripheral**. The desktop is the GATT **central**.
 |---|---|
 | Service (advertised by the phone) | `77608b26-7b68-49da-bb34-7f05d158e219` |
 | `RX` characteristic: Write **with** response, desktop → phone | `18489603-21ac-4cf2-9d31-62bd5d9c1635` |
-| `TX` characteristic: Notify, phone → desktop | `b01127eb-8819-42a7-a0e8-bdd6159d4e2a` |
+| `TX` characteristic: Notify and Read, phone → desktop | `b01127eb-8819-42a7-a0e8-bdd6159d4e2a` |
 
 Each GATT write to `RX`, and each notification on `TX`, carries exactly **one frame** (§3). The
 characteristics carry no other meaning.
@@ -67,6 +67,18 @@ For tests and the phone simulator, the same frames can travel over TCP instead o
 - Each frame (§3) is sent as `length (u16 BE) ‖ frame`, where `length` is the frame's size in bytes. There is no other delimiting, padding or handshake.
 - `mtu` is fixed at **512** in both directions.
 - Everything above framing (envelopes, messages, pairing, sessions) is identical to BLE. Connecting is the equivalent of the desktop subscribing to `TX`, so the desktop sends `hello` as soon as the TCP connection is up. Closing the socket is a disconnect.
+
+### 2.2 Polling mode (v2.2)
+
+iOS 26.1+ can refuse a third-party central's write to the `TX` CCCD (Windows: HRESULT `0x80650003`), so notifications are not always available. Polling mode never uses the CCCD.
+
+1. `TX` has properties Notify **and Read** (permission readable). `RX` is unchanged (Write with response).
+2. A central in **poll mode** never subscribes. It writes frames to `RX` as usual; the desktop sends its `hello` first.
+3. The phone creates a peer for a central on the **first `RX` write from a central that is not subscribed** (a *poll peer*). For a subscribed central the notify path is used.
+4. A **read of `TX`** by a poll peer returns exactly **one** queued outgoing frame for that central, or an **empty value (0 bytes)** if none is queued. `offset != 0` is answered with `invalidOffset`. Frames for poll peers use `mtu = central.maximumUpdateValueLength` (as for notifications), so one read response never needs a long read. Reads by subscribed or unknown centrals return empty.
+5. The phone drops a poll peer after **60 s** with no `RX` write and no `TX` read from it. Keepalive pings (15 s) keep live sessions active.
+6. **Desktop:** after discovering services it tries to subscribe to `TX`; if that fails for any reason it uses poll mode for that connection. Poll loop: read `TX`; if data came back, deliver it as a received frame and read again immediately; if empty, wait 50 ms. A read error is a disconnect. `VQ_BLE_FORCE_POLL=1` forces poll mode (testing).
+7. The TCP dev transport (§2.1) is unaffected.
 
 ## 3. Framing
 

@@ -227,3 +227,6 @@ Owner-device checks are done by the owner. N3 can't be completed by agents alone
 ## 8. Owner-resolved questions
 - O1: Binding a slot also makes it active. **Yes.**
 - O2: "Send to active slot" is **disabled when Off**.
+
+## v2.2 BLE polling mode
+iOS 26.1+ refuses CCCD writes from some third-party centrals (Windows: HRESULT 0x80650003 while subscribing to TX; Apple forums thread 812318, no workaround). The desktop therefore falls back, per connection, to **polling**: if `subscribe(TX)` fails it reads TX repeatedly (empty read: wait 50 ms; data: deliver and read again at once). The phone treats a central that writes RX without subscribing as a poll peer, answers each TX read with one queued frame (or empty), and drops it after 60 s of silence. Normative text: protocol/README.md §2.2. `VQ_BLE_FORCE_POLL=1` forces it on the desktop. The "devices seen" counter now counts unique peripheral ids since the scan started.

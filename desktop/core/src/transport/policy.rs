@@ -127,6 +127,26 @@ pub fn adapter_reacquire_due(
     state_unknown && !scanning && live_connections == 0 && since >= ADAPTER_REACQUIRE_AFTER
 }
 
+/// Record a sighting of `id` and return the number of **unique** ids seen
+/// (the toolbar "devices seen" counter counts devices, not advertisements).
+pub fn note_seen<T: std::hash::Hash + Eq>(seen: &mut std::collections::HashSet<T>, id: T) -> u64 {
+    seen.insert(id);
+    seen.len() as u64
+}
+
+/// Polling mode (v2.2): sleep between TX reads when the last read was empty.
+pub const POLL_IDLE: Duration = Duration::from_millis(50);
+
+/// How long to wait before the next TX read: none after a read that returned
+/// data, [`POLL_IDLE`] after an empty one.
+pub fn poll_wait(read_len: usize) -> Duration {
+    if read_len == 0 {
+        POLL_IDLE
+    } else {
+        Duration::ZERO
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +249,21 @@ mod tests {
             assert!(!adapter_reacquire_due(true, false, s(600), live), "live={live}");
         }
         assert!(adapter_reacquire_due(true, false, s(600), 0));
+    }
+
+    #[test]
+    fn devices_seen_counts_unique_ids() {
+        let mut seen = std::collections::HashSet::new();
+        assert_eq!(note_seen(&mut seen, "a"), 1);
+        assert_eq!(note_seen(&mut seen, "a"), 1);
+        assert_eq!(note_seen(&mut seen, "b"), 2);
+        assert_eq!(note_seen(&mut seen, "a"), 2);
+    }
+
+    #[test]
+    fn poll_wait_pacing() {
+        assert_eq!(poll_wait(0), Duration::from_millis(50));
+        assert_eq!(poll_wait(1), Duration::ZERO);
+        assert_eq!(poll_wait(512), Duration::ZERO);
     }
 }

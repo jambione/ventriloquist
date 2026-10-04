@@ -139,6 +139,15 @@ MAC verification, replay protection, encryption and plaintext rejection are cove
 
 ---
 
+## Windows pairing in polling mode (v2.2)
+
+- [ ] **Windows to iPhone on iOS 26.1+** (subscribe refused) — start the desktop, open the iPhone app in the foreground → expected: the log shows "polling mode (subscribe failed: ...)", the phone appears, the pairing code is shown and pairing succeeds; dictation reaches the focused field; the session stays up for 2+ minutes (keepalives).
+- [ ] **Forced polling on macOS** — start the desktop with `VQ_BLE_FORCE_POLL=1` → expected: log says "polling mode (forced ...)", pairing and dictation work as with notifications.
+- [ ] **Poll peer drop** — in polling mode quit the desktop (kill the process) → expected: the phone shows the desktop offline within about 60 s.
+- [ ] **Toolbar counter** — "N devices seen" with several phones/devices nearby counts each device once (does not climb while idle).
+
+---
+
 ## Notes
 
 - All checkboxes must pass before release. If any fail, file findings with file/line references and halt.

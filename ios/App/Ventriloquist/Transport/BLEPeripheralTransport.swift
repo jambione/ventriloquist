@@ -9,6 +9,10 @@ import VQProtocol
 ///   (notify, phone → desktop). Each write / notification is one frame.
 /// * A desktop "connects" when it subscribes to `TX` and "disconnects" when it
 ///   unsubscribes. Each subscription gets a fresh ``PeerID``.
+/// * Polling mode (v2.2): iOS 26.1+ refuses subscriptions from some centrals,
+///   so a central that writes `RX` without subscribing becomes a *poll peer*
+///   and reads `TX` instead (one queued frame per read, empty if none; see
+///   ``PollQueue``). A poll peer idle for 60 s is dropped.
 /// * Frames go to one central only (`updateValue(_:for:onSubscribedCentrals:)`).
 ///   When the stack's queue is full (`updateValue` returns `false`), frames
 ///   wait in a FIFO until `peripheralManagerIsReady(toUpdateSubscribers:)`.
@@ -47,6 +51,8 @@ final class BLEPeripheralTransport: NSObject {
         /// `false` after the engine closed it; writes are then ignored until
         /// the central subscribes again.
         var open: Bool
+        /// Created by an RX write without a subscription: frames go out on `TX` reads.
+        var poll = false
     }
 
     private var links: [UUID: Link] = [:]
@@ -56,10 +62,13 @@ final class BLEPeripheralTransport: NSObject {
     /// Frames waiting for `peripheralManagerIsReady` (pure logic, tested in
     /// VQPhoneCore). Per-link cap ≈ 2 MiB at 185-byte frames.
     private var sendQueue = FrameSendQueue(maxPerPeer: 12_000)
+    /// Outgoing frames of poll peers (one per `TX` read) and their idle clocks.
+    private var pollQueue = PollQueue(maxPerPeer: 12_000)
+    private var pollExpiryTask: Task<Void, Never>?
 
     /// Frames still waiting to be handed to the Bluetooth stack. The app
     /// waits for this to be false before leaving the foreground.
-    var hasQueuedFrames: Bool { !sendQueue.isEmpty }
+    var hasQueuedFrames: Bool { !sendQueue.isEmpty || !pollQueue.isEmpty }
 
     private let serviceUUID = CBUUID(nsuuid: VQ.serviceUUID)
     private let rxUUID = CBUUID(nsuuid: VQ.rxCharacteristicUUID)
@@ -71,6 +80,24 @@ final class BLEPeripheralTransport: NSObject {
         guard manager == nil else { return }
         manager = CBPeripheralManager(delegate: self, queue: nil,
                                       options: [CBPeripheralManagerOptionShowPowerAlertKey: true])
+        pollExpiryTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                self?.expirePollPeers()
+            }
+        }
+    }
+
+    private static func now() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
+
+    /// Drop poll peers idle for 60 s (no RX write, no TX read).
+    private func expirePollPeers() {
+        for peer in pollQueue.removeExpired(now: Self.now()) {
+            guard let id = peerToCentral[peer], let link = links[id] else { continue }
+            links[id] = nil
+            peerToCentral[peer] = nil
+            if link.open { engine?.peerDisconnected(peer) }
+        }
     }
 
     /// Scene went to the background: stop advertising and drop the service.
@@ -98,7 +125,7 @@ final class BLEPeripheralTransport: NSObject {
         if !serviceAdded {
             let rx = CBMutableCharacteristic(type: rxUUID, properties: [.write],
                                              value: nil, permissions: [.writeable])
-            let tx = CBMutableCharacteristic(type: txUUID, properties: [.notify],
+            let tx = CBMutableCharacteristic(type: txUUID, properties: [.notify, .read],
                                              value: nil, permissions: [.readable])
             let service = CBMutableService(type: serviceUUID, primary: true)
             service.characteristics = [rx, tx]
@@ -140,19 +167,22 @@ final class BLEPeripheralTransport: NSObject {
         links.removeAll()
         peerToCentral.removeAll()
         sendQueue.discardAll()
+        pollQueue.discardAll()
         for p in peers { engine?.peerDisconnected(p) }
     }
 
-    private func openLink(for central: CBCentral) -> PeerID {
+    private func openLink(for central: CBCentral, poll: Bool = false) -> PeerID {
         counter += 1
         let peer = PeerID("ble:\(central.identifier.uuidString.prefix(8))#\(counter)")
         if let old = links[central.identifier] {
             peerToCentral[old.peer] = nil
             sendQueue.discard(old.peer)
+            pollQueue.discard(old.peer)
             if old.open { engine?.peerDisconnected(old.peer) }
         }
-        links[central.identifier] = Link(peer: peer, central: central, open: true)
+        links[central.identifier] = Link(peer: peer, central: central, open: true, poll: poll)
         peerToCentral[peer] = central.identifier
+        if poll { pollQueue.add(peer, now: Self.now()) }
         engine?.peerConnected(peer)
         return peer
     }
@@ -170,6 +200,15 @@ final class BLEPeripheralTransport: NSObject {
 extension BLEPeripheralTransport: @preconcurrency PhoneTransport {
     func send(frame: [UInt8], to peer: PeerID) {
         guard let id = peerToCentral[peer], links[id]?.open == true else { return }
+        if links[id]?.poll == true {
+            if pollQueue.enqueue(frame, for: peer) == .overflow {
+                // The desktop is not polling fast enough; give up on it.
+                pollQueue.discard(peer)
+                links[id]?.open = false
+                Task { @MainActor [weak self] in self?.engine?.peerDisconnected(peer) }
+            }
+            return
+        }
         switch sendQueue.enqueue(frame, for: peer) {
         case .queued:
             drainQueue()
@@ -191,6 +230,11 @@ extension BLEPeripheralTransport: @preconcurrency PhoneTransport {
     func disconnect(_ peer: PeerID) {
         guard let id = peerToCentral[peer] else { return }
         links[id]?.open = false
+        if links[id]?.poll == true {
+            // Queued frames are still read; the idle rule removes the link.
+            pollQueue.closeAfterFlush(peer)
+            return
+        }
         sendQueue.closeAfterFlush(peer)
     }
 
@@ -257,6 +301,7 @@ extension BLEPeripheralTransport: @preconcurrency CBPeripheralManagerDelegate {
         guard characteristic.uuid == txUUID, let link = links.removeValue(forKey: central.identifier) else { return }
         peerToCentral[link.peer] = nil
         sendQueue.discard(link.peer)
+        pollQueue.discard(link.peer)
         if link.open { engine?.peerDisconnected(link.peer) }
     }
 
@@ -276,18 +321,35 @@ extension BLEPeripheralTransport: @preconcurrency CBPeripheralManagerDelegate {
             let central = r.central
             let peer: PeerID
             if let link = links[central.identifier] {
+                if link.poll { pollQueue.touch(link.peer, now: Self.now()) }
                 guard link.open else { continue }
                 peer = link.peer
             } else {
-                // A write before the subscription: treat it as the connect.
-                peer = openLink(for: central)
+                // A write from a central that is not subscribed: a poll peer
+                // (it reads `TX` instead of subscribing).
+                peer = openLink(for: central, poll: true)
             }
             engine?.peerReceived(frame: [UInt8](r.value ?? Data()), from: peer)
         }
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveRead request: CBATTRequest) {
-        peripheral.respond(to: request, withResult: .readNotPermitted)
+        guard request.characteristic.uuid == txUUID else {
+            peripheral.respond(to: request, withResult: .readNotPermitted)
+            return
+        }
+        guard request.offset == 0 else {
+            peripheral.respond(to: request, withResult: .invalidOffset)
+            return
+        }
+        // One queued frame for a poll peer; empty for everyone else.
+        var value = Data()
+        if let link = links[request.central.identifier], link.poll,
+           let frame = pollQueue.pop(for: link.peer, now: Self.now()) {
+            value = Data(frame)
+        }
+        request.value = value
+        peripheral.respond(to: request, withResult: .success)
     }
 
     func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {

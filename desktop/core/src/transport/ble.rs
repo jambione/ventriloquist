@@ -37,7 +37,7 @@
 //! on macOS, WinRT on Windows). This module cannot be exercised by the
 //! automated tests; its decisions live in [`super::policy`], which is tested.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -54,7 +54,7 @@ use vq_protocol::{RX_CHAR_UUID, SERVICE_UUID, TX_CHAR_UUID};
 
 use super::policy::{
     self, adapter_reacquire_due, ble_frame_mtu, ble_slot_expired, device_log_due,
-    next_attempt_delay, scan_retry_due, NAME_ONLY_BLOCK,
+    next_attempt_delay, poll_wait, scan_retry_due, NAME_ONLY_BLOCK,
 };
 use super::{Transport, TransportCommand, TransportEvent};
 use crate::events::{AdapterState, PeerId};
@@ -287,7 +287,7 @@ async fn run(
             powered_on: false,
             unknown_since: Some(now),
             last_scan_attempt: now,
-            devices_seen: 0,
+            devices_seen: HashSet::new(),
             devices_reported: 0,
             device_logged: HashMap::new(),
             blocked: HashMap::new(),
@@ -374,8 +374,8 @@ struct Ble {
     /// Since when the adapter state has been unknown (None when known).
     unknown_since: Option<Instant>,
     last_scan_attempt: Instant,
-    /// Advertisements seen since the scan started.
-    devices_seen: u64,
+    /// Unique peripheral ids seen since the scan started.
+    devices_seen: HashSet<PeripheralId>,
     /// Last count sent to the host.
     devices_reported: u64,
     /// When each device was last logged.
@@ -421,7 +421,7 @@ impl Ble {
             Ok(()) => {
                 log::info!("ble: scan started (empty filter; matching by service UUID or local name)");
                 self.scanning = true;
-                self.devices_seen = 0;
+                self.devices_seen.clear();
                 self.device_logged.clear();
                 self.emit(AdapterState::Scanning).await && self.flush_seen().await
             }
@@ -442,12 +442,13 @@ impl Ble {
 
     /// Tell the host the advertisement count if it changed.
     async fn flush_seen(&mut self) -> bool {
-        if self.devices_seen == self.devices_reported {
+        let count = self.devices_seen.len() as u64;
+        if count == self.devices_reported {
             return true;
         }
-        self.devices_reported = self.devices_seen;
+        self.devices_reported = count;
         self.events
-            .send(TransportEvent::DevicesSeen(self.devices_seen))
+            .send(TransportEvent::DevicesSeen(count))
             .await
             .is_ok()
     }
@@ -498,11 +499,11 @@ impl Ble {
         true
     }
 
-    /// One advertisement (or update) of `id`: count it, log it (once per
+    /// One advertisement (or update) of `id`: count its id once, log it (once per
     /// minute per device) and, if it is one of ours, mark it wanted and try
     /// to connect.
     async fn on_advertisement(&mut self, id: PeripheralId, extra: &[uuid::Uuid]) {
-        self.devices_seen += 1;
+        policy::note_seen(&mut self.devices_seen, id.clone());
         let props = match self.central.peripheral(&id).await {
             Ok(p) => match p.properties().await {
                 Ok(Some(props)) => props,
@@ -743,6 +744,41 @@ async fn write_loop(
     }
 }
 
+/// Whether `VQ_BLE_FORCE_POLL=1` forces polling mode (testing).
+fn force_poll() -> bool {
+    std::env::var("VQ_BLE_FORCE_POLL").is_ok_and(|v| v == "1")
+}
+
+/// Polling mode: read TX; data is delivered and read again at once, an empty
+/// value waits [`policy::POLL_IDLE`]. Returns why it stopped (read error or
+/// host gone). Cancel-safe: dropping it just abandons the pending read.
+async fn poll_loop(
+    p: &btleplug::platform::Peripheral,
+    tx: &Characteristic,
+    events: &mpsc::Sender<TransportEvent>,
+    peer: &PeerId,
+) -> String {
+    loop {
+        let data = match tokio::time::timeout(WRITE_TIMEOUT, p.read(tx)).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => return format!("poll read failed: {e}"),
+            Err(_) => return format!("poll read timed out after {} s", WRITE_TIMEOUT.as_secs()),
+        };
+        let wait = poll_wait(data.len());
+        if !data.is_empty()
+            && events
+                .send(TransportEvent::Frame { peer: peer.clone(), frame: data })
+                .await
+                .is_err()
+        {
+            return "host stopped".to_owned();
+        }
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
 /// One connection. Returns `(got as far as Connected, name-only match
 /// without the Ventriloquist GATT service)`.
 async fn connection(
@@ -794,11 +830,22 @@ async fn connection(
             .notifications()
             .await
             .inspect_err(|e| log::info!("ble: {peer}: notifications error: {e:?}"))?;
-        p.subscribe(&tx)
-            .await
-            .inspect_err(|e| log::info!("ble: {peer}: subscribe error: {e:?}"))?;
-        log::info!("ble: {peer}: subscribed to TX");
-        Ok::<_, btleplug::Error>((rx, notifications))
+        let poll = if force_poll() {
+            log::info!("ble: {peer}: polling mode (forced by VQ_BLE_FORCE_POLL)");
+            true
+        } else {
+            match p.subscribe(&tx).await {
+                Ok(()) => {
+                    log::info!("ble: {peer}: subscribed to TX");
+                    false
+                }
+                Err(e) => {
+                    log::info!("ble: {peer}: polling mode (subscribe failed: {e:?})");
+                    true
+                }
+            }
+        };
+        Ok::<_, btleplug::Error>((rx, tx, notifications, poll))
     };
     let setup = async {
         tokio::select! {
@@ -806,7 +853,7 @@ async fn connection(
             _ = abort.notify.notified() => None,
         }
     };
-    let (rx_char, mut notifications) = match setup.await {
+    let (rx_char, tx_char, mut notifications, poll) = match setup.await {
         Some(Ok(Ok(v))) => v,
         Some(Ok(Err(e))) => {
             log::info!("ble: {peer}: connect failed: {e:?}");
@@ -838,9 +885,19 @@ async fn connection(
         return (true, false);
     }
     let mut writer = tokio::spawn(write_loop(p.clone(), rx_char, cmds));
+    let poll_peer = peer.clone();
+    let poll_fut = async {
+        if poll {
+            poll_loop(&p, &tx_char, &events, &poll_peer).await
+        } else {
+            std::future::pending().await
+        }
+    };
+    tokio::pin!(poll_fut);
     let reason = loop {
         tokio::select! {
-            n = notifications.next() => match n {
+            r = &mut poll_fut, if poll => break r,
+            n = notifications.next(), if !poll => match n {
                 Some(n) if n.uuid == TX_CHAR_UUID => {
                     if events.send(TransportEvent::Frame { peer: peer.clone(), frame: n.value }).await.is_err() {
                         break "host stopped".to_owned();
