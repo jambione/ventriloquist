@@ -51,6 +51,55 @@ extern "C" {
     fn IsSecureEventInputEnabled() -> u8;
 }
 
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+}
+
+/// Seconds since the user last pressed a key, clicked or scrolled (hardware
+/// event state, R4). Large when nothing happened for a long time.
+pub fn hw_idle_secs() -> f64 {
+    const HID_SYSTEM_STATE: i32 = 1;
+    // keyDown, leftMouseDown, rightMouseDown, scrollWheel, otherMouseDown.
+    [10u32, 1, 3, 22, 25]
+        .iter()
+        // SAFETY: plain query with valid enum values.
+        .map(|t| unsafe { CGEventSourceSecondsSinceLastEventType(HID_SYSTEM_STATE, *t) })
+        .fold(f64::MAX, f64::min)
+}
+
+/// Title of the frontmost on-screen normal window of `pid` from the window
+/// server (`Some("")` when the title is redacted without Screen Recording
+/// permission): proof that the app has a window when AX cannot see it.
+pub fn frontmost_window_title(pid: i32) -> Option<String> {
+    use core_foundation::number::CFNumber;
+    use core_graphics::window::{
+        copy_window_info, kCGNullWindowID, kCGWindowLayer, kCGWindowListExcludeDesktopElements,
+        kCGWindowListOptionOnScreenOnly, kCGWindowName, kCGWindowOwnerPID,
+    };
+    let arr = copy_window_info(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID)?;
+    for i in 0..arr.len() {
+        let item = arr.get(i)?;
+        // SAFETY: the array holds CFDictionaryRefs (documented); the get rule retains.
+        let dict: CFDictionary<CFString, CFType> =
+            unsafe { CFDictionary::wrap_under_get_rule(*item as core_foundation::dictionary::CFDictionaryRef) };
+        // SAFETY: the key constants are valid static CFStrings.
+        let (k_pid, k_layer, k_name) = unsafe {
+            (
+                CFString::wrap_under_get_rule(kCGWindowOwnerPID),
+                CFString::wrap_under_get_rule(kCGWindowLayer),
+                CFString::wrap_under_get_rule(kCGWindowName),
+            )
+        };
+        let num = |k: &CFString| dict.find(k).and_then(|v| v.downcast::<CFNumber>()).and_then(|n| n.to_i32());
+        if num(&k_pid) == Some(pid) && num(&k_layer) == Some(0) {
+            let name = dict.find(&k_name).and_then(|v| v.downcast::<CFString>()).map(|s| s.to_string());
+            return Some(name.unwrap_or_default());
+        }
+    }
+    None
+}
+
 /// `AXIsProcessTrustedWithOptions`; with `prompt` the system dialog is shown.
 pub fn is_trusted(prompt: bool) -> bool {
     let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
@@ -170,6 +219,11 @@ impl AxElement {
         unsafe { AXUIElementPerformAction(self.raw(), a.as_concrete_TypeRef()) == AX_OK }
     }
 
+    /// Same underlying element (`CFEqual`).
+    pub fn same(&self, other: &AxElement) -> bool {
+        self.0 == other.0
+    }
+
     pub fn pid(&self) -> Option<i32> {
         let mut pid: i32 = 0;
         // SAFETY: valid element/out-pointer.
@@ -242,21 +296,22 @@ pub fn pasteboard_change_count() -> isize {
     NSPasteboard::generalPasteboard().changeCount()
 }
 
-pub fn pasteboard_snapshot() -> PasteboardSnapshot {
+/// Copy every item with all its types. `None` when a type yields no data
+/// (file promises, lazily provided data): the clipboard cannot be restored
+/// losslessly, so callers type instead of paste (§4.8).
+pub fn pasteboard_snapshot() -> Option<PasteboardSnapshot> {
     let pb = NSPasteboard::generalPasteboard();
     let mut items = Vec::new();
     if let Some(list) = pb.pasteboardItems() {
         for item in list.iter() {
             let mut entries = Vec::new();
             for t in item.types().iter() {
-                if let Some(d) = item.dataForType(&t) {
-                    entries.push((t.clone(), d));
-                }
+                entries.push((t.clone(), item.dataForType(&t)?));
             }
             items.push(entries);
         }
     }
-    PasteboardSnapshot(items)
+    Some(PasteboardSnapshot(items))
 }
 
 /// Replace the pasteboard with `text`, marked transient so clipboard
@@ -279,10 +334,16 @@ pub fn pasteboard_restore(snap: &PasteboardSnapshot) {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
     let mut objs = Vec::new();
-    for entries in &snap.0 {
+    for (i, entries) in snap.0.iter().enumerate() {
         let item = NSPasteboardItem::new();
         for (t, d) in entries {
             item.setData_forType(d, t);
+        }
+        // Restoring is not a new copy: mark it transient so clipboard
+        // managers do not record it again (unless the snapshot has the marker).
+        let marker = "org.nspasteboard.TransientType";
+        if i == 0 && !entries.iter().any(|(t, _)| t.to_string() == marker) {
+            item.setData_forType(&NSData::new(), &NSString::from_str(marker));
         }
         objs.push(ProtocolObject::<dyn NSPasteboardWriting>::from_retained(item));
     }

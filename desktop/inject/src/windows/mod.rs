@@ -10,10 +10,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::exec::{plan_sends_input, Os, Run, StepError};
 use crate::injector::{CapturedBinding, InjectError, Injector, LiveHandle, ResolvedTarget, Result};
-use crate::model::{BindingTarget, DeliveryResult, SlotId, Sound, WindowInfo};
-use crate::planner::{Action, AppCategory, Plan, TargetCaps};
-use crate::store::{rematch, MatchKind, RematchOutcome};
+use crate::model::{BindingTarget, DeliveryResult, SlotId, Sound, WindowDetail, WindowIdentity, WindowInfo};
+use crate::planner::{category_for, Plan, TargetCaps};
+use crate::policy::{password_verdict_strict, wait_for_idle, FocusProbe, IDLE_MAX_WAIT_MS, IDLE_REQUIRED_MS};
+use crate::store::{rematch_detail, MatchKind, RematchOutcome};
 use sys::UiaElement;
 
 // ------------------------------------------------------------ pure helpers
@@ -42,6 +44,8 @@ const CF_DSPBITMAP: u32 = 0x82;
 const CF_DSPMETAFILEPICT: u32 = 0x83;
 const CF_DSPENHMETAFILE: u32 = 0x8E;
 const CF_GDIOBJ_RANGE: std::ops::RangeInclusive<u32> = 0x300..=0x3FF;
+/// `CF_PRIVATEFIRST..=CF_PRIVATELAST`: owner-defined, not necessarily HGLOBAL.
+const CF_PRIVATE_RANGE: std::ops::RangeInclusive<u32> = 0x200..=0x2FF;
 
 fn has_dib(formats: &[u32]) -> bool {
     formats.iter().any(|f| *f == CF_DIB || *f == CF_DIBV5)
@@ -62,7 +66,7 @@ fn formats_restorable(formats: &[u32]) -> bool {
         CF_BITMAP | CF_PALETTE => dib,
         CF_METAFILEPICT | CF_ENHMETAFILE | CF_OWNERDISPLAY | CF_DSPBITMAP | CF_DSPMETAFILEPICT
         | CF_DSPENHMETAFILE => false,
-        f if CF_GDIOBJ_RANGE.contains(&f) => false,
+        f if CF_GDIOBJ_RANGE.contains(&f) || CF_PRIVATE_RANGE.contains(&f) => false,
         _ => true,
     })
 }
@@ -97,6 +101,7 @@ struct LiveRefs {
 #[derive(Clone)]
 struct SlotState {
     target: BindingTarget,
+    identity: WindowIdentity,
     pid: u32,
     hwnd: Option<isize>,
     element: Option<UiaElement>,
@@ -117,19 +122,28 @@ impl WindowsInjector {
         self.slots.lock().ok()?.get(&slot).cloned()
     }
 
-    fn windows_of(&self, app_id: &str) -> Vec<WindowInfo> {
+    /// Windows of `app_id` (case-insensitive), including those on other
+    /// virtual desktops (flagged), with class and AppUserModelID.
+    fn details_of(&self, app_id: &str) -> Vec<WindowDetail> {
         sys::ensure_com();
+        let want = app_id.to_lowercase();
         let mut exe_cache: HashMap<u32, Option<String>> = HashMap::new();
+        let mut aumid_cache: HashMap<u32, String> = HashMap::new();
         let mut out = Vec::new();
         for w in sys::enum_windows() {
             let exe = exe_cache.entry(w.pid).or_insert_with(|| sys::exe_name(w.pid));
-            if exe.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(app_id)) {
-                out.push(WindowInfo {
-                    app_id: app_id.to_string(),
-                    pid: w.pid as i32,
-                    title: w.title,
-                    standard: w.standard,
-                    id: w.hwnd as u64,
+            if exe.as_deref().is_some_and(|e| e.to_lowercase() == want) {
+                let aumid = aumid_cache.entry(w.pid).or_insert_with(|| sys::aumid(w.pid)).clone();
+                out.push(WindowDetail {
+                    info: WindowInfo {
+                        app_id: app_id.to_string(),
+                        pid: w.pid as i32,
+                        title: w.title,
+                        standard: w.standard,
+                        id: w.hwnd as u64,
+                    },
+                    identity: WindowIdentity { class: sys::class_name(w.hwnd), aumid },
+                    other_desktop: w.other_desktop,
                 });
             }
         }
@@ -137,123 +151,127 @@ impl WindowsInjector {
     }
 }
 
-/// Read the title of a window for the binding (empty if it has none).
+/// The window still exists and belongs to the same process.
 fn window_alive(hwnd: isize, pid: u32) -> bool {
     sys::is_window(hwnd) && sys::window_pid(hwnd) == Some(pid)
 }
 
 // -------------------------------------------------------------- execution
 
-enum StepError {
-    Failed(String),
-    Blocked(String),
+fn probe(f: Option<&sys::FocusedInfo>) -> FocusProbe {
+    match f {
+        None => FocusProbe::Unknown,
+        Some(f) => FocusProbe::Element { is_password: f.is_password },
+    }
 }
 
-struct Run {
+fn epoch_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// The Windows primitives for [`Run`].
+struct WinOs {
     hwnd: isize,
-    pid: u32,
     element: Option<UiaElement>,
     prev: Option<isize>,
     snapshot: Option<sys::ClipboardSnapshot>,
     set_seq: Option<u32>,
+    focus_id: Option<Vec<i32>>,
+    /// Keeps the low-level hooks alive for the whole delivery.
+    watch: sys::InputWatch,
 }
 
-impl Run {
-    fn focus_check(&self) -> std::result::Result<(), StepError> {
-        if sys::foreground() == Some(self.hwnd) {
-            Ok(())
-        } else {
-            Err(StepError::Failed("focus changed".into()))
+impl Os for WinOs {
+    fn activate(&mut self) {
+        let fg = sys::foreground();
+        self.prev = fg.filter(|h| *h != self.hwnd);
+        sys::activate(self.hwnd);
+    }
+
+    fn foreground_is_target(&mut self) -> bool {
+        sys::foreground() == Some(self.hwnd)
+    }
+
+    fn wait_foreground(&mut self, timeout_ms: u64) -> bool {
+        sys::wait_foreground(self.hwnd, Duration::from_millis(timeout_ms))
+    }
+
+    /// R1: whatever UIA says has focus (it may belong to another process: a
+    /// WebView2, a UWP app host, conhost) must be known not to be a password
+    /// field; if that cannot be determined the delivery is refused.
+    fn focus_element(&mut self) -> std::result::Result<(), StepError> {
+        if let Some(e) = &self.element {
+            e.refocus();
+        }
+        let f = sys::uia_focused();
+        password_verdict_strict(probe(f.as_ref())).map_err(StepError::Blocked)?;
+        self.focus_id = f.map(|f| f.runtime_id).filter(|id| !id.is_empty());
+        Ok(())
+    }
+
+    fn focus_unchanged(&mut self) -> bool {
+        match &self.focus_id {
+            None => true,
+            Some(id) => sys::uia_focused().is_some_and(|f| &f.runtime_id == id),
         }
     }
 
-    fn input(&self, ok: bool) -> std::result::Result<(), StepError> {
-        if ok {
-            Ok(())
-        } else {
-            Err(StepError::Failed("cannot send keyboard input".into()))
-        }
+    fn physical_input(&mut self) -> bool {
+        self.watch.physical_seen()
     }
 
-    fn step(&mut self, a: &Action) -> std::result::Result<(), StepError> {
-        let fail = |m: &str| StepError::Failed(m.to_string());
-        match a {
-            Action::AxInsertSelectedText(_) => Err(fail("direct insertion is not supported on Windows")),
-            Action::Activate => {
-                let fg = sys::foreground();
-                self.prev = fg.filter(|h| *h != self.hwnd);
-                sys::activate(self.hwnd);
-                Ok(())
-            }
-            Action::WaitFrontmost { timeout_ms } => {
-                if sys::wait_foreground(self.hwnd, Duration::from_millis(*timeout_ms)) {
-                    Ok(())
-                } else {
-                    Err(fail("could not focus target"))
-                }
-            }
-            Action::FocusElement => {
-                if let Some(e) = &self.element {
-                    e.refocus();
-                }
-                // Whatever has focus now must not be a password field.
-                if let Some(f) = sys::uia_focused() {
-                    if f.pid == self.pid && f.is_password {
-                        return Err(StepError::Blocked("secure text field".into()));
-                    }
-                }
-                Ok(())
-            }
-            Action::TypeUnicode(s) => {
-                self.focus_check()?;
-                self.input(sys::send_unicode(s))
-            }
-            Action::ShiftReturn => {
-                self.focus_check()?;
-                self.input(sys::send_shift_return())
-            }
-            Action::Return => {
-                self.focus_check()?;
-                self.input(sys::send_return())
-            }
-            Action::SnapshotClipboard => {
-                // The planner only pastes when `caps` said the clipboard is
-                // restorable; if that changed since, refuse rather than lose it.
-                self.snapshot = Some(sys::clipboard_snapshot().ok_or_else(|| fail("clipboard cannot be restored"))?);
-                Ok(())
-            }
-            Action::SetClipboard(s) => {
-                self.set_seq = Some(sys::clipboard_set_text(s).ok_or_else(|| fail("cannot set clipboard"))?);
-                Ok(())
-            }
-            // Ctrl+V on Windows.
-            Action::CmdV => {
-                self.focus_check()?;
-                self.input(sys::send_ctrl_v())?;
-                // Let the target consume the paste before the clipboard changes again.
-                std::thread::sleep(Duration::from_millis(60));
-                Ok(())
-            }
-            Action::RestoreClipboardIfUnchanged { delay_ms } => {
-                self.restore_clipboard(*delay_ms);
-                Ok(())
-            }
-            Action::ReactivatePrevious => {
-                if let Some(p) = self.prev.take() {
-                    if sys::is_window(p) {
-                        sys::activate(p);
-                    }
-                }
-                Ok(())
-            }
-        }
+    fn modifiers_released(&mut self) -> bool {
+        sys::wait_modifiers_released(Duration::from_millis(1000))
     }
 
-    fn restore_clipboard(&mut self, delay_ms: u64) {
+    fn send_text(&mut self, s: &str) -> bool {
+        sys::send_unicode(s)
+    }
+    fn send_shift_return(&mut self) -> bool {
+        sys::send_shift_return()
+    }
+    fn send_return(&mut self) -> bool {
+        sys::send_return()
+    }
+    fn send_paste(&mut self) -> bool {
+        sys::send_ctrl_v()
+    }
+
+    fn clipboard_snapshot(&mut self) -> bool {
+        self.snapshot = sys::clipboard_snapshot();
+        self.snapshot.is_some()
+    }
+
+    fn clipboard_set(&mut self, text: &str) -> bool {
+        self.set_seq = sys::clipboard_set_text(text);
+        self.set_seq.is_some()
+    }
+
+    fn clipboard_unchanged(&mut self) -> bool {
+        self.set_seq.is_some_and(|s| sys::clipboard_sequence() == s)
+    }
+
+    fn clipboard_restore_if_unchanged(&mut self) {
         let (Some(snap), Some(seq)) = (self.snapshot.take(), self.set_seq.take()) else { return };
-        std::thread::sleep(Duration::from_millis(delay_ms));
         // Someone else wrote to the clipboard meanwhile: leave it alone.
         sys::clipboard_restore_if_unchanged(&snap, seq);
+    }
+
+    fn reactivate_previous(&mut self) {
+        if let Some(p) = self.prev.take() {
+            if sys::is_window(p) {
+                sys::activate(p);
+            }
+        }
+    }
+
+    fn sleep_ms(&mut self, ms: u64) {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+
+    fn now_ms(&mut self) -> u64 {
+        epoch_ms()
     }
 }
 
@@ -269,25 +287,32 @@ impl Injector for WindowsInjector {
             return Err(InjectError::Platform("target is elevated".into()));
         }
         let exe = sys::exe_name(pid).ok_or_else(|| InjectError::Platform("cannot identify the foreground app".into()))?;
-        let focused = sys::uia_focused().ok_or(InjectError::NoFocusedElement)?;
-        if focused.pid != pid {
-            return Err(InjectError::NoFocusedElement);
-        }
-        if focused.is_password {
+        // The focused element may belong to another process (WebView2, UWP
+        // host, conhost): it is used regardless of its pid. If UIA reports
+        // none, bind at window level; the password check at delivery time
+        // then decides (fail closed).
+        let focused = sys::uia_focused();
+        if focused.as_ref().is_some_and(|f| f.is_password == Some(true)) {
             return Err(InjectError::SecureField);
         }
+        let (role, subrole, element) = match focused {
+            Some(f) => (control_type_name(f.control_type).to_string(), f.class_name, Some(f.element)),
+            None => ("Window".to_string(), String::new(), None),
+        };
+        let identity = WindowIdentity { class: sys::class_name(hwnd), aumid: sys::aumid(pid) };
         let target = BindingTarget {
             app_name: app_display_name(&exe),
             app_id: exe,
             window_title: sys::window_title(hwnd),
-            element_role: control_type_name(focused.control_type).to_string(),
-            element_subrole: focused.class_name,
+            element_role: role,
+            element_subrole: subrole,
             ax_insertable: false,
         };
         Ok(CapturedBinding {
             target,
+            identity,
             pid: pid as i32,
-            live: Some(LiveHandle(Arc::new(LiveRefs { hwnd, element: Some(focused.element) }))),
+            live: Some(LiveHandle(Arc::new(LiveRefs { hwnd, element }))),
         })
     }
 
@@ -299,13 +324,19 @@ impl Injector for WindowsInjector {
             .map(|l| (Some(l.hwnd), l.element.clone()))
             .unwrap_or((None, None));
         if let Ok(mut m) = self.slots.lock() {
-            m.insert(slot, SlotState { target: captured.target, pid: captured.pid as u32, hwnd, element });
+            m.insert(
+                slot,
+                SlotState { target: captured.target, identity: captured.identity, pid: captured.pid as u32, hwnd, element },
+            );
         }
     }
 
-    fn assign_saved(&self, slot: SlotId, target: &BindingTarget) {
+    fn assign_saved(&self, slot: SlotId, target: &BindingTarget, identity: &WindowIdentity) {
         if let Ok(mut m) = self.slots.lock() {
-            m.insert(slot, SlotState { target: target.clone(), pid: 0, hwnd: None, element: None });
+            m.insert(
+                slot,
+                SlotState { target: target.clone(), identity: identity.clone(), pid: 0, hwnd: None, element: None },
+            );
         }
     }
 
@@ -321,22 +352,29 @@ impl Injector for WindowsInjector {
         // Valid while the window exists and its pid is unchanged (§4.8).
         if let Some(h) = st.hwnd {
             if window_alive(h, st.pid) {
+                let live_title = sys::window_title(h);
+                let title_changed = live_title != st.target.window_title;
                 return Ok(ResolvedTarget {
                     slot,
                     pid: st.pid as i32,
                     target: st.target,
+                    identity: st.identity,
+                    live_title,
                     rematched: false,
-                    title_changed: false,
+                    title_changed,
                 });
             }
         }
         // Re-match on (exe, exact title), then the exe's single window (§4.6).
-        let wins = self.windows_of(&st.target.app_id);
-        match rematch(&st.target, &wins) {
+        let wins = self.details_of(&st.target.app_id);
+        match rematch_detail(&st.target, &st.identity, &wins) {
             RematchOutcome::Matched { window, kind } => {
+                let live_title = window.title.clone();
                 let title_changed = kind == MatchKind::SingleWindow && st.target.window_title != window.title;
-                if title_changed {
-                    st.target.window_title = window.title.clone();
+                if let Some(d) = wins.iter().find(|d| d.info.id == window.id) {
+                    if st.identity == WindowIdentity::default() {
+                        st.identity = d.identity.clone();
+                    }
                 }
                 st.pid = window.pid as u32;
                 st.hwnd = Some(window.id as isize);
@@ -344,7 +382,15 @@ impl Injector for WindowsInjector {
                 if let Ok(mut m) = self.slots.lock() {
                     m.insert(slot, st.clone());
                 }
-                Ok(ResolvedTarget { slot, target: st.target, pid: window.pid, rematched: true, title_changed })
+                Ok(ResolvedTarget {
+                    slot,
+                    target: st.target,
+                    identity: st.identity,
+                    live_title,
+                    pid: window.pid,
+                    rematched: true,
+                    title_changed,
+                })
             }
             RematchOutcome::Unbound(_) => Err(InjectError::Missing),
         }
@@ -354,13 +400,14 @@ impl Injector for WindowsInjector {
         sys::ensure_com();
         let st = self.state(target.slot).ok_or(InjectError::Missing)?;
         let secure_field = st.element.as_ref().and_then(|e| e.is_password()).unwrap_or(false);
+        let class = st.hwnd.map(sys::class_name).unwrap_or_else(|| st.identity.class.clone());
         Ok(TargetCaps {
-            category: AppCategory::from_app_id(&st.target.app_id),
+            category: category_for(&st.target.app_id, &class),
             ax_insertable: false,
             secure_field,
             secure_input: false,
             elevated: sys::target_is_elevated(target.pid as u32),
-            clipboard_restorable: sys::clipboard_formats().is_some_and(|f| formats_restorable(&f)),
+            clipboard_restorable: sys::clipboard_restorable(),
         })
     }
 
@@ -382,23 +429,25 @@ impl Injector for WindowsInjector {
         if sys::target_is_elevated(pid) {
             return DeliveryResult::blocked("target is elevated");
         }
-        let mut run = Run { hwnd, pid, element: st.element.clone(), prev: None, snapshot: None, set_seq: None };
-        let mut result = Ok(());
-        for a in &plan.actions {
-            if let Err(e) = run.step(a) {
-                result = Err(e);
-                break;
-            }
+        // R4a: let the user finish typing before we take the focus.
+        if plan_sends_input(plan) {
+            wait_for_idle(sys::idle_ms, |ms| std::thread::sleep(Duration::from_millis(ms)), IDLE_REQUIRED_MS, IDLE_MAX_WAIT_MS);
         }
-        // Never leave our text on the clipboard or the user's app buried.
-        run.restore_clipboard(crate::planner::CLIPBOARD_RESTORE_DELAY_MS);
-        if result.is_err() {
-            let _ = run.step(&Action::ReactivatePrevious);
-        }
+        let os = WinOs {
+            hwnd,
+            element: st.element.clone(),
+            prev: None,
+            snapshot: None,
+            set_seq: None,
+            focus_id: None,
+            watch: sys::InputWatch::start(),
+        };
+        let result = Run::new(os).run(&plan.actions);
         match result {
             Ok(()) => DeliveryResult::Sent { method: plan.method },
             Err(StepError::Blocked(r)) => DeliveryResult::blocked(r),
             Err(StepError::Failed(r)) => DeliveryResult::failed(r),
+            Err(StepError::AxUnconfirmed) => DeliveryResult::failed("direct insertion is not supported on Windows"),
         }
     }
 
@@ -413,7 +462,11 @@ impl Injector for WindowsInjector {
     }
 
     fn running_windows(&self, app_id: &str) -> Vec<WindowInfo> {
-        self.windows_of(app_id)
+        self.details_of(app_id).into_iter().map(|d| d.info).collect()
+    }
+
+    fn window_details(&self, app_id: &str) -> Vec<WindowDetail> {
+        self.details_of(app_id)
     }
 
     fn play_sound(&self, sound: Sound) {
@@ -481,7 +534,10 @@ mod tests {
         assert!(!formats_restorable(&[CF_DSPBITMAP]));
         assert!(!formats_restorable(&[0x300]));
         assert!(!formats_restorable(&[CF_DIB, 0x3FF]));
-        assert!(formats_restorable(&[0x2FF, 0x400]));
+        assert!(formats_restorable(&[0x400, 0xC001]));
+        // Private formats are not necessarily HGLOBAL.
+        assert!(!formats_restorable(&[0x200]));
+        assert!(!formats_restorable(&[CF_UNICODETEXT, 0x2FF]));
     }
 
     #[test]

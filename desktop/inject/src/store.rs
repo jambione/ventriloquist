@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ActiveSlot, BindingTarget, SlotId, SlotSettings, WindowInfo};
+use crate::model::{
+    default_follow_title, ActiveSlot, BindingTarget, SlotId, SlotSettings, WindowDetail, WindowIdentity, WindowInfo,
+};
 
 pub const BINDINGS_FILE: &str = "bindings.json";
 pub const BINDINGS_VERSION: u32 = 1;
@@ -19,16 +21,44 @@ pub struct SlotRecord {
     pub target: BindingTarget,
     #[serde(default)]
     pub settings: SlotSettings,
+    /// Window class / AppUserModelID for the re-match fallback (R7).
+    #[serde(default)]
+    pub identity: WindowIdentity,
+    /// R5: when false, text is only delivered while the live window title
+    /// equals `target.window_title`. Default: true for terminals only; a file
+    /// without the key gets that default on load.
+    #[serde(default)]
+    pub follow_title_changes: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct FileFormat {
     version: u32,
     /// 0 = Off, 1..=9 = slot.
+    active: u8,
+    slots: Vec<SlotRecord>,
+}
+
+#[derive(Deserialize)]
+struct FileHead {
+    version: u32,
+}
+
+#[derive(Deserialize)]
+struct FileBody {
+    /// 0 = Off, 1..=9 = slot.
     #[serde(default)]
     active: u8,
+    /// Records are parsed one by one so one bad record cannot discard the rest.
     #[serde(default)]
-    slots: Vec<SlotRecord>,
+    slots: Vec<serde_json::Value>,
+}
+
+#[derive(Debug)]
+enum ParseFailure {
+    Corrupt(String),
+    /// A file from another version: kept untouched.
+    OtherVersion(u32),
 }
 
 /// Result of selecting a slot with the hotkey (§4.2).
@@ -47,6 +77,10 @@ pub enum SelectOutcome {
 pub struct BindingsStore {
     slots: BTreeMap<SlotId, SlotRecord>,
     active: ActiveSlot,
+    /// Set when `bindings.json` was written by another version: the file is
+    /// left alone and `save` refuses until the user binds a slot (which is an
+    /// explicit decision to start over).
+    foreign_version: Option<u32>,
 }
 
 impl BindingsStore {
@@ -65,9 +99,38 @@ impl BindingsStore {
     /// Bind `slot` (replacing whatever it held, settings reset to the app's defaults),
     /// make it active (O1).
     pub fn bind(&mut self, slot: SlotId, target: BindingTarget) {
-        let settings = SlotSettings::for_app(&target.app_id);
-        self.slots.insert(slot, SlotRecord { slot, target, settings });
+        self.bind_with(slot, target, WindowIdentity::default());
+    }
+
+    /// [`BindingsStore::bind`] with the window identity (class, AUMID); the
+    /// class also refines the per-app defaults.
+    pub fn bind_with(&mut self, slot: SlotId, target: BindingTarget, identity: WindowIdentity) {
+        let settings = SlotSettings::for_app_class(&target.app_id, &identity.class);
+        let follow_title_changes = default_follow_title(&target.app_id, &identity.class);
+        self.slots.insert(slot, SlotRecord { slot, target, settings, identity, follow_title_changes });
         self.active = ActiveSlot::Slot(slot);
+        self.foreign_version = None;
+    }
+
+    pub fn set_follow_title_changes(&mut self, slot: SlotId, on: bool) -> bool {
+        match self.slots.get_mut(&slot) {
+            Some(r) => {
+                r.follow_title_changes = on;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Remember the window identity of a record that has none (old file).
+    pub fn fill_identity(&mut self, slot: SlotId, identity: &WindowIdentity) -> bool {
+        match self.slots.get_mut(&slot) {
+            Some(r) if r.identity == WindowIdentity::default() && *identity != WindowIdentity::default() => {
+                r.identity = identity.clone();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Unbind; if it was active the active slot becomes Off. Returns whether
@@ -127,8 +190,11 @@ impl BindingsStore {
     }
 
     /// Load `bindings.json` from `dir`. Missing file: defaults, no warning.
-    /// Unreadable, corrupt, or newer-version file: defaults plus a warning
-    /// (a corrupt file is moved aside to `bindings.json.corrupt`, best effort).
+    /// Unreadable file: defaults plus a warning. Corrupt file: defaults plus a
+    /// warning, the file moved aside to a fresh `bindings.json.corrupt[.N]`
+    /// (best effort). A file of another version is left untouched (defaults
+    /// plus a warning, and `save` refuses until the user binds a slot). Invalid
+    /// slot records are skipped with a warning; the valid ones are kept.
     pub fn load(dir: &Path) -> (Self, Option<String>) {
         let path = dir.join(BINDINGS_FILE);
         let bytes = match fs::read(&path) {
@@ -137,34 +203,62 @@ impl BindingsStore {
             Err(e) => return (Self::default(), Some(format!("cannot read {BINDINGS_FILE}: {e}"))),
         };
         match Self::parse(&bytes) {
-            Ok(s) => (s, None),
-            Err(why) => {
-                let mut aside = path.clone().into_os_string();
-                aside.push(".corrupt");
-                let _ = fs::rename(&path, PathBuf::from(aside));
+            Ok((s, warn)) => (s, warn),
+            Err(ParseFailure::OtherVersion(v)) => (
+                BindingsStore { foreign_version: Some(v), ..Self::default() },
+                Some(format!(
+                    "{BINDINGS_FILE} ignored (unsupported version {v}); starting with no bindings, the file is left as it is"
+                )),
+            ),
+            Err(ParseFailure::Corrupt(why)) => {
+                let _ = fs::rename(&path, unique_corrupt_name(&path));
                 (Self::default(), Some(format!("{BINDINGS_FILE} ignored ({why}); starting with no bindings")))
             }
         }
     }
 
-    fn parse(bytes: &[u8]) -> Result<Self, String> {
-        let f: FileFormat = serde_json::from_slice(bytes).map_err(|e| format!("corrupt: {e}"))?;
-        if f.version != BINDINGS_VERSION {
-            return Err(format!("unsupported version {}", f.version));
+    fn parse(bytes: &[u8]) -> Result<(Self, Option<String>), ParseFailure> {
+        let head: FileHead = serde_json::from_slice(bytes).map_err(|e| ParseFailure::Corrupt(format!("corrupt: {e}")))?;
+        if head.version != BINDINGS_VERSION {
+            return Err(ParseFailure::OtherVersion(head.version));
         }
+        let f: FileBody = serde_json::from_slice(bytes).map_err(|e| ParseFailure::Corrupt(format!("corrupt: {e}")))?;
         let mut slots = BTreeMap::new();
-        for r in f.slots {
-            slots.insert(r.slot, r); // a later duplicate wins
+        let mut bad = 0usize;
+        for v in f.slots {
+            match serde_json::from_value::<SlotRecord>(v.clone()) {
+                Ok(mut r) => {
+                    // Keys missing from an older file get the per-app defaults.
+                    if v.pointer("/settings/newline_mode").is_none() {
+                        r.settings.newline_mode =
+                            SlotSettings::for_app_class(&r.target.app_id, &r.identity.class).newline_mode;
+                    }
+                    if v.get("follow_title_changes").is_none() {
+                        r.follow_title_changes = default_follow_title(&r.target.app_id, &r.identity.class);
+                    }
+                    slots.insert(r.slot, r); // a later duplicate wins
+                }
+                Err(e) => {
+                    bad += 1;
+                    log::warn!("{BINDINGS_FILE}: skipping an invalid slot record: {e}");
+                }
+            }
         }
         let active = match ActiveSlot::from_digit(f.active) {
             Some(ActiveSlot::Slot(s)) if slots.contains_key(&s) => ActiveSlot::Slot(s),
             _ => ActiveSlot::Off,
         };
-        Ok(BindingsStore { slots, active })
+        let warn = (bad > 0).then(|| format!("{bad} invalid slot record(s) in {BINDINGS_FILE} ignored"));
+        Ok((BindingsStore { slots, active, foreign_version: None }, warn))
     }
 
     /// Atomic write (temp file + fsync + rename), private file mode.
     pub fn save(&self, dir: &Path) -> io::Result<()> {
+        if let Some(v) = self.foreign_version {
+            return Err(io::Error::other(format!(
+                "{BINDINGS_FILE} was written by another version ({v}) and is left unchanged until you bind a slot"
+            )));
+        }
         let f = FileFormat {
             version: BINDINGS_VERSION,
             active: self.active.digit(),
@@ -173,6 +267,21 @@ impl BindingsStore {
         let bytes = serde_json::to_vec_pretty(&f).map_err(io::Error::other)?;
         atomic_write_private(&dir.join(BINDINGS_FILE), &bytes)
     }
+}
+
+/// `bindings.json.corrupt`, or `.corrupt.1`, `.corrupt.2`... when that exists,
+/// so an earlier aside copy is never overwritten.
+fn unique_corrupt_name(path: &Path) -> PathBuf {
+    let mk = |suffix: String| {
+        let mut p = path.to_path_buf().into_os_string();
+        p.push(suffix);
+        PathBuf::from(p)
+    };
+    let first = mk(".corrupt".into());
+    if !first.exists() {
+        return first;
+    }
+    (1..1000).map(|n| mk(format!(".corrupt.{n}"))).find(|p| !p.exists()).unwrap_or(first)
 }
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -250,35 +359,67 @@ pub enum RematchOutcome {
     Unbound(UnboundReason),
 }
 
+/// Exes shared by many unrelated apps or sites: the single-window fallback
+/// would pick the wrong thing (R7).
+const NO_SINGLE_WINDOW_FALLBACK: &[&str] =
+    &["applicationframehost.exe", "javaw.exe", "java.exe", "python.exe", "pythonw.exe", "node.exe", "electron.exe", "dotnet.exe"];
+
+/// May the "app's only standard window" fallback be used for this app id?
+/// Never for browsers (a PWA's slot must not land in a normal tab) or generic
+/// host/runtime exes: those match by exact title only (R7).
+pub fn single_window_fallback_allowed(app_id: &str) -> bool {
+    crate::planner::AppCategory::from_app_id(app_id) != crate::planner::AppCategory::Browser
+        && !NO_SINGLE_WINDOW_FALLBACK.contains(&app_id.to_lowercase().as_str())
+}
+
+/// Pure re-match (§4.6) without extra identity: see [`rematch_detail`].
+pub fn rematch(saved: &BindingTarget, running_windows: &[WindowInfo]) -> RematchOutcome {
+    let details: Vec<WindowDetail> = running_windows.iter().cloned().map(WindowDetail::from).collect();
+    rematch_detail(saved, &WindowIdentity::default(), &details)
+}
+
 /// Pure re-match (§4.6). `running_windows` are the windows of running apps;
 /// those of other app ids are ignored.
 ///
-/// 1. windows of the app id (none: unbound);
+/// 1. windows of the app id, case-insensitively (none: unbound);
 /// 2. exactly one window with the saved title (several: unbound, never
-///    guess; an empty saved title never matches by title);
-/// 3. otherwise exactly one standard window;
+///    guess; an empty saved title never matches by title). Windows on other
+///    virtual desktops count here;
+/// 3. otherwise, when the fallback is allowed for the app
+///    ([`single_window_fallback_allowed`]), exactly one standard window whose
+///    class / AppUserModelID equal the saved ones (when both are known) and
+///    which is on this desktop; other-desktop windows count for uniqueness
+///    but are never picked;
 /// 4. otherwise unbound.
-pub fn rematch(saved: &BindingTarget, running_windows: &[WindowInfo]) -> RematchOutcome {
-    let wins: Vec<&WindowInfo> = running_windows
-        .iter()
-        .filter(|w| w.app_id.eq_ignore_ascii_case(&saved.app_id))
-        .collect();
+pub fn rematch_detail(saved: &BindingTarget, saved_identity: &WindowIdentity, running_windows: &[WindowDetail]) -> RematchOutcome {
+    let app = saved.app_id.to_lowercase();
+    let wins: Vec<&WindowDetail> =
+        running_windows.iter().filter(|w| w.info.app_id.to_lowercase() == app).collect();
     if wins.is_empty() {
         return RematchOutcome::Unbound(UnboundReason::NotRunning);
     }
     if !saved.window_title.is_empty() {
-        let exact: Vec<&&WindowInfo> = wins.iter().filter(|w| w.title == saved.window_title).collect();
+        let exact: Vec<&&WindowDetail> = wins.iter().filter(|w| w.info.title == saved.window_title).collect();
         match exact.len() {
             0 => {}
             1 => {
-                return RematchOutcome::Matched { window: (**exact[0]).clone(), kind: MatchKind::ExactTitle }
+                return RematchOutcome::Matched { window: exact[0].info.clone(), kind: MatchKind::ExactTitle }
             }
             _ => return RematchOutcome::Unbound(UnboundReason::AmbiguousTitle),
         }
     }
-    let standard: Vec<&&WindowInfo> = wins.iter().filter(|w| w.standard).collect();
-    if standard.len() == 1 {
-        return RematchOutcome::Matched { window: (**standard[0]).clone(), kind: MatchKind::SingleWindow };
+    if !single_window_fallback_allowed(&saved.app_id) {
+        return RematchOutcome::Unbound(UnboundReason::NoUniqueWindow);
+    }
+    let same = |a: &str, b: &str| a.is_empty() || b.is_empty() || a == b;
+    let standard: Vec<&&WindowDetail> = wins.iter().filter(|w| w.info.standard).collect();
+    if let [w] = standard.as_slice() {
+        if !w.other_desktop
+            && same(&saved_identity.class, &w.identity.class)
+            && same(&saved_identity.aumid, &w.identity.aumid)
+        {
+            return RematchOutcome::Matched { window: w.info.clone(), kind: MatchKind::SingleWindow };
+        }
     }
     RematchOutcome::Unbound(UnboundReason::NoUniqueWindow)
 }
@@ -513,7 +654,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(BINDINGS_FILE), br#"{"version":99,"active":0,"slots":[]}"#).unwrap();
         let (s, w) = BindingsStore::load(dir.path());
-        assert_eq!(s, BindingsStore::default());
+        assert_eq!(s.records().count(), 0);
         assert!(w.unwrap().contains("version"));
         let bad = r#"{"version":1,"active":0,"slots":[{"slot":12,"target":{"app_id":"a","app_name":"A","window_title":"","element_role":"r","ax_insertable":true}}]}"#;
         fs::write(dir.path().join(BINDINGS_FILE), bad).unwrap();
@@ -566,8 +707,139 @@ mod tests {
         assert_eq!(l.get(slot(2)).unwrap().settings.newline_mode, NewlineMode::Spaces);
         // A file without the key (older) reads as the default.
         let old = br#"{"version":1,"active":1,"slots":[{"slot":1,"target":{"app_id":"a","app_name":"A","window_title":"t","element_role":"r","ax_insertable":false},"settings":{"auto_submit":true}}]}"#;
-        let st = BindingsStore::parse(old).unwrap();
+        let st = BindingsStore::parse(old).unwrap().0;
         assert_eq!(st.get(slot(1)).unwrap().settings.newline_mode, NewlineMode::ShiftEnter);
         assert!(st.get(slot(1)).unwrap().settings.auto_submit);
+    }
+
+    // ---- N3 fixes
+
+    fn detail(app: &str, title: &str, standard: bool, id: u64, class: &str, other: bool) -> WindowDetail {
+        WindowDetail {
+            info: win(app, title, standard, id),
+            identity: WindowIdentity { class: class.into(), aumid: String::new() },
+            other_desktop: other,
+        }
+    }
+
+    #[test]
+    fn fallback_never_for_browsers_and_generic_hosts() {
+        for app in ["chrome.exe", "msedge.exe", "com.google.Chrome", "ApplicationFrameHost.exe", "javaw.exe", "python.exe"] {
+            let ws = vec![win(app, "New title", true, 1)];
+            assert_eq!(rematch(&target(app, "Old"), &ws), RematchOutcome::Unbound(UnboundReason::NoUniqueWindow), "{app}");
+            // exact title still works
+            assert!(matches!(rematch(&target(app, "New title"), &ws), RematchOutcome::Matched { kind: MatchKind::ExactTitle, .. }));
+        }
+        assert!(single_window_fallback_allowed("ms-teams.exe"));
+    }
+
+    #[test]
+    fn fallback_requires_matching_window_class() {
+        let saved_id = WindowIdentity { class: "TeamsWnd".into(), aumid: String::new() };
+        let ws = vec![detail("a", "Renamed", true, 1, "OtherClass", false)];
+        assert_eq!(
+            rematch_detail(&target("a", "Old"), &saved_id, &ws),
+            RematchOutcome::Unbound(UnboundReason::NoUniqueWindow)
+        );
+        let ws = vec![detail("a", "Renamed", true, 1, "TeamsWnd", false)];
+        assert!(matches!(rematch_detail(&target("a", "Old"), &saved_id, &ws), RematchOutcome::Matched { .. }));
+        // unknown class on either side: not a mismatch
+        assert!(matches!(
+            rematch_detail(&target("a", "Old"), &WindowIdentity::default(), &ws),
+            RematchOutcome::Matched { .. }
+        ));
+    }
+
+    #[test]
+    fn other_desktop_windows_count_but_are_never_picked_by_fallback() {
+        let id = WindowIdentity::default();
+        // two same-titled windows, one on another desktop: ambiguous
+        let ws = vec![detail("a", "Chat", true, 1, "", false), detail("a", "Chat", true, 2, "", true)];
+        assert_eq!(rematch_detail(&target("a", "Chat"), &id, &ws), RematchOutcome::Unbound(UnboundReason::AmbiguousTitle));
+        // the only other standard window is on another desktop: not picked
+        let ws = vec![detail("a", "Renamed", true, 1, "", true)];
+        assert_eq!(rematch_detail(&target("a", "Old"), &id, &ws), RematchOutcome::Unbound(UnboundReason::NoUniqueWindow));
+        // one here, one there: not unique
+        let ws = vec![detail("a", "X", true, 1, "", false), detail("a", "Y", true, 2, "", true)];
+        assert_eq!(rematch_detail(&target("a", "Old"), &id, &ws), RematchOutcome::Unbound(UnboundReason::NoUniqueWindow));
+    }
+
+    #[test]
+    fn follow_title_default_and_missing_key_migration() {
+        let mut s = BindingsStore::default();
+        s.bind(slot(1), target("WindowsTerminal.exe", "pwsh"));
+        s.bind(slot(2), target("ms-teams.exe", "Chat"));
+        assert!(s.get(slot(1)).unwrap().follow_title_changes);
+        assert!(!s.get(slot(2)).unwrap().follow_title_changes);
+        assert!(s.set_follow_title_changes(slot(2), true));
+        assert!(!s.set_follow_title_changes(slot(3), true));
+        let dir = tempfile::tempdir().unwrap();
+        s.save(dir.path()).unwrap();
+        let (l, _) = BindingsStore::load(dir.path());
+        assert!(l.get(slot(2)).unwrap().follow_title_changes, "explicit value persists");
+        // a file without the key: terminal true, others false
+        let j = r#"{"version":1,"active":0,"slots":[
+          {"slot":1,"target":{"app_id":"cmd.exe","app_name":"c","window_title":"w","element_role":"r","ax_insertable":false}},
+          {"slot":2,"target":{"app_id":"x.exe","app_name":"c","window_title":"w","element_role":"r","ax_insertable":false}}]}"#;
+        fs::write(dir.path().join(BINDINGS_FILE), j).unwrap();
+        let (l, w) = BindingsStore::load(dir.path());
+        assert!(w.is_none());
+        assert!(l.get(slot(1)).unwrap().follow_title_changes);
+        assert!(!l.get(slot(2)).unwrap().follow_title_changes);
+    }
+
+    #[test]
+    fn newer_version_blocks_save_until_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(BINDINGS_FILE);
+        let body = r#"{"version":2,"slots":"future format"}"#;
+        fs::write(&p, body).unwrap();
+        let (mut s, w) = BindingsStore::load(dir.path());
+        assert!(w.unwrap().contains("version"));
+        assert_eq!(fs::read_to_string(&p).unwrap(), body);
+        assert!(s.save(dir.path()).is_err());
+        assert_eq!(fs::read_to_string(&p).unwrap(), body, "not overwritten");
+        s.bind(slot(1), target("a", "w"));
+        s.save(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn corrupt_files_never_overwrite_an_earlier_aside_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join(BINDINGS_FILE);
+        fs::write(&p, b"{first").unwrap();
+        BindingsStore::load(dir.path());
+        fs::write(&p, b"{second").unwrap();
+        BindingsStore::load(dir.path());
+        assert_eq!(fs::read(dir.path().join("bindings.json.corrupt")).unwrap(), b"{first");
+        assert_eq!(fs::read(dir.path().join("bindings.json.corrupt.1")).unwrap(), b"{second");
+    }
+
+    #[test]
+    fn bad_slot_records_are_skipped_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = r#"{"version":1,"active":1,"slots":[
+          {"slot":1,"target":{"app_id":"a","app_name":"A","window_title":"w","element_role":"r","ax_insertable":false}},
+          {"slot":3},{"slot":10,"target":{"app_id":"a","app_name":"A","window_title":"w","element_role":"r","ax_insertable":false}}]}"#;
+        fs::write(dir.path().join(BINDINGS_FILE), j).unwrap();
+        let (s, w) = BindingsStore::load(dir.path());
+        assert!(w.unwrap().contains("2 invalid"));
+        assert_eq!(s.records().count(), 1);
+        assert_eq!(s.active(), ActiveSlot::Slot(slot(1)));
+        assert!(dir.path().join(BINDINGS_FILE).exists());
+    }
+
+    #[test]
+    fn window_class_refines_defaults_and_identity_fill() {
+        use crate::model::NewlineMode;
+        let mut s = BindingsStore::default();
+        let id = WindowIdentity { class: "ConsoleWindowClass".into(), aumid: String::new() };
+        s.bind_with(slot(1), target("python.exe", "py"), id.clone());
+        let r = s.get(slot(1)).unwrap();
+        assert_eq!(r.settings.newline_mode, NewlineMode::Spaces);
+        assert!(r.follow_title_changes);
+        s.bind(slot(2), target("a", "w"));
+        assert!(s.fill_identity(slot(2), &id));
+        assert!(!s.fill_identity(slot(2), &WindowIdentity { class: "other".into(), aumid: String::new() }));
     }
 }

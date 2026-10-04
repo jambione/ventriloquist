@@ -94,9 +94,12 @@ global hotkeys (tauri-plugin-global-shortcut) ──► SlotCommands ┤
 ### 4.3 Delivery of a final
 On `FinalAccepted`, when the active slot ≠ Off:
 1. **Resolve the target.** Use the live AX window reference if it is still valid. If not, re-match (§4.6). If nothing matches, the result is **`missing`**: show a notice ("Slot 2 (Microsoft Teams) not found — not sent"), set the badge to ✗, and stop. **Never fall back** to the frontmost app or any other window.
+   - **Title check.** A slot whose **`follow_title_changes`** is **false** (the default for every app except terminals) is delivered to only while the window's live title equals the bound title exactly; otherwise the result is **`blocked("window changed: was '<old>', now '<new>'")`** and nothing is typed. This stops text going into another chat or tab that was opened in the same window. Rebinding updates the bound title. Slots with it **true** (terminals, whose titles change with every command) adopt the new title and keep delivering.
 2. **Refuse** (result **`blocked`**) when:
    - the target element is a secure text field;
-   - secure event input is enabled system-wide (`IsSecureEventInputEnabled()`, e.g. a password prompt is up).
+   - secure event input is enabled system-wide (`IsSecureEventInputEnabled()`, e.g. a password prompt is up);
+   - after activation, the element that actually has focus is re-checked (a secure text field, or on Windows an element that cannot be shown *not* to be a password, §4.8) — the bound element may no longer be the focused one.
+   Every refusal is logged (`VQ_LOG`) with its reason and shown as a notice.
 3. **Plan** with the pure planner `plan_delivery(caps, text, settings)`, where caps = {ax_insertable, app category}:
    - **AX path:** only if the element is a native text field/area whose `AXSelectedText` is settable, and the app is not on the keystroke-preferred list (browsers, Electron apps incl. Teams/VS Code/Slack, terminals: Terminal, iTerm2, Warp, Ghostty, WezTerm, Alacritty, kitty). Set `AXSelectedText` to the text, inserting at the cursor and replacing any selection. If text has line breaks, insert them as `\n` — AX insertion doesn't trigger send. **No activation needed.** Read the value back to confirm; if that fails, fall through to the keystroke path.
    - **Keystroke path:**
@@ -105,15 +108,17 @@ On `FinalAccepted`, when the active slot ≠ Off:
      3. Re-focus the bound element (`AXFocused = true`) if it is still valid.
      4. Wait until the target is frontmost (poll ≤ 500 ms; else result `failed`).
      5. Insert the text:
-        - **≤ 200 characters:** type it as Unicode keyboard events (`CGEventKeyboardSetUnicodeString`, chunks of ≤ 20 UTF-16 units). Each line break is **Shift+Return**.
-        - **> 200 characters:** **paste**, line by line:
-          1. Snapshot every pasteboard item and type.
-          2. Set the line's text and press Cmd+V, pressing Shift+Return between lines.
-          3. Restore the snapshot ~250 ms after the last paste.
+        - **Single-line text ≤ 200 characters, or multi-line text ≤ 1,000 characters:** type it as Unicode keyboard events (`CGEventKeyboardSetUnicodeString`, chunks of ≤ 20 UTF-16 units). Each line break is **Shift+Return**. A tab is typed as a **space** (a real Tab key would move keyboard focus or complete in a shell).
+        - **Longer text:** **paste**, line by line (tabs stay in pasted text):
+          1. Snapshot every pasteboard item and type (if any type yields no data, the clipboard is not restorable: type instead).
+          2. Set the line's text and press Cmd+V, wait 150 ms and check that nobody else wrote to the clipboard, pressing Shift+Return between lines.
+          3. Restore the snapshot no earlier than **400 ms** after the last paste (the target reads the clipboard asynchronously).
           4. If the user changed the clipboard in between (`changeCount` differs from the one we set), do **not** restore.
-     6. If the slot's **auto-submit** is on, press Return.
-     7. Re-activate the remembered app (unless it *was* the target).
-4. Text is the entry's final text **exactly**: no trimming, no added prefix or suffix. Control characters other than `\n`/`\t` are dropped from typing (logged); `\r\n` is treated as one line break.
+     6. If the slot's **auto-submit** is on: wait 150 ms for the text to be consumed, re-verify that the target is still the frontmost window, then press Return. If the focus changed, Return is **not** sent and the result is `failed("focus changed before submit")`.
+     7. Wait 150 ms, then re-activate the remembered app (unless it *was* the target).
+
+     **User input guard.** Before a delivery that sends keystrokes, wait until the user has been idle for 300 ms (at most 3 s, then proceed). During the delivery, physical (non-injected) key presses or mouse clicks stop it at once: no further text, **never** the auto-submit Return, result `failed("interrupted by user input")`. (Windows: low-level keyboard/mouse hooks that look at the injected flag; macOS: the hardware-event idle time sampled between chunks.) The clipboard restore and re-activation still run.
+4. Text is the entry's final text **exactly**: no trimming, no added prefix or suffix. Control characters other than `\n`/`\t` are dropped from typing (logged). `\r\n`, a lone `\r`, U+2028, U+2029 and U+0085 are each one line break. For terminal slots bidirectional control characters are dropped too (they can make a command line display differently from what runs).
 5. **Result** `sent` / `missing` / `blocked` / `failed(reason)` is shown as a badge on the entry (§4.5) and logged to stderr when `VQ_LOG=1`. It is **not** written to the Markdown log, whose format is unchanged.
 
 ### 4.4 Ordering and races
@@ -125,7 +130,8 @@ On `FinalAccepted`, when the active slot ≠ Off:
 - **Slot bar** under the toolbar:
   - chips **Off · 1 … 9**. Each bound chip shows `N · App — window title` (truncated, full text in a tooltip).
   - Unbound chips are dimmed; the active chip is highlighted. Click a chip to select it, the same as the hotkey.
-  - Each bound chip has a ⋯ menu: **Auto-submit (Enter)** toggle, **Unbind**.
+  - Each bound chip has a ⋯ menu: **Auto-submit (Enter)** toggle, **Follow window when its title changes** toggle (§4.3; default on for terminals, off otherwise), **Unbind**.
+  - The bar is one wrapping row of chips at any window width ≥ 320 px.
   - Re-matched-but-unverified chips show a small "?" until the first successful delivery.
 - **Entry badge:** `→ 2 · Teams ✓`, `not sent (Off)`, `✗ slot 2 missing`, `⚠ blocked (secure input)`, `✗ failed: <reason>`, or `sending…`.
 - **"Send to active slot"** button per entry (next to Copy): delivers that entry's **current** text, including corrections, to the active slot with the same rules. It is disabled when Off.
@@ -139,11 +145,11 @@ On `FinalAccepted`, when the active slot ≠ Off:
 - Each bound chip's ⋯ menu also has the **Newline mode** choice (`Shift+Enter` / `Spaces`).
 
 ### 4.6 Persistence and re-match
-- `bindings.json` lives in the config dir: an atomic write, version field, slots 1–9, and the active slot.
+- `bindings.json` lives in the config dir: an atomic write, version field, slots 1–9, and the active slot. Each slot has `follow_title_changes`; a missing key gets the per-app default on load, and so does a missing `newline_mode`. One invalid slot record is skipped with a warning; it does not discard the rest. A file of another version is left untouched (never renamed, never overwritten until the user binds a slot); a corrupt file is moved to a fresh `bindings.json.corrupt[.N]`.
 - **Re-match**, on start and when a live reference is invalid:
   1. Find running apps with the bundle id.
-  2. Look for a window whose title equals the saved title exactly.
-  3. If none, and the app has exactly **one** standard window, use it and update the saved title.
+  2. Look for a window whose title equals the saved title exactly (app ids compare case-insensitively, Unicode-aware). Several matches: **unbound**, never guess. Windows on other virtual desktops count here.
+  3. If none, and the app has exactly **one** standard window, use it and update the saved title (only for slots that follow title changes; others are then blocked at delivery by the title check). Not used for browsers, `ApplicationFrameHost.exe` or generic runtimes (`javaw`, `python`, `node`, `electron`...), which match by exact title only. On Windows the window's class (and AppUserModelID when the app is packaged) must equal the saved ones, and a window on another virtual desktop is never chosen by this fallback.
   4. Otherwise mark the slot **unbound**: keep the saved description, dimmed, with "rebind" shown.
 - The re-matched element is the window's focused element at delivery time, if its role matches the saved role; otherwise the keystroke path types into the window's focused element after activation.
 - Re-matched slots are shown with "?" until a delivery succeeds.
@@ -159,8 +165,9 @@ On `FinalAccepted`, when the active slot ≠ Off:
 ### 4.8 Windows specifics
 - **Capture:**
   - `GetForegroundWindow` gives the HWND; from it, get the pid and the exe name (`QueryFullProcessImageNameW`) and the window title (`GetWindowTextW`).
-  - UI Automation `GetFocusedElement` gives ControlType, ClassName, `IsPassword` and RuntimeId.
+  - UI Automation `GetFocusedElement` gives ControlType, ClassName, `IsPassword` and RuntimeId. The element may belong to another process than the window (WebView2 in new Teams/Outlook, UWP apps under `ApplicationFrameHost`, conhost): it is used regardless of its pid. If UIA reports none, the slot binds at window level.
   - Refuse password elements, and refuse Ventriloquist's own windows.
+  - The window's class name and (packaged apps) AppUserModelID are stored for the re-match (§4.6).
 - **Insertion path:** **always the keystroke/paste path** in v2. UIA has no reliable insert-at-cursor, and `ValuePattern.SetValue` replaces the whole field. Direct insertion is deferred.
 - **Elevation (UIPI):** if the target process's integrity level is higher than ours, or its token can't be opened, the result is `Blocked("target is elevated")`. Check this before activating.
 - **Activation:**
@@ -168,11 +175,12 @@ On `FinalAccepted`, when the active slot ≠ Off:
   2. Bring the target forward with `SetForegroundWindow`. Windows' foreground-lock rules need the documented `AttachThreadInput` technique around it: attach to the current foreground thread, call `BringWindowToTop` + `SetForegroundWindow`, then detach. Restore minimized windows with `ShowWindow(SW_RESTORE)` first.
   3. Verify with `GetForegroundWindow() == target` (poll ≤ 500 ms), else `Failed("could not focus target")`.
   4. Re-focus the saved UIA element (`SetFocus`) if its RuntimeId still resolves.
-- **Typing:** `SendInput` with `KEYEVENTF_UNICODE` per UTF-16 unit, sent in batches. Shift+Enter is VK_SHIFT+VK_RETURN, and auto-submit is VK_RETURN. Abort with `Failed("focus changed")` if the foreground window changes mid-typing.
+  5. **Fail-closed password check:** whatever UIA reports as focused now must be known not to be a password field; if there is no focused element or `IsPassword` cannot be read, the result is `Blocked("cannot verify field is not a password")`. The focused element's RuntimeId is re-checked before every chunk.
+- **Typing:** `SendInput` with `KEYEVENTF_UNICODE` per UTF-16 unit, sent in batches. Tabs are typed as spaces (§4.3). Held modifier keys are waited out before input; if `SendInput` inserts only part of a modifier sequence, the modifiers are released again. Shift+Enter is VK_SHIFT+VK_RETURN, and auto-submit is VK_RETURN. Abort with `Failed("focus changed")` if the foreground window changes mid-typing.
 - **Paste (> 200 characters):**
   1. Snapshot the clipboard: every format whose data is an HGLOBAL. If the clipboard holds formats that can't be snapshotted (GDI handles such as `CF_BITMAP`, or delayed rendering), **type instead of paste**, so we never lose the user's clipboard.
   2. Set `CF_UNICODETEXT` and press Ctrl+V.
-  3. Restore ~250 ms after the last paste, only if `GetClipboardSequenceNumber` still equals the value right after our set.
+  3. Restore no earlier than 400 ms after the last paste, only if `GetClipboardSequenceNumber` still equals the value right after our set (read while the clipboard is still open). The restore adds the history/cloud exclusion markers. Private formats 0x200–0x2FF and clipboards owned by processes that render lazily (Excel, Office, Remote Desktop) count as not restorable: type instead. The clipboard-owner window lives on its own thread with a message loop.
 - **Sounds:** `PlaySoundW` with the system aliases `SystemAsterisk` (selected), `SystemHand` (empty/error) and `SystemExclamation` (Off), using `SND_ALIAS | SND_ASYNC`.
 - **Runtime identity and re-match:**
   - At runtime, a binding is valid while `IsWindow(hwnd)` holds and the pid is unchanged.

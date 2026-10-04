@@ -324,20 +324,22 @@ fn unbind_slot(m: State<'_, DeliveryManager>, slot: u8) -> Result<(), String> {
     m.unbind(slot)
 }
 
-/// Change a slot's auto-submit and/or newline mode (`shift_enter`/`spaces`).
+/// Change a slot's auto-submit, newline mode (`shift_enter`/`spaces`) and/or
+/// whether it follows window title changes.
 #[tauri::command]
 fn set_slot_settings(
     m: State<'_, DeliveryManager>,
     slot: u8,
     auto_submit: Option<bool>,
     newline_mode: Option<String>,
+    follow_title_changes: Option<bool>,
 ) -> Result<(), String> {
     if let Some(n) = &newline_mode {
         if n != "shift_enter" && n != "spaces" {
             return Err("newline mode must be shift_enter or spaces".into());
         }
     }
-    m.set_settings(slot, auto_submit, newline_mode)
+    m.set_settings(slot, auto_submit, newline_mode, follow_title_changes)
 }
 
 /// Deliver the entry's current text to the active slot.

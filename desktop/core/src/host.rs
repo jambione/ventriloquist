@@ -103,20 +103,18 @@ fn io_overflow(job: IoJob) -> Vec<IoResult> {
     let busy = "the disk is not keeping up".to_owned();
     let one = match job {
         IoJob::Log(j) => {
-            let mut v = Vec::new();
-            // The log index cannot be consulted, but the final was
-            // accepted: announce it once rather than lose it.
-            if let Some(entry) = j.announce {
-                v.push(IoResult::Event(HostEvent::FinalAccepted { entry }));
-            }
-            v.push(IoResult::Event(HostEvent::LogWarning {
+            // The log index cannot be consulted, so the dedupe check
+            // (a re-delivery after a restart) cannot run: do NOT announce
+            // `FinalAccepted` (it would be delivered into a bound app a second
+            // time). Drop the announce and warn instead.
+            let announce_note = if j.announce.is_some() { " (final not announced)" } else { "" };
+            return vec![IoResult::Event(HostEvent::LogWarning {
                 message: format!(
-                    "log entry id={} rev={} dropped: {busy}",
+                    "log entry id={} rev={} dropped: {busy}{announce_note}",
                     &j.utt.id.simple().to_string()[..8],
                     j.utt.rev
                 ),
-            }));
-            return v;
+            })];
         }
         IoJob::SetLogDir(dir) => IoResult::Event(HostEvent::LogWarning {
             message: format!("cannot switch the log folder to {}: {busy}", dir.display()),
@@ -226,4 +224,46 @@ async fn run(
         }
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::io_worker::LogJob;
+    use crate::transcript::{Entry, EntryState};
+    use uuid::Uuid;
+    use vq_protocol::{Utt, UttState};
+
+    /// R11: when the I/O queue is full the dedupe check cannot run, so the
+    /// overflow path must not emit `FinalAccepted` (only a warning).
+    #[test]
+    fn io_overflow_never_announces_final_accepted() {
+        let id = Uuid::new_v4();
+        let entry = Entry {
+            id,
+            rev: 1,
+            state: EntryState::Final,
+            text: "hello".into(),
+            ts: 0,
+            device_id: Uuid::nil(),
+            device_name: "Phone".into(),
+            first_received_at: String::new(),
+            received_at: String::new(),
+            time: String::new(),
+            partial: false,
+            edited: false,
+        };
+        let job = IoJob::Log(LogJob {
+            utt: Utt { id, rev: 1, state: UttState::Final, text: "hello".into(), ts: 0 },
+            device_name: "Phone".into(),
+            arrived: chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00+00:00").unwrap(),
+            announce: Some(entry),
+        });
+        let out = io_overflow(job);
+        assert!(
+            !out.iter().any(|r| matches!(r, IoResult::Event(HostEvent::FinalAccepted { .. }))),
+            "{out:?}"
+        );
+        assert!(out.iter().any(|r| matches!(r, IoResult::Event(HostEvent::LogWarning { .. }))));
+    }
 }

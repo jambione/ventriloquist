@@ -78,9 +78,19 @@ pub fn scan_retry_due(powered_on: bool, scanning: bool, since_last_attempt: Dura
 /// re-acquired this often, so a later grant is noticed.
 pub const ADAPTER_REACQUIRE_AFTER: Duration = Duration::from_secs(5);
 
-/// Whether to drop the adapter and acquire it again (via a new manager).
-pub fn adapter_reacquire_due(state_unknown: bool, scanning: bool, since: Duration) -> bool {
-    state_unknown && !scanning && since >= ADAPTER_REACQUIRE_AFTER
+/// Whether to drop the adapter and acquire a new one. Only when there is no
+/// live adapter in use: on macOS every `Manager::adapters()` call creates a
+/// new CoreBluetooth central, and dropping the old one while a connection
+/// still uses it makes btleplug log "Event receiver died" / "Shouldn't get
+/// anything but Ok!" and fail every later call on that peripheral with
+/// "Device not found" (docs/SPEC_QUESTIONS.md v2 N3, R16).
+pub fn adapter_reacquire_due(
+    state_unknown: bool,
+    scanning: bool,
+    since: Duration,
+    live_connections: usize,
+) -> bool {
+    state_unknown && !scanning && live_connections == 0 && since >= ADAPTER_REACQUIRE_AFTER
 }
 
 #[cfg(test)]
@@ -142,9 +152,19 @@ mod tests {
     #[test]
     fn adapter_reacquire() {
         let s = Duration::from_secs;
-        assert!(adapter_reacquire_due(true, false, s(5)));
-        assert!(!adapter_reacquire_due(true, false, s(4)));
-        assert!(!adapter_reacquire_due(true, true, s(60)));
-        assert!(!adapter_reacquire_due(false, false, s(60)));
+        assert!(adapter_reacquire_due(true, false, s(5), 0));
+        assert!(!adapter_reacquire_due(true, false, s(4), 0));
+        assert!(!adapter_reacquire_due(true, true, s(60), 0));
+        assert!(!adapter_reacquire_due(false, false, s(60), 0));
+    }
+
+    /// R16: the adapter a connection uses is never replaced under it.
+    #[test]
+    fn adapter_is_never_reacquired_while_a_connection_is_live() {
+        let s = Duration::from_secs;
+        for live in 1..4 {
+            assert!(!adapter_reacquire_due(true, false, s(600), live), "live={live}");
+        }
+        assert!(adapter_reacquire_due(true, false, s(600), 0));
     }
 }

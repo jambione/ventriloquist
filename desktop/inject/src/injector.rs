@@ -3,7 +3,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use crate::model::{BindingTarget, DeliveryResult, SlotId, Sound, WindowInfo};
+use crate::model::{BindingTarget, DeliveryResult, SlotId, Sound, WindowDetail, WindowIdentity, WindowInfo};
 use crate::planner::{Plan, TargetCaps};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -42,6 +42,8 @@ impl std::fmt::Debug for LiveHandle {
 #[derive(Debug, Clone)]
 pub struct CapturedBinding {
     pub target: BindingTarget,
+    /// Window class / AppUserModelID (empty where unknown).
+    pub identity: WindowIdentity,
     pub pid: i32,
     pub live: Option<LiveHandle>,
 }
@@ -50,9 +52,13 @@ pub struct CapturedBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedTarget {
     pub slot: SlotId,
-    /// The target as it is now (the window title may have changed after a
+    /// The target as it was bound (the window title is updated after a
     /// single-window re-match; persist it when `title_changed`).
     pub target: BindingTarget,
+    pub identity: WindowIdentity,
+    /// The window's title right now (R5: compared with the bound title for
+    /// slots that do not follow title changes).
+    pub live_title: String,
     pub pid: i32,
     /// The live reference was invalid and the window was found by re-match.
     pub rematched: bool,
@@ -73,7 +79,7 @@ pub trait Injector: Send + Sync {
     fn assign(&self, slot: SlotId, captured: CapturedBinding);
     /// Register a slot restored from `bindings.json` (no live references;
     /// the first `resolve` re-matches).
-    fn assign_saved(&self, slot: SlotId, target: &BindingTarget);
+    fn assign_saved(&self, slot: SlotId, target: &BindingTarget, identity: &WindowIdentity);
     fn release(&self, slot: SlotId);
     /// Use the live window if still valid, else re-match (§4.6). Never falls
     /// back to another window: `Err(Missing)` when nothing matches.
@@ -84,6 +90,11 @@ pub trait Injector: Send + Sync {
     fn is_trusted(&self, prompt: bool) -> bool;
     fn secure_input_enabled(&self) -> bool;
     fn running_windows(&self, app_id: &str) -> Vec<WindowInfo>;
+    /// Windows of `app_id` with class/AUMID and virtual-desktop info for the
+    /// re-match (R6, R7). Default: [`Injector::running_windows`] without extras.
+    fn window_details(&self, app_id: &str) -> Vec<WindowDetail> {
+        self.running_windows(app_id).into_iter().map(WindowDetail::from).collect()
+    }
     fn play_sound(&self, sound: Sound);
 }
 
@@ -96,7 +107,7 @@ impl Injector for UnsupportedInjector {
         Err(InjectError::Unsupported)
     }
     fn assign(&self, _slot: SlotId, _captured: CapturedBinding) {}
-    fn assign_saved(&self, _slot: SlotId, _target: &BindingTarget) {}
+    fn assign_saved(&self, _slot: SlotId, _target: &BindingTarget, _identity: &WindowIdentity) {}
     fn release(&self, _slot: SlotId) {}
     fn resolve(&self, _slot: SlotId) -> Result<ResolvedTarget> {
         Err(InjectError::Unsupported)
@@ -159,6 +170,8 @@ mod tests {
                 element_subrole: "".into(),
                 ax_insertable: false,
             },
+            identity: WindowIdentity::default(),
+            live_title: String::new(),
             pid: 1,
             rematched: false,
             title_changed: false,

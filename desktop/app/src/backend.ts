@@ -48,12 +48,13 @@ export const backend = {
   unbindSlot: (slot: number): Promise<void> => invoke("unbind_slot", { slot }),
   setSlotSettings: (
     slot: number,
-    settings: { autoSubmit?: boolean; newlineMode?: NewlineMode },
+    settings: { autoSubmit?: boolean; newlineMode?: NewlineMode; followTitleChanges?: boolean },
   ): Promise<void> =>
     invoke("set_slot_settings", {
       slot,
       autoSubmit: settings.autoSubmit ?? null,
       newlineMode: settings.newlineMode ?? null,
+      followTitleChanges: settings.followTitleChanges ?? null,
     }),
   sendToActive: (entryId: string): Promise<void> => invoke("send_to_active", { entryId }),
   setHotkeyModifiers: (kind: "select" | "bind", modifiers: Modifier[]): Promise<HotkeyView> =>

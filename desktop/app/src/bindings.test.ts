@@ -24,6 +24,7 @@ function slot(n: number, over: object = {}) {
     status: "live" as const,
     auto_submit: false,
     newline_mode: null,
+    follow_title_changes: false,
     ...over,
   };
 }
@@ -74,6 +75,17 @@ describe("slot bar reducer", () => {
     const s = run(initialState(), { type: "delivery", event: ev }, { type: "delivery", event: { ...ev, entry_id: "b" } });
     expect(s.notices).toHaveLength(1);
     expect(s.notices[0]!.text).toBe("Slot 2 (⁨Teams⁩) not found — not sent");
+  });
+
+  it("a blocked or failed delivery raises a notice that says why", () => {
+    const b = delivery("a", { status: "blocked", reason: "window changed: was 'x', now 'y'" });
+    const f = delivery("b", { status: "failed", reason: "interrupted by user input" });
+    const s = run(initialState(), { type: "delivery", event: b }, { type: "delivery", event: f });
+    expect(s.notices).toHaveLength(2);
+    expect(s.notices[0]!.text).toContain("blocked");
+    expect(s.notices[0]!.text).toContain("window changed");
+    expect(s.notices[1]!.text).toContain("not sent");
+    expect(s.notices[1]!.text).toContain("interrupted by user input");
   });
 
   it("binding notices: accessibility flips the status, details are isolated", () => {

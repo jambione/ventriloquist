@@ -130,6 +130,8 @@ export interface SlotView {
   auto_submit: boolean;
   /** null while the backend has no such setting. */
   newline_mode: NewlineMode | null;
+  /** Keep delivering after the window's title changes (default only for terminals). */
+  follow_title_changes: boolean;
 }
 
 export type Modifier = "ctrl" | "alt" | "shift" | "super";

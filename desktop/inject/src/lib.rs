@@ -6,9 +6,11 @@
 //! - All `unsafe` lives in `mac/sys.rs` and `windows/sys.rs`.
 #![deny(unsafe_code)]
 
+pub mod exec;
 pub mod injector;
 pub mod model;
 pub mod planner;
+pub mod policy;
 pub mod store;
 
 #[cfg(target_os = "macos")]
@@ -21,8 +23,8 @@ pub use injector::{
     UnsupportedInjector,
 };
 pub use model::{
-    ActiveSlot, BindingTarget, DeliveryMethod, DeliveryResult, NewlineMode, SlotId, SlotSettings, Sound,
-    WindowInfo,
+    default_follow_title, ActiveSlot, BindingTarget, DeliveryMethod, DeliveryResult, NewlineMode, SlotId,
+    SlotSettings, Sound, WindowDetail, WindowIdentity, WindowInfo,
 };
 pub use planner::{plan_delivery, secure_refusal, Action, AppCategory, Plan, TargetCaps};
-pub use store::{rematch, BindingsStore, RematchOutcome, SelectOutcome, SlotRecord};
+pub use store::{rematch, rematch_detail, single_window_fallback_allowed, BindingsStore, RematchOutcome, SelectOutcome, SlotRecord};

@@ -234,6 +234,12 @@ function onDelivery(state: AppState, ev: DeliveryEvent): AppState {
     const slot = ev.slot === null ? "" : `Slot ${ev.slot} `;
     const app = ev.app_name === null ? "" : `(${isolate(clip(ev.app_name, MAX_LABEL_CHARS))}) `;
     next = addBindingNotice(next, `${slot}${app}not found — not sent`);
+  } else if (ev.status === "blocked" || ev.status === "failed") {
+    // Every refusal says why (the backend logs it too).
+    const slot = ev.slot === null ? "" : `Slot ${ev.slot} `;
+    const app = ev.app_name === null ? "" : `(${isolate(clip(ev.app_name, MAX_LABEL_CHARS))}) `;
+    const why = ev.reason === null ? "" : `: ${isolate(clip(ev.reason, MAX_NOTICE_TEXT))}`;
+    next = addBindingNotice(next, `${slot}${app}${ev.status === "blocked" ? "blocked" : "not sent"}${why}`);
   }
   return next;
 }

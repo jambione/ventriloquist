@@ -79,11 +79,14 @@ impl ActiveSlot {
 
 /// What a slot is bound to (§4.1 step 3). The live AX references are not part
 /// of this: the injector keeps them for the session.
+///
+/// Deserialising accepts the legacy `bundle_id` key; when both `app_id` and
+/// `bundle_id` are present `app_id` wins (no duplicate-field error).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawBindingTarget")]
 pub struct BindingTarget {
     /// App identity: the bundle id on macOS, the process executable name
     /// (e.g. `ms-teams.exe`) on Windows. Old files used `bundle_id`.
-    #[serde(alias = "bundle_id")]
     pub app_id: String,
     pub app_name: String,
     pub window_title: String,
@@ -91,6 +94,44 @@ pub struct BindingTarget {
     #[serde(default)]
     pub element_subrole: String,
     pub ax_insertable: bool,
+}
+
+#[derive(Deserialize)]
+struct RawBindingTarget {
+    app_id: Option<String>,
+    bundle_id: Option<String>,
+    app_name: String,
+    window_title: String,
+    element_role: String,
+    #[serde(default)]
+    element_subrole: String,
+    ax_insertable: bool,
+}
+
+impl TryFrom<RawBindingTarget> for BindingTarget {
+    type Error = String;
+    fn try_from(r: RawBindingTarget) -> Result<Self, String> {
+        let app_id = r.app_id.or(r.bundle_id).ok_or("missing field `app_id`")?;
+        Ok(BindingTarget {
+            app_id,
+            app_name: r.app_name,
+            window_title: r.window_title,
+            element_role: r.element_role,
+            element_subrole: r.element_subrole,
+            ax_insertable: r.ax_insertable,
+        })
+    }
+}
+
+/// Extra window identity used by the re-match fallback (SPEC_V2 §4.6, R7):
+/// the window class and, when the app is packaged, its AppUserModelID. Empty
+/// strings mean "unknown" (macOS, old files).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct WindowIdentity {
+    #[serde(default)]
+    pub class: String,
+    #[serde(default)]
+    pub aumid: String,
 }
 
 /// How line breaks are delivered (SPEC_V2 §2, §4.5).
@@ -120,12 +161,24 @@ impl SlotSettings {
     /// Defaults for a freshly bound app: terminals get `Spaces` (Shift+Enter
     /// can arrive as Enter and submit), everything else `ShiftEnter`.
     pub fn for_app(app_id: &str) -> Self {
-        let newline_mode = match crate::planner::AppCategory::from_app_id(app_id) {
+        Self::for_app_class(app_id, "")
+    }
+
+    /// Like [`SlotSettings::for_app`], also using the window class (a console
+    /// window of an unknown exe is still a terminal).
+    pub fn for_app_class(app_id: &str, window_class: &str) -> Self {
+        let newline_mode = match crate::planner::category_for(app_id, window_class) {
             crate::planner::AppCategory::Terminal => NewlineMode::Spaces,
             _ => NewlineMode::ShiftEnter,
         };
         SlotSettings { auto_submit: false, newline_mode }
     }
+}
+
+/// Default of a slot's `follow_title_changes` (SPEC_V2 §4.5): true for
+/// terminals (whose titles change with every command), false otherwise.
+pub fn default_follow_title(app_id: &str, window_class: &str) -> bool {
+    crate::planner::category_for(app_id, window_class) == crate::planner::AppCategory::Terminal
 }
 
 /// How a delivery reached the target.
@@ -205,4 +258,20 @@ pub struct WindowInfo {
     pub standard: bool,
     /// Opaque, injector-assigned handle (e.g. the index in the AX window list).
     pub id: u64,
+}
+
+/// A window plus what the re-match fallback needs beyond [`WindowInfo`] (R6, R7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowDetail {
+    pub info: WindowInfo,
+    pub identity: WindowIdentity,
+    /// The window is on another virtual desktop (Windows): it counts for
+    /// ambiguity and uniqueness but is never picked by the fallback.
+    pub other_desktop: bool,
+}
+
+impl From<WindowInfo> for WindowDetail {
+    fn from(info: WindowInfo) -> Self {
+        WindowDetail { info, identity: WindowIdentity::default(), other_desktop: false }
+    }
 }

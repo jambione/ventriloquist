@@ -445,7 +445,7 @@ function renderSlotBar(): void {
     for (const c of slotChips(state.slots)) {
       const wrap = document.createElement("span");
       wrap.className = "chip";
-      if (!c.bound) wrap.classList.add("empty");
+      if (!c.bound) wrap.classList.add("vacant"); // not "empty": that class is the list placeholder (20vh margin)
       if (c.unbound) wrap.classList.add("unbound");
       if (c.active) wrap.classList.add("active");
       const b = document.createElement("button");
@@ -537,6 +537,20 @@ function renderMenu(): void {
     lab.append(document.createTextNode("Newline mode "), sel);
     items.push(lab);
   }
+  const follow = document.createElement("label");
+  follow.title =
+    "Off: text is only sent while the window's title is exactly what it was when you bound the slot " +
+    "(so a chat or tab switch in the same window is never typed into). Rebinding updates the title.";
+  const fcb = document.createElement("input");
+  fcb.type = "checkbox";
+  fcb.checked = s.follow_title_changes;
+  fcb.addEventListener("change", () => {
+    backend
+      .setSlotSettings(n, { followTitleChanges: fcb.checked })
+      .catch((e: unknown) => report("Could not change the setting", e));
+  });
+  follow.append(fcb, document.createTextNode("Follow window when its title changes"));
+  items.push(follow);
   const unbind = document.createElement("button");
   unbind.type = "button";
   unbind.className = "danger";

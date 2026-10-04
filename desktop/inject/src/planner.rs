@@ -3,15 +3,19 @@
 
 use crate::model::{DeliveryMethod, NewlineMode, SlotSettings};
 
-/// Text of at most this many characters (Unicode scalar values, after
-/// sanitising, line breaks included) is typed; longer text is pasted.
+/// Single-line text of at most this many characters (Unicode scalar values,
+/// after sanitising) is typed; longer text is pasted.
 pub const MAX_TYPED_CHARS: usize = 200;
+/// Multi-line text up to this many characters is typed too: pasting line by
+/// line races the target (SPEC_V2 §4.3, R10).
+pub const MAX_TYPED_CHARS_MULTILINE: usize = 1000;
 /// Maximum UTF-16 code units per typed keyboard event.
 pub const TYPE_CHUNK_UTF16: usize = 20;
 /// How long to wait for the target to become frontmost.
 pub const FRONTMOST_TIMEOUT_MS: u64 = 500;
-/// Delay before the clipboard snapshot is restored after the last paste.
-pub const CLIPBOARD_RESTORE_DELAY_MS: u64 = 250;
+/// The clipboard snapshot is restored no earlier than this long after the
+/// last paste key (the target reads the clipboard asynchronously, R10).
+pub const CLIPBOARD_RESTORE_DELAY_MS: u64 = 400;
 
 /// Bundle ids (compared case-insensitively) of apps where Accessibility text
 /// insertion is unreliable or silently ignored, so the keystroke path is used
@@ -51,6 +55,11 @@ pub const KEYSTROKE_PREFERRED_BUNDLE_IDS: &[(&str, AppCategory)] = &[
     ("com.tinyspeck.slackmacgap", AppCategory::Electron),
     ("com.hnc.Discord", AppCategory::Electron),
     ("com.anthropic.claudefordesktop", AppCategory::Electron),
+    ("com.exafunction.windsurf", AppCategory::Electron),
+    ("com.postmanlabs.mac", AppCategory::Electron),
+    ("com.linear", AppCategory::Electron),
+    ("com.electron.dockerdesktop", AppCategory::Electron),
+    ("com.termius.mac", AppCategory::Electron),
     ("com.openai.chat", AppCategory::Electron),
     ("notion.id", AppCategory::Electron),
     ("md.obsidian", AppCategory::Electron),
@@ -72,7 +81,29 @@ pub const KEYSTROKE_PREFERRED_BUNDLE_IDS: &[(&str, AppCategory)] = &[
     ("Cursor.exe", AppCategory::Electron),
     ("slack.exe", AppCategory::Electron),
     ("Discord.exe", AppCategory::Electron),
+    ("Claude.exe", AppCategory::Electron),
+    ("ChatGPT.exe", AppCategory::Electron),
+    ("Windsurf.exe", AppCategory::Electron),
+    ("Notion.exe", AppCategory::Electron),
+    ("Obsidian.exe", AppCategory::Electron),
+    ("Signal.exe", AppCategory::Electron),
+    ("Figma.exe", AppCategory::Electron),
+    ("WhatsApp.exe", AppCategory::Electron),
+    ("Postman.exe", AppCategory::Electron),
+    ("Linear.exe", AppCategory::Electron),
+    ("GitHubDesktop.exe", AppCategory::Electron),
+    ("Termius.exe", AppCategory::Electron),
     ("WindowsTerminal.exe", AppCategory::Terminal),
+    ("mintty.exe", AppCategory::Terminal),
+    ("Hyper.exe", AppCategory::Terminal),
+    ("Tabby.exe", AppCategory::Terminal),
+    ("warp.exe", AppCategory::Terminal),
+    ("ConEmu.exe", AppCategory::Terminal),
+    ("ConEmu64.exe", AppCategory::Terminal),
+    ("putty.exe", AppCategory::Terminal),
+    ("bash.exe", AppCategory::Terminal),
+    ("wsl.exe", AppCategory::Terminal),
+    ("kitty.exe", AppCategory::Terminal),
     ("wt.exe", AppCategory::Terminal),
     ("OpenConsole.exe", AppCategory::Terminal),
     ("conhost.exe", AppCategory::Terminal),
@@ -113,22 +144,47 @@ pub enum AppCategory {
 
 impl AppCategory {
     pub fn from_app_id(app_id: &str) -> AppCategory {
-        let b = app_id.to_ascii_lowercase();
+        let b = app_id.to_lowercase();
         for (id, cat) in KEYSTROKE_PREFERRED_BUNDLE_IDS {
-            if id.to_ascii_lowercase() == b {
+            if id.to_lowercase() == b {
                 return *cat;
             }
         }
         for (p, cat) in KEYSTROKE_PREFERRED_PREFIXES {
-            if b.starts_with(&p.to_ascii_lowercase()) {
+            if b.starts_with(&p.to_lowercase()) {
                 return *cat;
             }
         }
         AppCategory::Native
     }
 
+    /// Category implied by a Windows window class (a console window of an
+    /// exe we do not list, e.g. `python.exe` or `node.exe` in conhost).
+    pub fn from_window_class(class: &str) -> Option<AppCategory> {
+        const TERMINAL_CLASSES: &[&str] = &[
+            "ConsoleWindowClass",
+            "CASCADIA_HOSTING_WINDOW_CLASS",
+            "PseudoConsoleWindow",
+            "mintty",
+            "VirtualConsoleClass",
+            "PuTTY",
+        ];
+        TERMINAL_CLASSES
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(class))
+            .then_some(AppCategory::Terminal)
+    }
+
     pub fn keystroke_preferred(self) -> bool {
         self != AppCategory::Native
+    }
+}
+
+/// Category of an app: by id first, then (when the id is unknown) by window class.
+pub fn category_for(app_id: &str, window_class: &str) -> AppCategory {
+    match AppCategory::from_app_id(app_id) {
+        AppCategory::Native => AppCategory::from_window_class(window_class).unwrap_or(AppCategory::Native),
+        c => c,
     }
 }
 
@@ -225,9 +281,9 @@ impl Plan {
     }
 }
 
-/// Drop control characters other than `\n`/`\t`; treat `\r\n` as one `\n`
-/// (a lone `\r` is a control character and is dropped). Returns the text and
-/// the number of dropped characters.
+/// Normalise and clean text: `\r\n`, a lone `\r`, U+2028, U+2029 and U+0085
+/// all become one `\n`; other control characters except `\t` are dropped.
+/// Returns the text and the number of dropped characters.
 pub fn sanitize(text: &str) -> (String, usize) {
     let mut out = String::with_capacity(text.len());
     let mut dropped = 0;
@@ -235,12 +291,19 @@ pub fn sanitize(text: &str) -> (String, usize) {
     while let Some(c) = it.next() {
         match c {
             '\r' if it.peek() == Some(&'\n') => {} // part of CRLF, the \n follows
+            '\r' | '\u{2028}' | '\u{2029}' | '\u{85}' => out.push('\n'),
             '\n' | '\t' => out.push(c),
             c if c.is_control() => dropped += 1,
             c => out.push(c),
         }
     }
     (out, dropped)
+}
+
+/// Bidirectional controls that can make a command line display differently
+/// from what runs; stripped for terminals.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
 }
 
 /// Split into chunks of at most `TYPE_CHUNK_UTF16` UTF-16 units, never
@@ -271,13 +334,17 @@ fn keystroke_plan(clean: &str, auto_submit: bool, can_paste: bool, dropped: usiz
         Action::FocusElement,
     ];
     let method;
-    if !can_paste || clean.chars().count() <= MAX_TYPED_CHARS {
+    let limit = if clean.contains('\n') { MAX_TYPED_CHARS_MULTILINE } else { MAX_TYPED_CHARS };
+    if !can_paste || clean.chars().count() <= limit {
         method = DeliveryMethod::Type;
         for (i, line) in clean.split('\n').enumerate() {
             if i > 0 {
                 actions.push(Action::ShiftReturn);
             }
-            actions.extend(chunks(line).into_iter().map(Action::TypeUnicode));
+            // A typed Tab would move keyboard focus (or complete in a shell):
+            // type a space instead. Pasted text keeps its tabs (R2).
+            let line = line.replace('\t', " ");
+            actions.extend(chunks(&line).into_iter().map(Action::TypeUnicode));
         }
     } else {
         method = DeliveryMethod::Paste;
@@ -324,10 +391,16 @@ fn keystroke_plan(clean: &str, auto_submit: bool, can_paste: bool, dropped: usiz
 ///   always typed when `caps.clipboard_restorable` is false.
 /// - `NewlineMode::Spaces` turns each line break into a space first.
 pub fn plan_delivery(caps: &TargetCaps, text: &str, settings: &SlotSettings) -> Plan {
-    let (mut clean, dropped) = sanitize(text);
+    let (mut clean, mut dropped) = sanitize(text);
+    if caps.category == AppCategory::Terminal {
+        let before = clean.chars().count();
+        clean.retain(|c| !is_bidi_control(c));
+        dropped += before - clean.chars().count();
+    }
     if settings.newline_mode == NewlineMode::Spaces {
-        // Flatten: every line break (already normalised to `\n`) becomes one space.
-        clean = clean.replace('\n', " ");
+        // Flatten: every line break (already normalised to `\n`) and every
+        // tab becomes one space.
+        clean = clean.replace(['\n', '\t'], " ");
     }
     let mut plan = if let Some(reason) = secure_refusal(caps) {
         Plan {
@@ -604,25 +677,58 @@ mod tests {
     }
 
     #[test]
-    fn lone_cr_is_dropped_and_counted() {
+    fn lone_cr_and_unicode_separators_are_line_breaks() {
         let p = plan_delivery(&native(false), "a\rb", &off());
-        assert_eq!(typed(&p.actions), "ab");
-        assert_eq!(p.dropped_controls, 1);
+        assert_eq!(typed(&p.actions), "a\nb");
+        assert_eq!(p.dropped_controls, 0);
+        let (c, d) = sanitize("a\u{2028}b\u{2029}c\u{85}d");
+        assert_eq!((c.as_str(), d), ("a\nb\nc\nd", 0));
+    }
+
+    #[test]
+    fn typed_tabs_become_spaces_pasted_tabs_stay() {
+        let p = plan_delivery(&native(false), "a\tb", &off());
+        assert_eq!(typed(&p.actions), "a b");
+        let long = format!("{}\tz", "x".repeat(300));
+        let p = plan_delivery(&native(false), &long, &off());
+        assert_eq!(p.method, DeliveryMethod::Paste);
+        assert!(p.actions.iter().any(|a| matches!(a, Action::SetClipboard(t) if t.contains('\t'))));
+    }
+
+    #[test]
+    fn terminals_lose_bidi_controls() {
+        let p = plan_delivery(&cat(AppCategory::Terminal, false), "ls \u{202E}gpj.txt\u{2066}", &off());
+        assert_eq!(typed(&p.actions), "ls gpj.txt");
+        assert_eq!(p.dropped_controls, 2);
+        let p = plan_delivery(&native(false), "a\u{202E}b", &off());
+        assert_eq!(typed(&p.actions), "a\u{202E}b");
+    }
+
+    #[test]
+    fn window_class_identifies_consoles() {
+        assert_eq!(category_for("python.exe", "ConsoleWindowClass"), AppCategory::Terminal);
+        assert_eq!(category_for("python.exe", "TkTopLevel"), AppCategory::Native);
+        assert_eq!(category_for("Code.exe", "ConsoleWindowClass"), AppCategory::Electron);
+        for id in ["Claude.exe", "com.anthropic.claudefordesktop"] {
+            assert_eq!(AppCategory::from_app_id(id), AppCategory::Electron);
+        }
     }
 
     #[test]
     fn control_characters_dropped_except_newline_and_tab() {
+        // U+0085 (NEL) is a line break now, not a dropped control.
         let text = "a\u{0}b\u{7}c\u{1b}d\u{7f}e\u{85}f\tg\nh";
         let (clean, dropped) = sanitize(text);
-        assert_eq!(clean, "abcdef\tg\nh");
-        assert_eq!(dropped, 5);
+        assert_eq!(clean, "abcde\nf\tg\nh");
+        assert_eq!(dropped, 4);
+        // Typed: the tab becomes a space (R2).
         let p = plan_delivery(&native(false), text, &off());
-        assert_eq!(typed(&p.actions), "abcdef\tg\nh");
-        assert_eq!(p.dropped_controls, 5);
-        // AX path too
+        assert_eq!(typed(&p.actions), "abcde\nf g\nh");
+        assert_eq!(p.dropped_controls, 4);
+        // AX path keeps it.
         let p = plan_delivery(&native(true), text, &off());
-        assert_eq!(p.actions, vec![Action::AxInsertSelectedText("abcdef\tg\nh".into())]);
-        assert_eq!(p.dropped_controls, 5);
+        assert_eq!(p.actions, vec![Action::AxInsertSelectedText("abcde\nf\tg\nh".into())]);
+        assert_eq!(p.dropped_controls, 4);
     }
 
     #[test]
@@ -635,7 +741,7 @@ mod tests {
 
     #[test]
     fn empty_or_all_control_text_is_noop_even_with_auto_submit() {
-        for t in ["", "\u{0}\u{1}", "\r"] {
+        for t in ["", "\u{0}\u{1}"] {
             for caps in [native(true), native(false)] {
                 let p = plan_delivery(&caps, t, &on());
                 assert!(p.is_noop(), "{t:?}");
@@ -670,7 +776,15 @@ mod tests {
         let t = format!("{}\nb", "a".repeat(198));
         assert_eq!(t.chars().count(), 200);
         assert_eq!(plan_delivery(&native(false), &t, &off()).method, DeliveryMethod::Type);
+        // Multi-line text is typed up to 1,000 chars (R10), pasted beyond.
         let t = format!("{}\nbc", "a".repeat(198));
+        assert_eq!(plan_delivery(&native(false), &t, &off()).method, DeliveryMethod::Type);
+        let t = format!("{}\n{}", "a".repeat(499), "b".repeat(500));
+        assert_eq!(t.chars().count(), 1000);
+        assert_eq!(plan_delivery(&native(false), &t, &off()).method, DeliveryMethod::Type);
+        let t = format!("{}\n{}", "a".repeat(499), "b".repeat(501));
+        assert_eq!(plan_delivery(&native(false), &t, &off()).method, DeliveryMethod::Paste);
+        let t = "a".repeat(201);
         assert_eq!(plan_delivery(&native(false), &t, &off()).method, DeliveryMethod::Paste);
         // CRLF counts once, dropped controls don't count.
         let t = format!("{}\r\nb{}", "a".repeat(198), "\u{0}".repeat(50));
@@ -679,7 +793,7 @@ mod tests {
 
     #[test]
     fn paste_plan_structure() {
-        let long = "x".repeat(250);
+        let long = "x".repeat(1001);
         let text = format!("{long}\nsecond line\n\nlast");
         let p = plan_delivery(&native(false), &text, &off());
         assert_eq!(p.method, DeliveryMethod::Paste);
@@ -698,7 +812,7 @@ mod tests {
                     Action::ShiftReturn,
                     Action::SetClipboard("last".into()),
                     Action::CmdV,
-                    Action::RestoreClipboardIfUnchanged { delay_ms: 250 },
+                    Action::RestoreClipboardIfUnchanged { delay_ms: 400 },
                     Action::ReactivatePrevious,
                 ]
             ]
@@ -710,7 +824,7 @@ mod tests {
     fn paste_plan_restores_before_return() {
         let p = plan_delivery(&native(false), &"x".repeat(300), &on());
         let n = p.actions.len();
-        assert_eq!(p.actions[n - 3], Action::RestoreClipboardIfUnchanged { delay_ms: 250 });
+        assert_eq!(p.actions[n - 3], Action::RestoreClipboardIfUnchanged { delay_ms: 400 });
         assert_eq!(p.actions[n - 2], Action::Return);
         assert_eq!(p.actions[n - 1], Action::ReactivatePrevious);
         assert_eq!(p.actions.iter().filter(|a| **a == Action::SnapshotClipboard).count(), 1);
@@ -718,11 +832,11 @@ mod tests {
 
     #[test]
     fn paste_of_only_newlines_touches_no_clipboard() {
-        let p = plan_delivery(&native(false), &"\n".repeat(250), &off());
+        let p = plan_delivery(&native(false), &"\n".repeat(1001), &off());
         assert_eq!(p.method, DeliveryMethod::Paste);
         assert!(!p.actions.contains(&Action::SnapshotClipboard));
         assert!(!p.actions.iter().any(|a| matches!(a, Action::SetClipboard(_) | Action::CmdV | Action::RestoreClipboardIfUnchanged { .. })));
-        assert_eq!(p.actions.iter().filter(|a| **a == Action::ShiftReturn).count(), 250);
+        assert_eq!(p.actions.iter().filter(|a| **a == Action::ShiftReturn).count(), 1001);
     }
 
     #[test]

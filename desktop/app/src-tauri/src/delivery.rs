@@ -22,8 +22,9 @@ use std::time::Duration;
 use serde::Serialize;
 use vq_host_core::events::HostEvent;
 use vq_host_core::transcript::{Entry, EntryState};
+use vq_inject::policy::title_check;
 use vq_inject::{
-    plan_delivery, rematch, secure_refusal, BindingsStore, DeliveryMethod, DeliveryResult,
+    plan_delivery, rematch_detail, secure_refusal, BindingsStore, DeliveryMethod, DeliveryResult,
     InjectError, Injector, NewlineMode, RematchOutcome, SelectOutcome, SlotId, Sound,
 };
 
@@ -88,6 +89,9 @@ pub struct SlotView {
     pub auto_submit: bool,
     /// `shift_enter` / `spaces`.
     pub newline_mode: Option<String>,
+    /// R5: keep delivering after the window's title changes (default only for
+    /// terminals). When false a changed title blocks the delivery.
+    pub follow_title_changes: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -125,7 +129,7 @@ enum Cmd {
     Bind(SlotId),
     Select(u8),
     Unbind(SlotId),
-    SetSettings { slot: SlotId, auto_submit: Option<bool>, newline_mode: Option<String> },
+    SetSettings { slot: SlotId, auto_submit: Option<bool>, newline_mode: Option<String>, follow_title_changes: Option<bool> },
     SetHotkeys(HotkeyView),
     Rematch,
     #[allow(dead_code)]
@@ -340,9 +344,10 @@ impl DeliveryManager {
         n: u8,
         auto_submit: Option<bool>,
         newline_mode: Option<String>,
+        follow_title_changes: Option<bool>,
     ) -> Result<(), String> {
         let slot = SlotId::new(n).ok_or("slot must be 1 to 9")?;
-        let _ = self.tx.send(Cmd::SetSettings { slot, auto_submit, newline_mode });
+        let _ = self.tx.send(Cmd::SetSettings { slot, auto_submit, newline_mode, follow_title_changes });
         Ok(())
     }
 
@@ -442,8 +447,8 @@ impl Worker {
                 Cmd::Bind(slot) => self.bind(slot),
                 Cmd::Select(d) => self.select(d),
                 Cmd::Unbind(slot) => self.unbind(slot),
-                Cmd::SetSettings { slot, auto_submit, newline_mode } => {
-                    self.set_settings(slot, auto_submit, newline_mode)
+                Cmd::SetSettings { slot, auto_submit, newline_mode, follow_title_changes } => {
+                    self.set_settings(slot, auto_submit, newline_mode, follow_title_changes)
                 }
                 Cmd::SetHotkeys(v) => {
                     lock(&self.shared).view.hotkeys = v;
@@ -469,7 +474,7 @@ impl Worker {
         }
         let records: Vec<_> = self.store.records().cloned().collect();
         for r in &records {
-            self.inj.assign_saved(r.slot, &r.target);
+            self.inj.assign_saved(r.slot, &r.target, &r.identity);
         }
         self.rematch_all(false);
         // §4.2: the active slot is restored only if it re-matched.
@@ -491,10 +496,13 @@ impl Worker {
             if only_unbound && self.status.get(&r.slot) != Some(&SlotStatus::Unbound) {
                 continue;
             }
-            let windows = self.inj.running_windows(&r.target.app_id);
-            match rematch(&r.target, &windows) {
+            let windows = self.inj.window_details(&r.target.app_id);
+            match rematch_detail(&r.target, &r.identity, &windows) {
                 RematchOutcome::Matched { window, .. } => {
-                    if window.title != r.target.window_title
+                    // Only a slot that follows title changes adopts the new
+                    // title; others keep it and are blocked at delivery.
+                    if r.follow_title_changes
+                        && window.title != r.target.window_title
                         && self.store.update_title(r.slot, &window.title)
                     {
                         changed_title = true;
@@ -533,6 +541,7 @@ impl Worker {
                 status: self.status.get(&r.slot).copied().unwrap_or(SlotStatus::Unbound),
                 auto_submit: r.settings.auto_submit,
                 newline_mode: newline_mode_of(&r.settings),
+                follow_title_changes: r.follow_title_changes,
             })
             .collect();
         SlotsView { active: self.store.active().digit(), slots, hotkeys, deliveries: Vec::new() }
@@ -559,7 +568,7 @@ impl Worker {
     fn bind(&mut self, slot: SlotId) {
         match self.inj.capture_focused() {
             Ok(c) => {
-                self.store.bind(slot, c.target.clone());
+                self.store.bind_with(slot, c.target.clone(), c.identity.clone());
                 self.inj.assign(slot, c);
                 self.status.insert(slot, SlotStatus::Live);
                 self.save();
@@ -568,6 +577,8 @@ impl Worker {
             }
             Err(e) => {
                 self.inj.play_sound(Sound::Error);
+                // R15: every refusal is logged with its reason and shown.
+                log::warn!("bind slot {slot} refused: {e}");
                 if e == InjectError::NotTrusted {
                     self.inj.is_trusted(true); // the system prompt, first time only
                     self.sink.notice(&Notice {
@@ -612,8 +623,17 @@ impl Worker {
         }
     }
 
-    fn set_settings(&mut self, slot: SlotId, auto_submit: Option<bool>, newline_mode: Option<String>) {
+    fn set_settings(
+        &mut self,
+        slot: SlotId,
+        auto_submit: Option<bool>,
+        newline_mode: Option<String>,
+        follow_title_changes: Option<bool>,
+    ) {
         let mut ok = true;
+        if let Some(on) = follow_title_changes {
+            ok &= self.store.set_follow_title_changes(slot, on);
+        }
         if let Some(on) = auto_submit {
             ok &= self.store.set_auto_submit(slot, on);
         }
@@ -648,7 +668,20 @@ impl Worker {
             method,
             manual,
         };
-        log::debug!("delivery {ev:?}");
+        match ev.status {
+            // R15: a refusal or failure is always logged with its reason.
+            DeliveryStatus::Blocked | DeliveryStatus::Failed | DeliveryStatus::Missing => {
+                log::warn!(
+                    "delivery {:?} for entry {} (slot {:?}, {}): {}",
+                    ev.status,
+                    ev.entry_id,
+                    ev.slot,
+                    ev.app_name.as_deref().unwrap_or("?"),
+                    ev.reason.as_deref().unwrap_or("target not found")
+                );
+            }
+            _ => log::debug!("delivery {ev:?}"),
+        }
         record(&self.shared, &*self.sink, ev);
     }
 
@@ -690,7 +723,20 @@ impl Worker {
                 return;
             }
         };
-        if rt.title_changed && self.store.update_title(slot, &rt.target.window_title) {
+        // R5: a slot that does not follow title changes only receives text
+        // while the live title equals the bound title.
+        if let Err(why) = title_check(rec.follow_title_changes, &rec.target.window_title, &rt.live_title) {
+            fail(self, DeliveryStatus::Blocked, why);
+            return;
+        }
+        let mut dirty = false;
+        if rec.follow_title_changes && rt.title_changed && self.store.update_title(slot, &rt.live_title) {
+            dirty = true;
+        }
+        if self.store.fill_identity(slot, &rt.identity) {
+            dirty = true;
+        }
+        if dirty {
             self.save();
             self.publish();
         }
@@ -750,7 +796,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::atomic::{AtomicU64, Ordering};
     use vq_inject::{
-        Action, BindingTarget, CapturedBinding, Plan, ResolvedTarget, TargetCaps, WindowInfo,
+        Action, BindingTarget, CapturedBinding, Plan, ResolvedTarget, TargetCaps, WindowIdentity, WindowInfo,
     };
 
     // ---- fakes
@@ -766,6 +812,8 @@ mod tests {
         executed: Vec<(u8, String)>,
         sounds: Vec<Sound>,
         windows: Vec<WindowInfo>,
+        /// The windows' live title when it differs from the bound one.
+        live_title: Option<String>,
         entered: Option<Sender<()>>,
         release: Option<Receiver<()>>,
     }
@@ -784,7 +832,7 @@ mod tests {
     }
 
     fn captured(app: &str) -> CapturedBinding {
-        CapturedBinding { target: target(app, "w"), pid: 1, live: None }
+        CapturedBinding { target: target(app, "w"), identity: WindowIdentity::default(), pid: 1, live: None }
     }
 
     fn plan_text(plan: &Plan) -> String {
@@ -808,7 +856,7 @@ mod tests {
         fn assign(&self, slot: SlotId, c: CapturedBinding) {
             lock(&self.0).assigned.insert(slot, c.target);
         }
-        fn assign_saved(&self, slot: SlotId, t: &BindingTarget) {
+        fn assign_saved(&self, slot: SlotId, t: &BindingTarget, _i: &WindowIdentity) {
             lock(&self.0).assigned.insert(slot, t.clone());
         }
         fn release(&self, slot: SlotId) {
@@ -820,7 +868,17 @@ mod tests {
                 return Err(InjectError::Missing);
             }
             let t = f.assigned.get(&slot).cloned().ok_or(InjectError::Missing)?;
-            Ok(ResolvedTarget { slot, target: t, pid: 1, rematched: false, title_changed: false })
+            let live_title = f.live_title.clone().unwrap_or_else(|| t.window_title.clone());
+            let title_changed = live_title != t.window_title;
+            Ok(ResolvedTarget {
+                slot,
+                target: t,
+                identity: WindowIdentity::default(),
+                live_title,
+                pid: 1,
+                rematched: false,
+                title_changed,
+            })
         }
         fn caps(&self, t: &ResolvedTarget) -> vq_inject::Result<TargetCaps> {
             Ok(lock(&self.0)
@@ -904,8 +962,8 @@ mod tests {
         fn assign(&self, slot: SlotId, c: CapturedBinding) {
             self.0.assign(slot, c)
         }
-        fn assign_saved(&self, slot: SlotId, t: &BindingTarget) {
-            self.0.assign_saved(slot, t)
+        fn assign_saved(&self, slot: SlotId, t: &BindingTarget, i: &WindowIdentity) {
+            self.0.assign_saved(slot, t, i)
         }
     }
 
@@ -1171,10 +1229,10 @@ mod tests {
     fn auto_submit_setting_persists_and_reaches_the_plan() {
         let r = rig();
         r.bind(1, "Notes");
-        r.mgr.set_settings(1, Some(true), None).unwrap();
+        r.mgr.set_settings(1, Some(true), None, None).unwrap();
         r.mgr.flush();
         assert!(r.mgr.snapshot().slots[0].auto_submit);
-        r.mgr.set_settings(1, None, Some("spaces".into())).unwrap();
+        r.mgr.set_settings(1, None, Some("spaces".into()), None).unwrap();
         r.mgr.flush();
         assert_eq!(r.mgr.snapshot().slots[0].newline_mode.as_deref(), Some("spaces"));
         let (stored, _) = BindingsStore::load(&r.dir);
@@ -1240,5 +1298,92 @@ mod tests {
         let v = r.mgr.snapshot();
         assert_eq!(v.deliveries.len(), 1);
         assert_eq!(v.deliveries[0].status, DeliveryStatus::Sent);
+    }
+
+    // ---- R5: title policy
+
+    #[test]
+    fn changed_title_blocks_a_slot_that_does_not_follow() {
+        let r = rig();
+        r.bind(1, "Teams");
+        assert!(!r.mgr.snapshot().slots[0].follow_title_changes, "default off for non-terminals");
+        lock(&r.fake.0).live_title = Some("Chat | Bob".into());
+        r.mgr.on_final("e".into(), "hello".into());
+        r.mgr.flush();
+        assert!(r.executed().is_empty(), "no keystrokes");
+        let d = r.last("e");
+        assert_eq!(d.status, DeliveryStatus::Blocked);
+        assert_eq!(d.reason.as_deref(), Some("window changed: was 'w', now 'Chat | Bob'"));
+        // title back: delivered
+        lock(&r.fake.0).live_title = None;
+        r.mgr.on_final("f".into(), "hello".into());
+        r.mgr.flush();
+        assert_eq!(r.last("f").status, DeliveryStatus::Sent);
+    }
+
+    #[test]
+    fn terminals_follow_title_changes_and_persist_the_new_title() {
+        let r = rig();
+        lock(&r.fake.0).capture.push_back(Ok(CapturedBinding {
+            target: BindingTarget { app_id: "WindowsTerminal.exe".into(), ..target("Terminal", "pwsh") },
+            identity: WindowIdentity::default(),
+            pid: 1,
+            live: None,
+        }));
+        r.mgr.bind(1).unwrap();
+        r.mgr.flush();
+        assert!(r.mgr.snapshot().slots[0].follow_title_changes);
+        lock(&r.fake.0).live_title = Some("pwsh - cargo test".into());
+        r.mgr.on_final("e".into(), "ls".into());
+        r.mgr.flush();
+        assert_eq!(r.last("e").status, DeliveryStatus::Sent);
+        let (stored, _) = BindingsStore::load(&r.dir);
+        assert_eq!(stored.get(SlotId::new(1).unwrap()).unwrap().target.window_title, "pwsh - cargo test");
+    }
+
+    #[test]
+    fn follow_toggle_persists_and_unblocks() {
+        let r = rig();
+        r.bind(1, "Teams");
+        lock(&r.fake.0).live_title = Some("other".into());
+        r.mgr.set_settings(1, None, None, Some(true)).unwrap();
+        r.mgr.on_final("e".into(), "hi".into());
+        r.mgr.flush();
+        assert!(r.mgr.snapshot().slots[0].follow_title_changes);
+        assert_eq!(r.last("e").status, DeliveryStatus::Sent);
+        let (stored, _) = BindingsStore::load(&r.dir);
+        assert!(stored.get(SlotId::new(1).unwrap()).unwrap().follow_title_changes);
+    }
+
+    #[test]
+    fn startup_rematch_keeps_the_title_of_a_slot_that_does_not_follow() {
+        let dir = tmpdir();
+        let mut s = BindingsStore::default();
+        s.bind(SlotId::new(1).unwrap(), target("Teams", "Chat | Alice"));
+        s.save(&dir).unwrap();
+        let r = rig_in(dir, |f| {
+            f.windows.push(WindowInfo {
+                app_id: "id.Teams".into(),
+                pid: 7,
+                title: "Chat | Bob".into(),
+                standard: true,
+                id: 1,
+            });
+        });
+        assert_eq!(r.mgr.snapshot().slots[0].window_title, "Chat | Alice");
+        assert_eq!(BindingsStore::load(&r.dir).0.get(SlotId::new(1).unwrap()).unwrap().target.window_title, "Chat | Alice");
+    }
+
+    #[test]
+    fn refusals_are_reported_with_their_reason() {
+        // R15: a block reaches the UI event with the reason (and is logged).
+        let r = rig();
+        r.bind(1, "Notes");
+        lock(&r.fake.0).results.push_back(DeliveryResult::blocked("cannot verify field is not a password"));
+        r.mgr.on_final("e".into(), "x".into());
+        r.mgr.flush();
+        let d = r.last("e");
+        assert_eq!(d.status, DeliveryStatus::Blocked);
+        assert_eq!(d.reason.as_deref(), Some("cannot verify field is not a password"));
     }
 }

@@ -171,21 +171,37 @@ async fn wait_or_shutdown(
     }
 }
 
+/// The one `Manager` of this transport, created once and kept alive for the
+/// whole run (R16). `None` while creating it fails; it is retried then.
 async fn acquire_adapter(
     cmds: &mut mpsc::UnboundedReceiver<TransportCommand>,
     events: &mpsc::Sender<TransportEvent>,
     last: &mut Option<AdapterState>,
+    manager: &mut Option<Manager>,
 ) -> Option<Adapter> {
     loop {
-        let state = match Manager::new().await {
-            Ok(m) => match m.adapters().await {
+        if manager.is_none() {
+            match Manager::new().await {
+                Ok(m) => *manager = Some(m),
+                Err(e) => {
+                    if !emit_changed(events, last, error_state(&e)).await
+                        || !wait_or_shutdown(cmds, ADAPTER_RETRY).await
+                    {
+                        return None;
+                    }
+                    continue;
+                }
+            }
+        }
+        let state = match manager.as_ref() {
+            Some(m) => match m.adapters().await {
                 Ok(list) => match list.into_iter().next() {
                     Some(a) => return Some(a),
                     None => AdapterState::NoAdapter,
                 },
                 Err(e) => error_state(&e),
             },
-            Err(e) => error_state(&e),
+            None => AdapterState::Unknown,
         };
         if !emit_changed(events, last, state).await
             || !wait_or_shutdown(cmds, ADAPTER_RETRY).await
@@ -223,8 +239,9 @@ async fn run(
     events: mpsc::Sender<TransportEvent>,
 ) {
     let mut last_state = None;
+    let mut manager: Option<Manager> = None;
     'adapter: loop {
-        let Some(central) = acquire_adapter(&mut cmds, &events, &mut last_state).await else {
+        let Some(central) = acquire_adapter(&mut cmds, &events, &mut last_state, &mut manager).await else {
             return;
         };
         let mut central_events = match central.events().await {
@@ -299,6 +316,7 @@ async fn run(
                         ble.unknown_since.is_some(),
                         ble.scanning,
                         ble.unknown_since.map_or(Duration::ZERO, |t| now - t),
+                        ble.live_connections(),
                     ) {
                         log::info!("bluetooth state still unknown: re-acquiring the adapter");
                         break;
@@ -466,24 +484,36 @@ impl Ble {
         self.scanning = false;
     }
 
-    /// Wait (bounded) until every connection task has ended.
+    /// Connection tasks that have not ended yet (each holds this adapter).
+    fn live_connections(&self) -> usize {
+        self.slots.values().filter(|s| s.active.is_some()).count()
+    }
+
+    /// Wait (bounded) until every connection task has ended; tasks still
+    /// running after the first wait are aborted and waited for once more, so
+    /// no task keeps using the adapter that is about to be replaced.
     async fn drain(&mut self, ended_rx: &mut mpsc::UnboundedReceiver<Ended>) {
-        let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
-            while self.slots.values().any(|s| s.active.is_some()) {
-                match ended_rx.recv().await {
-                    Some(e) => {
-                        if let Some(s) = self.slots.get_mut(&e.pid) {
-                            s.active = None;
+        for round in 0..2 {
+            let wait = if round == 0 { DRAIN_TIMEOUT } else { DRAIN_TIMEOUT / 2 };
+            let _ = tokio::time::timeout(wait, async {
+                while self.live_connections() > 0 {
+                    match ended_rx.recv().await {
+                        Some(e) => {
+                            if let Some(s) = self.slots.get_mut(&e.pid) {
+                                s.active = None;
+                            }
                         }
+                        None => break,
                     }
-                    None => break,
                 }
-            }
-        })
-        .await;
-        for s in self.slots.values() {
-            if let Some(a) = &s.active {
-                a.abort.trigger("bluetooth adapter restarted");
+            })
+            .await;
+            if round == 0 {
+                for s in self.slots.values() {
+                    if let Some(a) = &s.active {
+                        a.abort.trigger("bluetooth adapter restarted");
+                    }
+                }
             }
         }
     }
