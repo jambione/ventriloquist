@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { connectionStatus, detectPlatform, formatCode, formatCountdown, isAtBottom } from "./format";
+import { connectionStatus, detectPlatform, formatCode, formatCountdown, formatVersion, isAtBottom } from "./format";
 import { initialState, reduce, type AppState } from "./state";
 import type { AdapterState, HostEvent, PeerState } from "./types";
 
@@ -87,5 +87,15 @@ describe("connectionStatus", () => {
   it("detects the platform", () => {
     expect(detectPlatform("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)")).toBe("mac");
     expect(detectPlatform("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
+  });
+});
+
+describe("formatVersion", () => {
+  it("shows version and commit", () => {
+    expect(formatVersion("0.2.2", "abc1234")).toBe("Ventriloquist v0.2.2 (abc1234)");
+  });
+  it("omits an unknown or empty commit", () => {
+    expect(formatVersion("0.2.2", "unknown")).toBe("Ventriloquist v0.2.2");
+    expect(formatVersion("0.2.2", "")).toBe("Ventriloquist v0.2.2");
   });
 });

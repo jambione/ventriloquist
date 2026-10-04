@@ -17,6 +17,7 @@ import {
   formatCode,
   formatCountdown,
   formatDate,
+  formatVersion,
   isAtBottom,
 } from "./format";
 import {
@@ -60,6 +61,8 @@ const dom = {
   openLogFolder: el<HTMLButtonElement>("open-log-folder"),
   clearAll: el<HTMLButtonElement>("clear-all-bindings"),
   diagPath: el("diag-path"),
+  versionLabel: el("version-label"),
+  settingsVersion: el("settings-version"),
   openDiagFile: el<HTMLButtonElement>("open-diag-file"),
   openDiagFolder: el<HTMLButtonElement>("open-diag-folder"),
   paired: el<HTMLUListElement>("paired"),
@@ -643,6 +646,15 @@ dom.openDiagFile.addEventListener("click", () => {
 dom.openDiagFolder.addEventListener("click", () => {
   backend.openDiagnosticsFolder().catch((e: unknown) => report("Could not open the log folder", e));
 });
+backend.appVersion().then(
+  (v) => {
+    const label = formatVersion(v.version, v.commit);
+    dom.versionLabel.textContent = `v${v.version}`;
+    dom.versionLabel.title = label;
+    dom.settingsVersion.textContent = label;
+  },
+  (e: unknown) => console.error("app version failed", e),
+);
 backend.diagnosticsInfo().then(
   (i) => {
     dom.diagPath.textContent = i.log_path ?? `The log file could not be opened: ${i.error ?? "unknown error"}`;

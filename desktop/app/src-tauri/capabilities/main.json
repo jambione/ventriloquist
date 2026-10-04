@@ -25,6 +25,7 @@
     "allow-open-accessibility-settings",
     "allow-diagnostics-info",
     "allow-open-diagnostics-file",
-    "allow-open-diagnostics-folder"
+    "allow-open-diagnostics-folder",
+    "allow-app-version"
   ]
 }

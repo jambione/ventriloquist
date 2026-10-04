@@ -48,6 +48,7 @@ export const backend = {
   unbindSlot: (slot: number): Promise<void> => invoke("unbind_slot", { slot }),
   /** Clear every binding; the active slot becomes Off. */
   clearAllSlots: (): Promise<void> => invoke("clear_all_slots"),
+  appVersion: (): Promise<{ version: string; commit: string }> => invoke("app_version"),
   diagnosticsInfo: (): Promise<{ log_path: string | null; error: string | null }> =>
     invoke("diagnostics_info"),
   openDiagnosticsFile: (): Promise<void> => invoke("open_diagnostics_file"),

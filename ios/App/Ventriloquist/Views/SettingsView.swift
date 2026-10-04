@@ -43,10 +43,25 @@ struct SettingsView: View {
                 } footer: {
                     Text("When off, text is sent only when you stop recording or send a correction.")
                 }
+
+                Section {
+                    EmptyView()
+                } footer: {
+                    Text(Self.versionText)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
             }
             .navigationTitle("Settings")
             .toolbar { EditButton() }
         }
+    }
+
+    /// "Version 0.2.2 (202)" from the bundle (set in project.yml).
+    private static var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "Version \(short) (\(build))"
     }
 
     private var trimmed: String { newTerm.trimmingCharacters(in: .whitespacesAndNewlines) }

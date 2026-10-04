@@ -457,3 +457,9 @@ fieldset.mods { border: 1px solid var(--border); border-radius: 6px; margin: 8px
 fieldset.mods legend { padding: 0 4px; }
 fieldset.mods label { display: inline-flex; gap: 4px; align-items: center; }
 fieldset.mods .taken { flex-basis: 100%; }
+
+.version-label {
+  font-size: 0.75rem;
+  margin-right: 0.5rem;
+  align-self: center;
+}

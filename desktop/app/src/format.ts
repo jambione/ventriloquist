@@ -12,6 +12,12 @@ export function detectPlatform(userAgent: string): Platform {
   return "other";
 }
 
+/** "Ventriloquist v0.2.2 (abc1234)"; the commit is omitted when unknown. */
+export function formatVersion(version: string, commit: string): string {
+  const c = commit && commit !== "unknown" ? ` (${commit})` : "";
+  return `Ventriloquist v${version}${c}`;
+}
+
 /** "123456" → "123 456". Anything that is not 6 digits is returned as is. */
 export function formatCode(code: string): string {
   return /^[0-9]{6}$/.test(code) ? `${code.slice(0, 3)} ${code.slice(3)}` : code;

@@ -68,6 +68,14 @@ xattr -dr com.apple.quarantine Ventriloquist.app
 3. Choose your Mac (or PC). The desktop shows a 6-digit code; enter it on the phone.
 4. Tap the mic to start dictating and tap it again to stop. Text appears on the desktop as you speak. After stopping you can edit on the phone and send a correction.
 
+## Releasing
+
+1. `scripts/bump-version.sh X.Y.Z` sets the version in the desktop app (tauri.conf.json, Cargo.toml, package.json and lockfiles) and the iOS app (`MARKETING_VERSION`; the build number is `major*10000 + minor*100 + patch`, so 0.2.2 is 202). It makes no commit.
+2. `git commit -am "Release vX.Y.Z"`
+3. `git tag vX.Y.Z && git push origin main vX.Y.Z`
+
+CI refuses to attach a release when the tag differs from the version in `tauri.conf.json`.
+
 ## Logs
 
 Every finished utterance is appended to `~/Documents/Ventriloquist/YYYY-MM-DD.md`. The folder can be changed in the desktop Settings.

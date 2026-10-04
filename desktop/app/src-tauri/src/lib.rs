@@ -259,6 +259,20 @@ struct DiagLog {
 }
 
 #[derive(Serialize)]
+struct AppVersion {
+    version: String,
+    commit: String,
+}
+
+/// Short git commit baked in by build.rs ("unknown" outside a checkout).
+const GIT_COMMIT: &str = env!("VQ_GIT_COMMIT");
+
+#[tauri::command]
+fn app_version(app: AppHandle) -> AppVersion {
+    AppVersion { version: app.package_info().version.to_string(), commit: GIT_COMMIT.to_string() }
+}
+
+#[derive(Serialize)]
 struct DiagnosticsInfo {
     /// The diagnostics log file; `None` when it could not be opened.
     log_path: Option<String>,
@@ -625,6 +639,7 @@ pub fn run() {
             unbind_slot,
             clear_all_slots,
             diagnostics_info,
+            app_version,
             open_diagnostics_file,
             open_diagnostics_folder,
             set_slot_settings,
@@ -637,7 +652,7 @@ pub fn run() {
             let version = app.package_info().version.to_string();
             let log_state = app.state::<DiagLog>();
             match (&log_state.path, &log_state.error) {
-                (Some(p), _) => log::info!("Ventriloquist {version} starting; log file {}", p.display()),
+                (Some(p), _) => log::info!("Ventriloquist {version} ({GIT_COMMIT}) starting; log file {}", p.display()),
                 (None, e) => eprintln!("cannot open the log file: {e:?}"),
             }
             // `ver` / `sw_vers` run in a thread: they must not delay start-up.

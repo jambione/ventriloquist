@@ -14,8 +14,8 @@ settings:
     SWIFT_STRICT_CONCURRENCY: complete
     SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
     ENABLE_USER_SCRIPT_SANDBOXING: YES
-    MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.3"
+    CURRENT_PROJECT_VERSION: "203"
 packages:
   VQProtocol:
     path: ../VQProtocol
@@ -37,6 +37,8 @@ targets:
       path: Ventriloquist/Info.plist
       properties:
         CFBundleDisplayName: Ventriloquist
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         LSRequiresIPhoneOS: true
         UILaunchScreen: {}
         UIApplicationSceneManifest:
