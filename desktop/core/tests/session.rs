@@ -170,7 +170,9 @@ fn wrong_code_three_times_invalidates_the_code() {
     h.frames(P, f);
     assert!(!expect_pair_result(&h.deliver_to_phone(P, &mut phone)).ok);
     assert!(h.core.pairing_store().peers().is_empty());
-    // A new pair_request starts over.
+    // A new pair_request starts over, once the 30 s lockout after an
+    // invalidated code has passed (D10).
+    h.advance(Duration::from_secs(30));
     let f = phone.pair_request();
     h.frames(P, f);
     h.deliver_to_phone(P, &mut phone);
@@ -272,6 +274,7 @@ fn new_pair_request_resets_code_and_failures() {
         h.frames(P, f);
         h.deliver_to_phone(P, &mut phone);
     }
+    h.advance(Duration::from_secs(10)); // per-device pair_request interval (D10)
     let f = phone.pair_request();
     h.frames(P, f);
     h.deliver_to_phone(P, &mut phone);
@@ -368,6 +371,7 @@ fn table_row_known_but_phone_says_unpaired_waits_for_pairing_and_repair_replaces
         Some(PeerState::HelloExchanged)
     );
     assert!(h.disconnects.is_empty());
+    h.advance(Duration::from_secs(10)); // per-device pair_request interval (D10)
     let f = phone.pair_request();
     h.frames("peer-2", f);
     h.deliver_to_phone("peer-2", &mut phone);

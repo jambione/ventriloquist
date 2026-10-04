@@ -9,8 +9,11 @@
 //! The [`SessionManager`] owns framing, crypto and the protocol rules for
 //! every connected peer. It is driven by transport events and a clock and
 //! returns [`SessionOutput`]s (frames to send, disconnects, events, and
-//! authenticated utterances to deliver). It never sleeps and never does I/O,
-//! except persisting a successful pairing through [`PairingStore`].
+//! authenticated utterances to deliver). It never sleeps and never does I/O:
+//! a verified pairing is persisted by the caller
+//! ([`SessionOutput::PersistPairing`]), which reports back through
+//! [`SessionManager::on_pairing_persisted`]. Pairing requests pass the
+//! [`PairingGuard`] rate limits first (README §7.3).
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -24,7 +27,9 @@ use vq_protocol::{
 };
 
 use crate::clock::Clock;
-use crate::events::{CodeEndReason, HostEvent, PeerId, PeerState};
+use crate::config::sanitize_peer_name;
+use crate::events::{CodeEndReason, HostEvent, PairingStatus, PeerId, PeerState, PeerStatus};
+use crate::pairing_guard::{PairRequestVerdict, PairingGuard};
 use crate::pairing_store::{Identity, PairedPeer, PairingStore};
 use crate::transport::policy::{
     idle_drop_due, IDLE_RECONNECT_HOLDOFF, UNKNOWN_PEER_RECONNECT_HOLDOFF,
@@ -54,6 +59,15 @@ pub enum SessionOutput {
     },
     /// Emit an event.
     Event(HostEvent),
+    /// `pair_confirm` verified: persist `record`, then call
+    /// [`SessionManager::on_pairing_persisted`] with the outcome. Only then
+    /// is `pair_result` sent (README §7.3; D6).
+    PersistPairing {
+        /// Connection id.
+        peer: PeerId,
+        /// The phone to store.
+        record: PairedPeer,
+    },
     /// An authenticated utterance from a Secure peer. The `ack` (for
     /// `final`/`edit`) has already been queued.
     Deliver {
@@ -100,6 +114,10 @@ impl PairingAttempt {
     fn expired(&self, now: Duration) -> bool {
         now.saturating_sub(self.created_at) >= PAIR_CODE_TTL
     }
+
+    fn active(&self, now: Duration) -> bool {
+        !self.expired(now) && self.failures < PAIR_MAX_FAILURES
+    }
 }
 
 struct PeerSession {
@@ -111,6 +129,10 @@ struct PeerSession {
     peer_hello: Option<Hello>,
     cipher: Option<SessionCipher>,
     pairing: Option<PairingAttempt>,
+    /// Verified pairing waiting for its record to be persisted.
+    pending_key: Option<PairKey>,
+    /// Only the first `pair_request` counts as pairing activity (D10).
+    pair_request_seen: bool,
     last_pairing_activity: Duration,
     next_ping_at: Duration,
     unanswered_pings: u32,
@@ -123,6 +145,7 @@ pub struct SessionManager {
     identity: Identity,
     name: String,
     sessions: HashMap<PeerId, PeerSession>,
+    guard: PairingGuard,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -144,6 +167,7 @@ impl SessionManager {
             identity,
             name,
             sessions: HashMap::new(),
+            guard: PairingGuard::new(),
         }
     }
 
@@ -172,6 +196,41 @@ impl SessionManager {
         self.sessions.keys().cloned().collect()
     }
 
+    /// The pairing rate-limit state (read-only).
+    pub fn pairing_guard(&self) -> &PairingGuard {
+        &self.guard
+    }
+
+    /// Every live connection (sorted by id), for a UI snapshot.
+    pub fn statuses(&self, store: &PairingStore, clock: &dyn Clock) -> Vec<PeerStatus> {
+        let now = clock.mono();
+        let mut v: Vec<PeerStatus> = self
+            .sessions
+            .iter()
+            .map(|(peer, s)| {
+                let h = s.peer_hello.as_ref();
+                PeerStatus {
+                    peer: peer.clone(),
+                    state: s.state,
+                    device_id: h.map(|h| h.device_id),
+                    name: h.map(|h| h.name.clone()),
+                    paired: h.is_some_and(|h| store.knows(&h.device_id, &h.public_key)),
+                    pairing: s.pairing.as_ref().filter(|a| a.active(now)).map(|a| {
+                        PairingStatus {
+                            code: a.code.to_string(),
+                            phone_name: h.map(|h| h.name.clone()).unwrap_or_default(),
+                            expires_in_secs: PAIR_CODE_TTL
+                                .saturating_sub(now.saturating_sub(a.created_at))
+                                .as_secs(),
+                        }
+                    }),
+                }
+            })
+            .collect();
+        v.sort_by(|a, b| a.peer.cmp(&b.peer));
+        v
+    }
+
     /// A transport connected (and subscribed): send our `hello`.
     pub fn on_connected(&mut self, peer: PeerId, mtu: usize, clock: &dyn Clock) -> Out {
         let now = clock.mono();
@@ -193,6 +252,8 @@ impl SessionManager {
             peer_hello: None,
             cipher: None,
             pairing: None,
+            pending_key: None,
+            pair_request_seen: false,
             last_pairing_activity: now,
             next_ping_at: now + PING_INTERVAL,
             unanswered_pings: 0,
@@ -236,6 +297,10 @@ impl SessionManager {
         store: &mut PairingStore,
     ) -> Out {
         let mut out = Vec::new();
+        let now = clock.mono();
+        let other_code_active = self.sessions.iter().any(|(p, s)| {
+            p != peer && !s.closing && s.pairing.as_ref().is_some_and(|a| a.active(now))
+        });
         let Some(s) = self.sessions.get_mut(peer) else {
             return out;
         };
@@ -254,6 +319,8 @@ impl SessionManager {
                     own_name: &self.name,
                     store,
                     clock,
+                    guard: &mut self.guard,
+                    other_code_active,
                 };
                 handle_envelope(peer, s, &envelope, ctx, &mut out);
             }
@@ -293,6 +360,59 @@ impl SessionManager {
                 );
             }
         }
+        self.guard.prune(now);
+        out
+    }
+
+    /// The record of a verified pairing on `peer` was persisted
+    /// (`error: None`) or could not be (D6): now answer the phone. The
+    /// caller has already applied a successful write to `store`.
+    pub fn on_pairing_persisted(
+        &mut self,
+        peer: &str,
+        error: Option<&str>,
+        store: &PairingStore,
+        clock: &dyn Clock,
+    ) -> Out {
+        let mut out = Vec::new();
+        let Some(s) = self.sessions.get_mut(peer) else {
+            return out;
+        };
+        let Some(key) = s.pending_key.take() else {
+            return out;
+        };
+        if s.closing {
+            return out;
+        }
+        let hello = s.peer_hello.clone();
+        match error {
+            Some(e) => {
+                // Without a stored record the phone would be rejected on the
+                // next connection, so do not report success. Not a failure
+                // of the code: the user may confirm again.
+                out.push(SessionOutput::Event(HostEvent::StorageWarning {
+                    message: format!("Could not save the pairing: {e}"),
+                }));
+                let failures = s.pairing.as_ref().map_or(0, |a| a.failures);
+                s.send_plain(peer, &Message::PairResult(PairResult::failure()), &mut out);
+                out.push(pairing_result(
+                    peer,
+                    hello.as_ref(),
+                    false,
+                    PAIR_MAX_FAILURES.saturating_sub(failures),
+                ));
+            }
+            None => {
+                self.guard.on_paired();
+                s.pairing = None;
+                s.send_plain(peer, &Message::PairResult(key.success_message()), &mut out);
+                out.push(pairing_result(peer, hello.as_ref(), true, 0));
+                out.push(SessionOutput::Event(HostEvent::PairedPeersChanged {
+                    peers: store.peers().to_vec(),
+                }));
+                establish(peer, s, &self.identity, store, clock.mono(), &mut out);
+            }
+        }
         out
     }
 
@@ -327,6 +447,19 @@ struct Ctx<'a> {
     own_name: &'a str,
     store: &'a mut PairingStore,
     clock: &'a dyn Clock,
+    guard: &'a mut PairingGuard,
+    /// Another connection shows an active pairing code.
+    other_code_active: bool,
+}
+
+fn pairing_result(peer: &str, hello: Option<&Hello>, ok: bool, remaining: u32) -> SessionOutput {
+    SessionOutput::Event(HostEvent::PairingResult {
+        peer: peer.to_owned(),
+        device_id: hello.map(|h| h.device_id),
+        phone_name: hello.map(|h| h.name.clone()),
+        ok,
+        attempts_remaining: remaining,
+    })
 }
 
 fn rejected(peer: &str, e: &ProtoError) -> SessionOutput {
@@ -420,6 +553,7 @@ impl PeerSession {
         store: &PairingStore,
         out: &mut Out,
     ) {
+        self.pending_key = None;
         if self.pairing.take().is_some() {
             out.push(SessionOutput::Event(HostEvent::PairingCodeEnded {
                 peer: peer.to_owned(),
@@ -428,6 +562,18 @@ impl PeerSession {
         }
         if self.state == PeerState::Pairing {
             self.set_state(peer, PeerState::HelloExchanged, store, out);
+        }
+    }
+
+    fn refuse_rate_limited(&mut self, peer: &str, holdoff: Option<Duration>, out: &mut Out) {
+        self.send_error(
+            peer,
+            ErrorMsg::RATE_LIMITED,
+            "Too many pairing attempts. Try again later.",
+            out,
+        );
+        if holdoff.is_some() {
+            self.close(peer, holdoff, "rate_limited", out);
         }
     }
 
@@ -553,11 +699,13 @@ fn handle_unsecured(
     let authenticated = inbound.is_authenticated();
     let now = ctx.clock.mono();
     match inbound.into_message() {
-        Message::Hello(h) => {
+        Message::Hello(mut h) => {
             if s.peer_hello.is_some() {
                 return s.protocol_violation(peer, "second hello", out);
             }
             s.last_pairing_activity = now;
+            // K13: the name is shown, stored and logged: normalise it once.
+            h.name = sanitize_peer_name(&h.name);
             on_hello(peer, s, h, ctx, out);
         }
         Message::HelloUnsupported(hu) => {
@@ -566,18 +714,52 @@ fn handle_unsecured(
             }
             out.push(SessionOutput::Event(HostEvent::VersionMismatch {
                 peer: peer.to_owned(),
-                device: hu.name.clone().unwrap_or_else(|| "the phone".to_owned()),
+                device: hu
+                    .name
+                    .as_deref()
+                    .map(sanitize_peer_name)
+                    .unwrap_or_else(|| "the phone".to_owned()),
             }));
             s.send_error(peer, ErrorMsg::VERSION, "Update Ventriloquist", out);
             s.close(peer, None, "version", out);
         }
         Message::PairRequest(req) => {
-            s.last_pairing_activity = now;
             let Some(h) = s.peer_hello.as_ref() else {
                 log::warn!("{peer}: pair_request before hello dropped");
                 return;
             };
             let (device_id, phone_name) = (h.device_id, h.name.clone());
+            // D10: only the first pair_request is pairing activity, so a
+            // spamming phone is still idle-dropped.
+            if !s.pair_request_seen {
+                s.pair_request_seen = true;
+                s.last_pairing_activity = now;
+            }
+            if s.pending_key.is_some() {
+                log::info!("{peer}: pair_request while saving a pairing ignored");
+                return;
+            }
+            match ctx.guard.on_pair_request(device_id, now) {
+                PairRequestVerdict::Allow => {}
+                PairRequestVerdict::RateLimited => {
+                    log::info!("{peer}: pair_request rate-limited");
+                    return s.refuse_rate_limited(peer, None, out);
+                }
+                PairRequestVerdict::Refuse(d) => {
+                    log::warn!("{peer}: too many pair_requests; refusing the device");
+                    return s.refuse_rate_limited(peer, Some(d), out);
+                }
+            }
+            if ctx.other_code_active {
+                log::info!("{peer}: pair_request while another code is shown: busy");
+                return s.send_error(
+                    peer,
+                    ErrorMsg::BUSY,
+                    "Another phone is pairing with this desktop. Try again later.",
+                    out,
+                );
+            }
+            ctx.guard.on_code_issued(device_id, now);
             // README §7.3: always a new code and nonce_d, failures reset.
             let attempt = PairingAttempt {
                 request: req,
@@ -600,7 +782,11 @@ fn handle_unsecured(
             }));
         }
         Message::PairConfirm(confirm) => {
-            s.last_pairing_activity = now;
+            // Activity only while a code is active, so confirms without a
+            // code cannot keep a connection alive forever.
+            if s.pairing.as_ref().is_some_and(|a| a.active(now)) {
+                s.last_pairing_activity = now;
+            }
             on_pair_confirm(peer, s, &confirm.mac, ctx, out);
         }
         Message::PairChallenge(_) | Message::PairResult(_) => {
@@ -625,9 +811,15 @@ fn on_hello(peer: &str, s: &mut PeerSession, h: Hello, ctx: Ctx<'_>, out: &mut O
     }
     let known = ctx.store.knows(&h.device_id, &h.public_key);
     let decision = decide_after_hello(known, h.paired);
+    let refused = ctx.guard.refused_for(&h.device_id, ctx.clock.mono());
     s.peer_hello = Some(h);
     match decision {
-        HelloDecision::Secure => establish(peer, s, ctx.identity, ctx.store, out),
+        HelloDecision::Secure => {
+            establish(peer, s, ctx.identity, ctx.store, ctx.clock.mono(), out)
+        }
+        HelloDecision::AwaitPairing if refused.is_some() => {
+            s.refuse_rate_limited(peer, refused, out);
+        }
         HelloDecision::UnknownPeer => {
             s.send_error(
                 peer,
@@ -651,6 +843,7 @@ fn establish(
     s: &mut PeerSession,
     identity: &Identity,
     store: &PairingStore,
+    now: Duration,
     out: &mut Out,
 ) {
     let h = s.peer_hello.as_ref().expect("hello before establish");
@@ -667,6 +860,8 @@ fn establish(
         Ok(cipher) => {
             s.cipher = Some(cipher);
             s.unanswered_pings = 0;
+            // Keepalive starts now, not at connect (pairing may be slow).
+            s.next_ping_at = now + PING_INTERVAL;
             s.set_state(peer, PeerState::Secure, store, out);
         }
         Err(e) => s.protocol_violation(peer, &e.to_string(), out),
@@ -676,24 +871,28 @@ fn establish(
 fn on_pair_confirm(peer: &str, s: &mut PeerSession, mac: &[u8; 32], ctx: Ctx<'_>, out: &mut Out) {
     let now = ctx.clock.mono();
     let hello = s.peer_hello.clone();
-    let result_event = |ok: bool, remaining: u32| {
-        SessionOutput::Event(HostEvent::PairingResult {
-            peer: peer.to_owned(),
-            device_id: hello.as_ref().map(|h| h.device_id),
-            phone_name: hello.as_ref().map(|h| h.name.clone()),
-            ok,
-            attempts_remaining: remaining,
-        })
-    };
     // Expired codes are invalidated here too, not only by tick().
     if s.pairing.as_ref().is_some_and(|a| a.expired(now)) {
         s.end_pairing(peer, CodeEndReason::Expired, ctx.store, out);
+    }
+    if s.pending_key.is_some() {
+        // The previous confirm verified and is being saved: README §7.3
+        // still wants an answer; it does not count as a failure.
+        let failures = s.pairing.as_ref().map_or(0, |a| a.failures);
+        s.send_plain(peer, &Message::PairResult(PairResult::failure()), out);
+        out.push(pairing_result(
+            peer,
+            hello.as_ref(),
+            false,
+            PAIR_MAX_FAILURES.saturating_sub(failures),
+        ));
+        return;
     }
     let (Some(h), Some(attempt)) = (hello.as_ref(), s.pairing.as_mut()) else {
         // No active code (never generated, expired, invalidated, cancelled):
         // README §7.3 — still answer, with ok:false.
         s.send_plain(peer, &Message::PairResult(PairResult::failure()), out);
-        out.push(result_event(false, 0));
+        out.push(pairing_result(peer, hello.as_ref(), false, 0));
         return;
     };
     let verified = PairKey::derive(
@@ -705,46 +904,31 @@ fn on_pair_confirm(peer: &str, s: &mut PeerSession, mac: &[u8; 32], ctx: Ctx<'_>
         &attempt.code,
     )
     .and_then(|key| key.verify_phone_mac(mac).map(|()| key));
-    if verified.is_err() {
-        attempt.failures += 1;
-    }
-    let failures = attempt.failures;
     match verified {
         Ok(key) => {
+            // Persist first (off the host loop); pair_result follows in
+            // SessionManager::on_pairing_persisted.
             let record = PairedPeer {
                 device_id: h.device_id,
                 name: h.name.clone(),
                 public_key: h.public_key,
                 paired_at_ms: u64::try_from(ctx.clock.local_now().timestamp_millis()).unwrap_or(0),
             };
-            if let Err(e) = ctx.store.upsert(record) {
-                // Without a stored record the phone would be rejected on the
-                // next connection, so do not report success.
-                out.push(SessionOutput::Event(HostEvent::StorageWarning {
-                    message: format!("Could not save the pairing: {e}"),
-                }));
-                s.send_plain(peer, &Message::PairResult(PairResult::failure()), out);
-                out.push(result_event(
-                    false,
-                    PAIR_MAX_FAILURES.saturating_sub(failures),
-                ));
-                return;
-            }
-            s.pairing = None;
-            s.send_plain(peer, &Message::PairResult(key.success_message()), out);
-            out.push(result_event(true, 0));
-            out.push(SessionOutput::Event(HostEvent::PairedPeersChanged {
-                peers: ctx.store.peers().to_vec(),
-            }));
-            establish(peer, s, ctx.identity, ctx.store, out);
+            s.pending_key = Some(key);
+            out.push(SessionOutput::PersistPairing {
+                peer: peer.to_owned(),
+                record,
+            });
         }
         Err(e) => {
-            let remaining = PAIR_MAX_FAILURES.saturating_sub(failures);
+            attempt.failures += 1;
+            let remaining = PAIR_MAX_FAILURES.saturating_sub(attempt.failures);
             log::info!("{peer}: pair_confirm failed ({e}); {remaining} attempts left");
             s.send_plain(peer, &Message::PairResult(PairResult::failure()), out);
-            out.push(result_event(false, remaining));
+            out.push(pairing_result(peer, hello.as_ref(), false, remaining));
             if remaining == 0 {
                 s.end_pairing(peer, CodeEndReason::TooManyFailures, ctx.store, out);
+                ctx.guard.on_code_invalidated(now);
             }
         }
     }

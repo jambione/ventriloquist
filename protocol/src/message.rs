@@ -172,6 +172,12 @@ impl ErrorMsg {
     pub const VERSION: &'static str = "version";
     /// Protocol violation, e.g. a second `hello` on one connection.
     pub const PROTOCOL: &'static str = "protocol";
+    /// Desktop → phone: a `pair_request` was refused by the pairing rate
+    /// limits or lockout (README §7.3). Not fatal: try again later.
+    pub const RATE_LIMITED: &'static str = "rate_limited";
+    /// Desktop → phone: another phone's pairing code is on screen
+    /// (README §7.3). Not fatal: try again later.
+    pub const BUSY: &'static str = "busy";
 
     /// Convenience constructor.
     pub fn new(code: impl Into<String>, msg: impl Into<String>) -> Self {

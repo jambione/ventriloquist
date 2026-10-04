@@ -54,6 +54,35 @@ pub fn idle_drop_due(secure: bool, last_pairing_activity: Duration, now: Duratio
     !secure && now.saturating_sub(last_pairing_activity) >= IDLE_DROP_AFTER
 }
 
+/// A BLE peripheral slot (rotating private addresses make every
+/// advertisement look like a new device) is forgotten when it has not been
+/// seen advertising, nor been connected, for this long.
+pub const BLE_SLOT_TTL: Duration = Duration::from_secs(3 * 60);
+
+/// Whether a BLE slot should be dropped: not connected (or connecting) and
+/// not seen for [`BLE_SLOT_TTL`].
+pub fn ble_slot_expired(active: bool, since_last_seen: Duration) -> bool {
+    !active && since_last_seen >= BLE_SLOT_TTL
+}
+
+/// How often a failed `start_scan` is retried while the adapter is on.
+pub const SCAN_RETRY: Duration = Duration::from_secs(1);
+
+/// Whether to retry starting the scan now.
+pub fn scan_retry_due(powered_on: bool, scanning: bool, since_last_attempt: Duration) -> bool {
+    powered_on && !scanning && since_last_attempt >= SCAN_RETRY
+}
+
+/// While the adapter is not scanning because its state is unknown (e.g.
+/// Bluetooth permission not granted yet on first run) the adapter is
+/// re-acquired this often, so a later grant is noticed.
+pub const ADAPTER_REACQUIRE_AFTER: Duration = Duration::from_secs(5);
+
+/// Whether to drop the adapter and acquire it again (via a new manager).
+pub fn adapter_reacquire_due(state_unknown: bool, scanning: bool, since: Duration) -> bool {
+    state_unknown && !scanning && since >= ADAPTER_REACQUIRE_AFTER
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +120,31 @@ mod tests {
         assert!(idle_drop_due(false, s(10), s(10 + 300)));
         assert!(!idle_drop_due(true, s(0), s(100_000)));
         assert!(!idle_drop_due(false, s(50), s(10)));
+    }
+
+    #[test]
+    fn ble_slot_expiry() {
+        let s = Duration::from_secs;
+        assert!(!ble_slot_expired(false, s(179)));
+        assert!(ble_slot_expired(false, s(180)));
+        assert!(!ble_slot_expired(true, s(10_000)), "connected slots stay");
+    }
+
+    #[test]
+    fn scan_retry() {
+        let ms = Duration::from_millis;
+        assert!(scan_retry_due(true, false, ms(1000)));
+        assert!(!scan_retry_due(true, false, ms(999)));
+        assert!(!scan_retry_due(true, true, ms(5000)));
+        assert!(!scan_retry_due(false, false, ms(5000)));
+    }
+
+    #[test]
+    fn adapter_reacquire() {
+        let s = Duration::from_secs;
+        assert!(adapter_reacquire_due(true, false, s(5)));
+        assert!(!adapter_reacquire_due(true, false, s(4)));
+        assert!(!adapter_reacquire_due(true, true, s(60)));
+        assert!(!adapter_reacquire_due(false, false, s(60)));
     }
 }

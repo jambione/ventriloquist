@@ -7,9 +7,22 @@
 //! * `mtu` = negotiated ATT MTU − 3, or 20 when unknown ([`ble_frame_mtu`]).
 //! * Reconnects with backoff 1, 2, 4, 8, max 15 s ([`next_attempt_delay`])
 //!   whenever a phone disappears, honouring any hold-off the session layer
-//!   asked for (idle unpaired drop, `unknown_peer`).
+//!   asked for (idle unpaired drop, `unknown_peer`, pairing refusal).
 //! * Reports the adapter state: no adapter, powered off, unauthorized,
-//!   scanning.
+//!   scanning (only changes are reported).
+//!
+//! Robustness (docs/SPEC_QUESTIONS.md D12, D13):
+//! * Writes run in a per-connection writer task fed by a bounded queue
+//!   ([`SEND_QUEUE_CAPACITY`]); a full queue or a write slower than
+//!   [`WRITE_TIMEOUT`] disconnects the phone, so notifications, closes and
+//!   aborts are never stuck behind a write.
+//! * Peripheral slots that are neither connected nor seen advertising for
+//!   [`super::policy::BLE_SLOT_TTL`] are forgotten (rotating addresses).
+//! * A failed `start_scan` is retried every second while the adapter is
+//!   on; while the adapter state stays unknown (e.g. permission not yet
+//!   granted) the adapter is re-acquired every few seconds.
+//! * When the adapter is restarted, connection tasks are drained (each
+//!   reports `Disconnected`) before the new adapter is used.
 //!
 //! The idle-drop decision itself (unpaired, 5 minutes) is made by the
 //! session layer, which knows the pairing state ([`super::policy::idle_drop_due`]).
@@ -19,7 +32,7 @@
 //! automated tests; its decisions live in [`super::policy`], which is tested.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use btleplug::api::{
@@ -33,7 +46,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use vq_protocol::{RX_CHAR_UUID, SERVICE_UUID, TX_CHAR_UUID};
 
-use super::policy::{ble_frame_mtu, next_attempt_delay};
+use super::policy::{
+    adapter_reacquire_due, ble_frame_mtu, ble_slot_expired, next_attempt_delay, scan_retry_due,
+};
 use super::{Transport, TransportCommand, TransportEvent};
 use crate::events::{AdapterState, PeerId};
 
@@ -41,6 +56,12 @@ use crate::events::{AdapterState, PeerId};
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How often to retry getting a usable adapter.
 pub const ADAPTER_RETRY: Duration = Duration::from_secs(5);
+/// Longest time one frame write (with response) may take.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Queued `Send` batches per connection before the phone is disconnected.
+pub const SEND_QUEUE_CAPACITY: usize = 64;
+/// How long to wait for connection tasks to end on shutdown or restart.
+pub const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The BLE central transport.
 #[derive(Debug, Default, Clone)]
@@ -68,13 +89,35 @@ enum PeerCmd {
     Close,
 }
 
-struct Active {
-    peer: PeerId,
-    writer: mpsc::UnboundedSender<PeerCmd>,
-    abort: Arc<Notify>,
+/// Ends a connection from outside, with a reason.
+#[derive(Default)]
+struct Abort {
+    notify: Notify,
+    reason: Mutex<Option<String>>,
 }
 
-#[derive(Default)]
+impl Abort {
+    fn trigger(&self, reason: &str) {
+        let mut r = self.reason.lock().unwrap_or_else(|e| e.into_inner());
+        r.get_or_insert_with(|| reason.to_owned());
+        self.notify.notify_one();
+    }
+
+    fn reason(&self) -> String {
+        self.reason
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| "aborted".to_owned())
+    }
+}
+
+struct Active {
+    peer: PeerId,
+    writer: mpsc::Sender<PeerCmd>,
+    abort: Arc<Abort>,
+}
+
 struct Slot {
     active: Option<Active>,
     failures: u32,
@@ -82,6 +125,21 @@ struct Slot {
     holdoff: Option<Duration>,
     /// Ever connected or seen advertising: keep retrying it.
     wanted: bool,
+    /// Last advertisement or end of connection.
+    last_seen: Instant,
+}
+
+impl Slot {
+    fn new(now: Instant) -> Self {
+        Self {
+            active: None,
+            failures: 0,
+            not_before: None,
+            holdoff: None,
+            wanted: false,
+            last_seen: now,
+        }
+    }
 }
 
 /// Sent by a connection task when it ends.
@@ -93,10 +151,6 @@ struct Ended {
 enum Flow {
     Continue,
     Shutdown,
-}
-
-async fn emit(events: &mpsc::Sender<TransportEvent>, state: AdapterState) -> bool {
-    events.send(TransportEvent::Adapter(state)).await.is_ok()
 }
 
 /// Wait `d`, returning `false` if Shutdown arrived (or the host is gone).
@@ -120,6 +174,7 @@ async fn wait_or_shutdown(
 async fn acquire_adapter(
     cmds: &mut mpsc::UnboundedReceiver<TransportCommand>,
     events: &mpsc::Sender<TransportEvent>,
+    last: &mut Option<AdapterState>,
 ) -> Option<Adapter> {
     loop {
         let state = match Manager::new().await {
@@ -132,7 +187,9 @@ async fn acquire_adapter(
             },
             Err(e) => error_state(&e),
         };
-        if !emit(events, state).await || !wait_or_shutdown(cmds, ADAPTER_RETRY).await {
+        if !emit_changed(events, last, state).await
+            || !wait_or_shutdown(cmds, ADAPTER_RETRY).await
+        {
             return None;
         }
     }
@@ -147,18 +204,33 @@ fn error_state(e: &btleplug::Error) -> AdapterState {
     }
 }
 
+/// Emit `state` if it differs from the last one emitted. `false` if the
+/// host is gone.
+async fn emit_changed(
+    events: &mpsc::Sender<TransportEvent>,
+    last: &mut Option<AdapterState>,
+    state: AdapterState,
+) -> bool {
+    if *last == Some(state) {
+        return true;
+    }
+    *last = Some(state);
+    events.send(TransportEvent::Adapter(state)).await.is_ok()
+}
+
 async fn run(
     mut cmds: mpsc::UnboundedReceiver<TransportCommand>,
     events: mpsc::Sender<TransportEvent>,
 ) {
+    let mut last_state = None;
     'adapter: loop {
-        let Some(central) = acquire_adapter(&mut cmds, &events).await else {
+        let Some(central) = acquire_adapter(&mut cmds, &events, &mut last_state).await else {
             return;
         };
         let mut central_events = match central.events().await {
             Ok(s) => s,
             Err(e) => {
-                if !emit(&events, error_state(&e)).await
+                if !emit_changed(&events, &mut last_state, error_state(&e)).await
                     || !wait_or_shutdown(&mut cmds, ADAPTER_RETRY).await
                 {
                     return;
@@ -166,27 +238,29 @@ async fn run(
                 continue 'adapter;
             }
         };
+        let (ended_tx, mut ended_rx) = mpsc::unbounded_channel();
+        let now = Instant::now();
         let mut ble = Ble {
             central,
             events: events.clone(),
+            last_state,
             slots: HashMap::new(),
             conn_no: 0,
-            ended_tx: mpsc::unbounded_channel().0,
+            ended_tx,
             scanning: false,
+            powered_on: false,
+            unknown_since: Some(now),
+            last_scan_attempt: now,
         };
-        let (ended_tx, mut ended_rx) = mpsc::unbounded_channel();
-        ble.ended_tx = ended_tx;
-        match ble.central.adapter_state().await {
-            Ok(state) => {
-                if !ble.on_state(state).await {
-                    return;
-                }
-            }
+        let initial = match ble.central.adapter_state().await {
+            Ok(state) => ble.on_state(state).await,
             Err(e) => {
-                if !emit(&events, error_state(&e)).await {
-                    return;
-                }
+                let s = error_state(&e);
+                ble.emit(s).await
             }
+        };
+        if !initial {
+            return;
         }
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -198,14 +272,8 @@ async fn run(
                             return;
                         }
                     }
-                    None => {
-                        // The adapter event stream ended: start over.
-                        ble.close_all();
-                        if !wait_or_shutdown(&mut cmds, ADAPTER_RETRY).await {
-                            return;
-                        }
-                        continue 'adapter;
-                    }
+                    // The adapter event stream ended: start over.
+                    None => break,
                 },
                 c = cmds.recv() => {
                     if let Flow::Shutdown = ble.on_command(c) {
@@ -213,24 +281,39 @@ async fn run(
                         let _ = ble.central.stop_scan().await;
                         // Let connection tasks send their final writes and
                         // Disconnected events.
-                        let _ = tokio::time::timeout(Duration::from_secs(2), async {
-                            while ble.slots.values().any(|s| s.active.is_some()) {
-                                match ended_rx.recv().await {
-                                    Some(e) => {
-                                        if let Some(s) = ble.slots.get_mut(&e.pid) {
-                                            s.active = None;
-                                        }
-                                    }
-                                    None => break,
-                                }
-                            }
-                        }).await;
+                        ble.drain(&mut ended_rx).await;
                         return;
                     }
                 },
                 Some(ended) = ended_rx.recv() => ble.on_ended(ended),
-                _ = timer.tick() => ble.retry_due(),
+                _ = timer.tick() => {
+                    let now = Instant::now();
+                    ble.expire_slots(now);
+                    ble.retry_due(now);
+                    if scan_retry_due(ble.powered_on, ble.scanning, now - ble.last_scan_attempt)
+                        && !ble.start_scan().await
+                    {
+                        return;
+                    }
+                    if adapter_reacquire_due(
+                        ble.unknown_since.is_some(),
+                        ble.scanning,
+                        ble.unknown_since.map_or(Duration::ZERO, |t| now - t),
+                    ) {
+                        log::info!("bluetooth state still unknown: re-acquiring the adapter");
+                        break;
+                    }
+                }
             }
+        }
+        // Restart: end every connection (each reports Disconnected) before
+        // the new adapter is used.
+        ble.close_all();
+        let _ = ble.central.stop_scan().await;
+        ble.drain(&mut ended_rx).await;
+        last_state = ble.last_state;
+        if !wait_or_shutdown(&mut cmds, ADAPTER_RETRY).await {
+            return;
         }
     }
 }
@@ -238,35 +321,65 @@ async fn run(
 struct Ble {
     central: Adapter,
     events: mpsc::Sender<TransportEvent>,
+    last_state: Option<AdapterState>,
     slots: HashMap<PeripheralId, Slot>,
     conn_no: u64,
     ended_tx: mpsc::UnboundedSender<Ended>,
     scanning: bool,
+    powered_on: bool,
+    /// Since when the adapter state has been unknown (None when known).
+    unknown_since: Option<Instant>,
+    last_scan_attempt: Instant,
 }
 
 impl Ble {
+    async fn emit(&mut self, state: AdapterState) -> bool {
+        emit_changed(&self.events, &mut self.last_state, state).await
+    }
+
+    /// Try to start scanning; `false` if the host is gone.
+    async fn start_scan(&mut self) -> bool {
+        self.last_scan_attempt = Instant::now();
+        match self
+            .central
+            .start_scan(ScanFilter {
+                services: vec![SERVICE_UUID],
+            })
+            .await
+        {
+            Ok(()) => {
+                self.scanning = true;
+                self.emit(AdapterState::Scanning).await
+            }
+            Err(e) => {
+                let s = error_state(&e);
+                self.emit(s).await
+            }
+        }
+    }
+
     async fn on_state(&mut self, state: CentralState) -> bool {
         match state {
             CentralState::PoweredOn => {
-                if !self.scanning {
-                    match self
-                        .central
-                        .start_scan(ScanFilter {
-                            services: vec![SERVICE_UUID],
-                        })
-                        .await
-                    {
-                        Ok(()) => self.scanning = true,
-                        Err(e) => return emit(&self.events, error_state(&e)).await,
-                    }
+                self.powered_on = true;
+                self.unknown_since = None;
+                if self.scanning {
+                    self.emit(AdapterState::Scanning).await
+                } else {
+                    self.start_scan().await
                 }
-                emit(&self.events, AdapterState::Scanning).await
             }
             CentralState::PoweredOff => {
+                self.powered_on = false;
                 self.scanning = false;
-                emit(&self.events, AdapterState::PoweredOff).await
+                self.unknown_since = None;
+                self.emit(AdapterState::PoweredOff).await
             }
-            CentralState::Unknown => emit(&self.events, AdapterState::Unknown).await,
+            CentralState::Unknown => {
+                self.powered_on = false;
+                self.unknown_since.get_or_insert_with(Instant::now);
+                self.emit(AdapterState::Unknown).await
+            }
         }
     }
 
@@ -277,13 +390,16 @@ impl Ble {
             | CentralEvent::DeviceUpdated(id)
             | CentralEvent::ServicesAdvertisement { id, .. } => {
                 if self.advertises_service(&id).await {
-                    self.slots.entry(id.clone()).or_default().wanted = true;
+                    let now = Instant::now();
+                    let slot = self.slots.entry(id.clone()).or_insert_with(|| Slot::new(now));
+                    slot.wanted = true;
+                    slot.last_seen = now;
                     self.try_connect(&id);
                 }
             }
             CentralEvent::DeviceDisconnected(id) => {
                 if let Some(a) = self.slots.get(&id).and_then(|s| s.active.as_ref()) {
-                    a.abort.notify_one();
+                    a.abort.trigger("peripheral disconnected");
                 }
             }
             _ => {}
@@ -306,7 +422,9 @@ impl Ble {
             None | Some(TransportCommand::Shutdown) => return Flow::Shutdown,
             Some(TransportCommand::Send { peer, frames }) => {
                 if let Some(a) = self.find_active(&peer) {
-                    let _ = a.writer.send(PeerCmd::Frames(frames));
+                    if a.writer.try_send(PeerCmd::Frames(frames)).is_err() {
+                        a.abort.trigger("send queue full (phone not reading)");
+                    }
                 }
             }
             Some(TransportCommand::Disconnect {
@@ -320,7 +438,9 @@ impl Ble {
                 {
                     slot.holdoff = reconnect_after;
                     if let Some(a) = &slot.active {
-                        let _ = a.writer.send(PeerCmd::Close);
+                        if a.writer.try_send(PeerCmd::Close).is_err() {
+                            a.abort.trigger("closed by host");
+                        }
                     }
                 }
             }
@@ -338,16 +458,41 @@ impl Ble {
     fn close_all(&mut self) {
         for s in self.slots.values() {
             if let Some(a) = &s.active {
-                let _ = a.writer.send(PeerCmd::Close);
+                if a.writer.try_send(PeerCmd::Close).is_err() {
+                    a.abort.trigger("closed by host");
+                }
             }
         }
         self.scanning = false;
+    }
+
+    /// Wait (bounded) until every connection task has ended.
+    async fn drain(&mut self, ended_rx: &mut mpsc::UnboundedReceiver<Ended>) {
+        let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+            while self.slots.values().any(|s| s.active.is_some()) {
+                match ended_rx.recv().await {
+                    Some(e) => {
+                        if let Some(s) = self.slots.get_mut(&e.pid) {
+                            s.active = None;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        })
+        .await;
+        for s in self.slots.values() {
+            if let Some(a) = &s.active {
+                a.abort.trigger("bluetooth adapter restarted");
+            }
+        }
     }
 
     fn on_ended(&mut self, ended: Ended) {
         let now = Instant::now();
         if let Some(slot) = self.slots.get_mut(&ended.pid) {
             slot.active = None;
+            slot.last_seen = now;
             slot.failures = if ended.was_connected {
                 1
             } else {
@@ -357,12 +502,17 @@ impl Ble {
         }
     }
 
-    fn retry_due(&mut self) {
+    fn expire_slots(&mut self, now: Instant) {
+        self.slots
+            .retain(|_, s| !ble_slot_expired(s.active.is_some(), now - s.last_seen));
+    }
+
+    fn retry_due(&mut self, now: Instant) {
         let due: Vec<PeripheralId> = self
             .slots
             .iter()
             .filter(|(_, s)| s.wanted && s.active.is_none())
-            .filter(|(_, s)| s.not_before.is_none_or(|t| Instant::now() >= t))
+            .filter(|(_, s)| s.not_before.is_none_or(|t| now >= t))
             .map(|(id, _)| id.clone())
             .collect();
         for id in due {
@@ -374,14 +524,15 @@ impl Ble {
         if !self.scanning {
             return;
         }
-        let slot = self.slots.entry(id.clone()).or_default();
-        if slot.active.is_some() || slot.not_before.is_some_and(|t| Instant::now() < t) {
+        let now = Instant::now();
+        let slot = self.slots.entry(id.clone()).or_insert_with(|| Slot::new(now));
+        if slot.active.is_some() || slot.not_before.is_some_and(|t| now < t) {
             return;
         }
         self.conn_no += 1;
         let peer: PeerId = format!("ble:{id}#{}", self.conn_no);
-        let (writer, rx) = mpsc::unbounded_channel();
-        let abort = Arc::new(Notify::new());
+        let (writer, rx) = mpsc::channel(SEND_QUEUE_CAPACITY);
+        let abort = Arc::new(Abort::default());
         slot.active = Some(Active {
             peer: peer.clone(),
             writer,
@@ -408,13 +559,43 @@ fn find_char(
         .cloned()
 }
 
+/// Write queued frames in order (each within [`WRITE_TIMEOUT`]); returns
+/// why it stopped.
+async fn write_loop(
+    p: btleplug::platform::Peripheral,
+    rx_char: Characteristic,
+    mut queue: mpsc::Receiver<PeerCmd>,
+) -> String {
+    loop {
+        match queue.recv().await {
+            Some(PeerCmd::Frames(frames)) => {
+                for f in frames {
+                    match tokio::time::timeout(
+                        WRITE_TIMEOUT,
+                        p.write(&rx_char, &f, WriteType::WithResponse),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return format!("write failed: {e}"),
+                        Err(_) => {
+                            return format!("write timed out after {} s", WRITE_TIMEOUT.as_secs())
+                        }
+                    }
+                }
+            }
+            Some(PeerCmd::Close) | None => return "closed by host".to_owned(),
+        }
+    }
+}
+
 /// One connection. Returns whether it got as far as `Connected`.
 async fn connection(
     central: Adapter,
     pid: PeripheralId,
     peer: PeerId,
-    mut cmds: mpsc::UnboundedReceiver<PeerCmd>,
-    abort: Arc<Notify>,
+    cmds: mpsc::Receiver<PeerCmd>,
+    abort: Arc<Abort>,
     events: mpsc::Sender<TransportEvent>,
 ) -> bool {
     let p = match central.peripheral(&pid).await {
@@ -438,15 +619,25 @@ async fn connection(
         p.subscribe(&tx).await?;
         Ok::<_, btleplug::Error>((rx, notifications))
     };
-    let (rx_char, mut notifications) = match tokio::time::timeout(CONNECT_TIMEOUT, setup).await {
-        Ok(Ok(v)) => v,
-        Ok(Err(e)) => {
+    let setup = async {
+        tokio::select! {
+            r = tokio::time::timeout(CONNECT_TIMEOUT, setup) => Some(r),
+            _ = abort.notify.notified() => None,
+        }
+    };
+    let (rx_char, mut notifications) = match setup.await {
+        Some(Ok(Ok(v))) => v,
+        Some(Ok(Err(e))) => {
             log::info!("{peer}: connect failed: {e}");
             let _ = p.disconnect().await;
             return false;
         }
-        Err(_) => {
+        Some(Err(_)) => {
             log::info!("{peer}: connect timed out");
+            let _ = p.disconnect().await;
+            return false;
+        }
+        None => {
             let _ = p.disconnect().await;
             return false;
         }
@@ -463,6 +654,7 @@ async fn connection(
         let _ = p.disconnect().await;
         return true;
     }
+    let mut writer = tokio::spawn(write_loop(p.clone(), rx_char, cmds));
     let reason = loop {
         tokio::select! {
             n = notifications.next() => match n {
@@ -474,24 +666,11 @@ async fn connection(
                 Some(_) => {}
                 None => break "notifications ended".to_owned(),
             },
-            c = cmds.recv() => match c {
-                Some(PeerCmd::Frames(frames)) => {
-                    let mut failed = None;
-                    for f in frames {
-                        if let Err(e) = p.write(&rx_char, &f, WriteType::WithResponse).await {
-                            failed = Some(format!("write failed: {e}"));
-                            break;
-                        }
-                    }
-                    if let Some(r) = failed {
-                        break r;
-                    }
-                }
-                Some(PeerCmd::Close) | None => break "closed by host".to_owned(),
-            },
-            _ = abort.notified() => break "peripheral disconnected".to_owned(),
+            w = &mut writer => break w.unwrap_or_else(|_| "writer stopped".to_owned()),
+            _ = abort.notify.notified() => break abort.reason(),
         }
     };
+    writer.abort();
     let _ = p.disconnect().await;
     let _ = events
         .send(TransportEvent::Disconnected { peer, reason })

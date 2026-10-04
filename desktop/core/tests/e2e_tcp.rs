@@ -15,7 +15,7 @@ use std::time::Duration;
 use common::{acks, FakePhone};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
 use uuid::Uuid;
 use vq_host_core::events::PeerState;
@@ -50,7 +50,7 @@ async fn recv(stream: &mut TcpStream, phone: &mut FakePhone, n: usize) -> Vec<In
 }
 
 async fn wait_for<F: FnMut(&HostEvent) -> bool>(
-    rx: &mut UnboundedReceiver<HostEvent>,
+    rx: &mut Receiver<HostEvent>,
     seen: &mut Vec<HostEvent>,
     mut pred: F,
 ) -> HostEvent {
@@ -191,7 +191,12 @@ async fn pair_stream_reconnect_and_redeliver_over_tcp() {
             _ => None,
         })
         .collect();
-    assert_eq!(revs, vec![0, 1, 2, 3], "duplicates are not re-upserted");
+    // Duplicates are not re-upserted. Queued partials of the same entry may
+    // be coalesced while the consumer lags (latest wins, D11); finals and
+    // edits never are.
+    assert!(revs.windows(2).all(|w| w[0] < w[1]), "{revs:?}");
+    assert!(revs.ends_with(&[2, 3]), "{revs:?}");
+    assert!(revs.contains(&1), "the latest partial is kept: {revs:?}");
     let log = read_logs(&log_dir);
     assert_eq!(log.matches("\n- **").count(), 2, "{log}");
     assert!(log.contains(" · Sim Phone · `id="));

@@ -235,8 +235,8 @@ The 6-digit code is **never** sent over the wire.
 ```json
 {"t":"error","code":"version","msg":"Update Ventriloquist"}
 ```
-- Codes used in v1: `unknown_peer`, `bad_mac`, `decrypt_failed`, `version`, and `protocol` (a protocol violation such as a second `hello`, §7).
-- After sending `error`, the sender disconnects.
+- Codes used in v1: `unknown_peer`, `bad_mac`, `decrypt_failed`, `version`, `protocol` (a protocol violation such as a second `hello`, §7), and the desktop → phone pairing refusals `rate_limited` and `busy` (§7.3).
+- After sending `error`, the sender disconnects. **Exception:** `rate_limited` and `busy` answer a refused `pair_request`; the desktop keeps the connection open unless §7.3 says otherwise.
 - `msg` is for humans and MUST NOT be built from a local error's description text (in Rust, an `Error`'s `Display`). Such text is for local logs only. In Rust it never contains more than a 64-character excerpt of peer-supplied data.
 - An `error` that arrives in a plaintext envelope is unauthenticated. The receiver may disconnect and show it, but MUST NOT change any stored pairing state because of it (§7.4).
 
@@ -383,6 +383,11 @@ In the pairing state:
   - `ok:true`: the phone verifies `mac_d`. On success it stores the desktop and becomes Secure. **On failure** (wrong `mac_d`) the phone sends `error{code:"bad_mac"}`, disconnects and stores nothing.
   - `ok:false`: the phone tells the user the code was wrong. It may let the user try again (another `pair_confirm` with the same nonces) or restart with a new `pair_request`.
 - Pairing messages in the wrong direction (for example a `pair_request` received by the phone) are ignored.
+- **Pairing rate limits (desktop, normative).** A `pair_request` that the following rules refuse gets a plaintext `error` instead of a `pair_challenge`; it mints no code, does not touch an active code or the modal on screen, and is not pairing activity for the 5-minute unpaired idle drop. Only the **first** `pair_request` on a connection counts as pairing activity; a `pair_confirm` counts only while a code is active.
+  - **Per device** (by `hello.device_id`, across connections): at most one accepted `pair_request` per 10 s; an earlier one gets `error{code:"rate_limited"}` and the connection stays open. More than 5 `pair_request`s (accepted or not) within 10 minutes: `error{code:"rate_limited"}`, disconnect, and that `device_id` is refused for 10 minutes (its `hello` gets `error{code:"rate_limited"}` and a disconnect unless it is a known peer becoming Secure).
+  - **Global lockout.** Each code invalidated by 3 failures starts a lockout for all phones: 30 s after the first invalidation, doubling with each further one up to 1 h. A successful pairing resets it. During the lockout every `pair_request` gets `error{code:"rate_limited"}`; the connection stays open.
+  - **One modal at a time.** While a code is active for one connection, a `pair_request` from any other connection gets `error{code:"busy"}`; the code on screen is not replaced. The connection stays open.
+  - The phone treats `rate_limited` and `busy` as non-fatal: it shows "try again later" and MAY send a new `pair_request` later on the same connection.
 - After a successful pairing on a connection, `K_sess` uses the `session_nonce`s of the hellos already exchanged on **that** connection.
 
 ### 7.4 Secure state
@@ -440,6 +445,8 @@ Implementations map their errors to these stable names. The vectors use them.
 | `non_contributory` | crypto | all-zero X25519 output |
 | `invalid_code` | crypto | code is not exactly 6 ASCII digits |
 | `bad_mac` | crypto | MAC verification failed |
+| `rate_limited` | `error` message (desktop → phone) | `pair_request` refused by the pairing rate limits or lockout (§7.3) |
+| `busy` | `error` message (desktop → phone) | `pair_request` refused because another phone's code is on screen (§7.3) |
 
 ### 9.1 Error precedence (normative)
 When an input breaks several rules, the receiver reports the **first** matching error in this list. The vectors contain a case for each tie (names starting `tie:`).

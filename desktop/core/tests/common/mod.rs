@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use chrono::DateTime;
 use uuid::Uuid;
+use vq_host_core::io_worker::{IoExecutor, IoWorker};
 use vq_host_core::transport::{TransportCommand, TransportEvent};
 use vq_host_core::{Core, CoreOptions, CoreOutput, HostCommand, HostEvent, ManualClock};
 use vq_protocol::{
@@ -234,9 +235,11 @@ pub fn start_time() -> chrono::DateTime<chrono::FixedOffset> {
     DateTime::parse_from_rfc3339("2026-10-03T14:03:22+02:00").unwrap()
 }
 
-/// Drives a `Core` directly (no tokio, no sockets).
+/// Drives a `Core` directly (no tokio, no sockets); I/O jobs run
+/// synchronously on a real `IoWorker`.
 pub struct Harness {
     pub core: Core,
+    pub io: IoWorker,
     pub clock: Arc<ManualClock>,
     pub dir: tempfile::TempDir,
     pub events: Vec<HostEvent>,
@@ -249,14 +252,24 @@ impl Harness {
         let dir = tempfile::tempdir().unwrap();
         let clock = Arc::new(ManualClock::new(start_time()));
         let core = open_core(&dir, clock.clone());
-        Self {
+        let io = core.io_worker();
+        let mut h = Self {
             core,
+            io,
             clock,
             dir,
             events: Vec::new(),
             outbox: HashMap::new(),
             disconnects: Vec::new(),
-        }
+        };
+        h.start();
+        h
+    }
+
+    fn start(&mut self) {
+        let o = self.core.startup();
+        self.absorb(o);
+        self.events.clear();
     }
 
     pub fn config_dir(&self) -> PathBuf {
@@ -270,9 +283,11 @@ impl Harness {
     /// Simulate an app restart: a fresh Core on the same directories.
     pub fn restart(&mut self) {
         self.core = open_core(&self.dir, self.clock.clone());
+        self.io = self.core.io_worker();
         self.events.clear();
         self.outbox.clear();
         self.disconnects.clear();
+        self.start();
     }
 
     pub fn absorb(&mut self, outs: Vec<CoreOutput>) {
@@ -287,6 +302,12 @@ impl Harness {
                     reconnect_after,
                 }) => self.disconnects.push((peer, reconnect_after)),
                 CoreOutput::Transport(TransportCommand::Shutdown) => {}
+                CoreOutput::Io(job) => {
+                    for r in self.io.execute(job) {
+                        let o = self.core.handle_io(r);
+                        self.absorb(o);
+                    }
+                }
             }
         }
     }
@@ -326,6 +347,10 @@ impl Harness {
         self.clock.advance(d);
         let o = self.core.tick();
         self.absorb(o);
+        for r in self.io.tick() {
+            let o = self.core.handle_io(r);
+            self.absorb(o);
+        }
     }
 
     /// Frames queued for `peer` since the last call.

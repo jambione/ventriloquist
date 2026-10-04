@@ -163,12 +163,23 @@ CryptoKit's `sharedSecretFromKeyAgreement` **throws** (CoreCrypto error -7) for 
 ### Q25. Vector loading in Swift
 `messages.json` carries `"v": 18446744073709551615` as a JSON **number** (`hello_unsupported`), which `JSONSerialization` would read through `Double` and corrupt. README §10.1 says u64 *counters* are strings but other integers are numbers "that fit their documented type exactly", so this is consistent with the README, but a loader must read numbers exactly. **Decision.** The Swift tests read the vector files with their own small JSON tree parser that keeps numbers as source text. No change to the vectors is needed.
 
+### Q26. Finiteness of number tokens of any length
+README §5.1 rejects a number only when it is not finite after rounding to binary64; length is not a criterion. Swift's `Double(String)` returns `nil` for any string longer than 16,384 bytes, so a port that parses the raw token rejects long but finite numbers (`1.000…0`, `0.000…1`, exponents with many leading zeros) as `invalid_json`, where Rust's `f64` parser accepts them. It also flips the precedence: `"rev":1.000…0` must be `invalid_message` (finite, but not an integer), not `invalid_json`. **Decision.** Swift decides finiteness from the digits. With the significand written as `0.d1d2… × 10^E` (d1 ≠ 0, exponent read with saturation), E ≤ 308 is finite and E ≥ 310 is infinite. Only E = 309 is near the overflow threshold 2^1024 − 2^970; then a short token is rounded with `Double(String)`: at most 800 significant digits, plus a sticky `1` if any dropped digit was non-zero. This rounds exactly like the full token, because no binary64 rounding boundary near 10^308 needs more than 309 significant digits. `messages.json` now pins this for every implementation (`R1 …` cases with 20,000–30,000-digit tokens, and a `tie:` case for `rev`). No README change is needed.
+
+### Q27. Swift public-API hardening (M2 review)
+- **`Base64.decode(_:length:)`** stays public but checks `0 ≤ length ≤ input length` before any arithmetic, so `length` near `Int.max` returns `nil` and cannot trap.
+- **`PairingCode.generate(using:)`** is `internal` (test-only, for a seeded generator). Production code gets codes only from `generate()`, which uses the system CSPRNG. The draw is `UInt32.random(in: 0..<1_000_000, using:)`, the standard library's unbiased bounded sampler. The test checks that delegation exactly; it does not claim a statistical proof of uniformity.
+- **`IdentityKeyPair`** no longer has a public `secretBytes: Data` getter. Persisting the key uses `withSecretBytes { (UnsafeRawBufferPointer) in … }`, which lends the 32 raw bytes for the duration of a Keychain write (e.g. `kSecClassGenericPassword` / `kSecValueData`). Restoring uses `init(secretBytes:)`, or `init(privateKey:)` with a CryptoKit key. The lent buffer is CryptoKit's `rawRepresentation` and is not wiped by us, because mutating it could write through to the key's own storage.
+- **Test comparisons** of strings from vectors use UTF-8 byte equality (`sameBytes`), never `String ==`, per Q21.
+
 ## M3 (desktop core) — `vq-host-core`
 
 These are numbered D1… so they cannot collide with the M2 entries being written at the same time.
 
 ### D1. Log dedupe across restarts: sidecar index
-The SPEC §6.2 log line carries only an 8-digit id prefix and no revision, so the Markdown file alone cannot identify (`id`, `rev`). **Decision.** Each day file `YYYY-MM-DD.md` has a sidecar index `<log_dir>/.vq-index/YYYY-MM-DD.idx` with one `<uuid> <rev>` line per logged entry. The index line is appended *after* the Markdown entry has been written and flushed. The index is loaded when the logger first writes to a day (and after a log-dir change). A crash between the two appends can log one entry twice, but never loses one. As the spec says, dedupe is per day file: the same (`id`, `rev`) arriving on a later day is logged in that day's file.
+The SPEC §6.2 log line carries only an 8-digit id prefix and no revision, so the Markdown file alone cannot identify (`id`, `rev`). **Decision.** Each day file `YYYY-MM-DD.md` has a sidecar index `<log_dir>/.vq-index/YYYY-MM-DD.idx` with one `<uuid> <rev>` line per logged entry. The index line is appended *after* the Markdown entry has been written and flushed. The index is loaded when the logger first writes to a day (and after a log-dir change). The Markdown entry is `sync_data`'d before its index line is appended. A crash between the two appends can log one entry twice, but never loses one.
+- **Midnight (M3 review A4).** Dedupe consults the index of the arrival day **and of the previous day**, so a `final` re-delivered just after midnight, or after a restart, is not logged a second time. The same (`id`, `rev`) arriving two or more days later is logged again in that day's file.
+- **Robust index (A5/K4).** Index lines are parsed byte-wise; non-UTF-8, torn or garbage lines are skipped. Before appending, a torn last line is terminated with a newline. An index that cannot be read (except "not found") gives a `log_warning`, is not cached as empty, and is read again on the next write. If the index cannot be written (e.g. `.vq-index` is a file), a `log_warning` is emitted once; the entry counts as written and dedupe continues in memory for the rest of the run.
 
 ### D2. Which revisions are logged, and with which time
 **Decision.**
@@ -210,12 +221,15 @@ SPEC §6.3 says to drop unpaired phones after 5 minutes without pairing activity
 
 ### D7. Files, identity and config
 **Decision.**
-- The config directory is `<OS config dir>/com.ventriloquist.desktop`, which is the same as the Tauri identifier.
-- `identity.json` holds `{version, device_id, secret_key(b64)}`. It is mode 0600 on unix, the mode is restored on every load, and the directory is created 0700. On Windows no explicit ACL is set; the file relies on the per-user `%APPDATA%` ACL.
+- The config directory is `<OS local config dir>/com.ventriloquist.desktop` (`dirs::config_local_dir`): macOS `~/Library/Application Support`, Windows `%LOCALAPPDATA%` (the non-roaming profile, so the identity key never roams to other machines), Linux `~/.config`. The name is the same as the Tauri identifier.
+- `vq-host` defaults to a **separate** directory `…/com.ventriloquist.desktop.dev`, so dev runs never touch the app's identity and pairings. `--config-dir` overrides it.
+- A corrupt or unreadable `config.json` does not block start-up: the defaults apply, a `storage_warning` is emitted after `started`, and the file is left alone until a setting changes. A corrupt `identity.json` or `peers.json` remains a hard error. A relative `log_dir` in the file is ignored (the default is used).
+- `identity.json` holds `{version, device_id, secret_key(b64)}`. It is mode 0600 on unix, the mode is restored on every load, and the directory is created 0700. On Windows no explicit ACL is set; the file relies on the per-user `%LOCALAPPDATA%` ACL.
 - A corrupt identity file is an error and is never regenerated silently, because a new key would break every pairing.
 - `peers.json` and `config.json` are written atomically: temp file, fsync, rename.
-- `vq-host --log-dir/--name` override the values for that run only and are not persisted. The `set_log_dir` and `set_name` commands persist.
-- The display name is trimmed, control characters are removed, and it is capped at 64 characters. An empty name resets to the hostname, without `.local`.
+- `vq-host --log-dir/--name` override the values for that run only and are not persisted. The `set_log_dir` and `set_name` commands persist. `set_log_dir` requires an absolute path (otherwise it is refused with a `storage_warning` and nothing changes). The log directory is created at start-up and on every change; failure is a `log_warning`. `config_changed` is emitted after the save is attempted and carries `persisted` (false: the change holds for this run only, and a `storage_warning` says why).
+- The display name is trimmed, control characters, bidi controls and U+2028/U+2029 are removed, and it is capped at 64 characters. An empty name resets to the hostname, without `.local`.
+- **Phone names (K13).** A phone's `hello.name` is normalised the same way on receipt, before it is shown, stored in `peers.json` or logged; an empty result becomes `Unnamed phone`.
 
 ### D8. Transcript entry semantics
 **Decision.**
@@ -223,6 +237,38 @@ SPEC §6.3 says to drop unpaired phones after 5 minutes without pairing activity
 - The entry reflects the highest accepted revision: `partial` = that revision is a partial; `edited` = that revision is an edit.
 - `received_at` and `time` are the local arrival time of that revision; `ts` is the phone's start-of-utterance time.
 - "Clear view" belongs to the UI only; the core has no command for it.
+- **Evicted ids (A3).** An evicted id leaves a tombstone holding its highest revision; the last 10,000 are kept. A revision ≤ the tombstone is acked but neither re-inserted nor re-announced; a higher one creates the entry again.
+- **Interrupted partials (K18).** When a connection closes, every entry whose current revision is a partial delivered on that connection is re-emitted as `entry_upserted` with `state:"interrupted"`, `partial:false` (same `rev` and text). A later revision (e.g. the `final` re-sent after reconnecting) replaces it as usual.
 
 ### D9. Peer ids
 **Decision.** A `PeerId` names one *connection*: `tcp:<addr>#<n>` or `ble:<peripheral id>#<n>`. A reconnect therefore gets a new id, and stale commands for an old connection are ignored.
+
+### D10. Pairing rate limits and lockout (M3 review K1/A6)
+Without limits a phone could request a new code as often as it liked (each request reset the failure count) and so brute-force the 10^6 code space online. Each request also counted as activity, so the phone was never idle-dropped, and each replaced the code on screen. **Decision** (normative text in README §7.3, "Pairing rate limits"; pure policy in `pairing_guard.rs`):
+- **Per device** (keyed by `hello.device_id`, across connections): at most one *accepted* `pair_request` per 10 s; an earlier one gets plaintext `error{rate_limited}` and the connection stays open. A 6th `pair_request` (accepted or not) within 10 minutes gets `error{rate_limited}` and a disconnect with a 10-minute reconnect hold-off. The device is then refused for 10 minutes: an unpaired `hello` from it gets `error{rate_limited}` and a disconnect (a known phone with `paired:true` still becomes Secure).
+- **Global lockout.** Each code invalidated by 3 failures locks pairing for all phones: 30 s, doubling with each further invalidation, at most 1 h. A successful pairing resets the lockout and its escalation. During the lockout, `pair_request` gets `error{rate_limited}`.
+- **One modal.** While one connection has an active code, a `pair_request` on another connection gets `error{busy}`; the code on screen is not replaced.
+- **Idle drop.** Only the first `pair_request` on a connection counts as pairing activity, and a `pair_confirm` counts only while a code is active.
+- Refused requests mint no code and do not touch the active one. `rate_limited` and `busy` are added to README §5.7/§9 and as `ErrorMsg::RATE_LIMITED` / `ErrorMsg::BUSY`. They are the only `error`s after which the desktop keeps the connection open.
+
+### D11. Host runtime: no blocking I/O, bounded events, snapshot (K2/K3/K11/A1)
+**Decision.**
+- After `Core::open`, the core does no file I/O. It emits `IoJob`s (log append, log-dir switch, `peers.json`, `config.json`) that an `IoExecutor` runs **in order** on a dedicated thread, with a bounded queue (1,024). Results return to the core as messages, so the async loop (acks, pongs, keepalive) is never stalled by a slow disk. If the queue is full, a log entry is dropped with a `log_warning`, and a settings or pairing save fails like a write error.
+- **Pairing save.** A verified `pair_confirm` is answered only after `peers.json` is written: `ok:true` on success; on failure `ok:false` and a `storage_warning`, not counted as a failure (D6). A `pair_confirm` that arrives while the save is pending gets `ok:false`, not counted. "Forget" removes the phone from memory at once; a failed save is a `storage_warning`.
+- **Log retry.** Entries that fail to log are queued (at most 1,000; the oldest is dropped beyond that) and retried, in order, before each new entry and every second. One `log_warning` is emitted when logging starts failing, and `log_recovered` once the queue is empty again.
+- **Events.** The host → UI channel is bounded (256). The loop never waits for the UI; events wait in a coalescing outbox. A newer partial `entry_upserted` of the same id replaces the queued one in place. Repeats of a queued `message_rejected` (same peer and code) are dropped, and the newest `pairing_code_shown` per peer replaces the queued one. Beyond 4,096 queued events, coalescible events are dropped; finals, edits and state events never are.
+- **Snapshot.** The `snapshot` command answers with a `snapshot` event: device id, name, log dir, paired peers, last adapter state, live connections (state, phone, `paired`, active pairing code with its remaining seconds) and every transcript entry. A reloaded UI rebuilds itself from it.
+- Paths in events are serialized lossily (invalid UTF-8 becomes U+FFFD), so serializing an event never fails.
+
+### D12. Transport write back-pressure (A2/K10)
+**Decision.** In both transports a per-connection writer task drains a bounded queue of `Send` batches (64). A full queue disconnects the phone ("send queue full"), as does a write slower than 10 s (one TCP batch, or one BLE write with response). The connection loop never awaits a write, so notifications, `Disconnect`, `Shutdown` and peripheral loss are handled at once. `Disconnect` still sends the frames queued before it (e.g. `error{unknown_peer}`), but waits at most 1 s (TCP) for them.
+
+### D13. BLE adapter and peripheral lifecycle (K6–K9)
+**Decision.**
+- A peripheral slot that is neither connected nor seen advertising for 3 minutes is forgotten (`policy::ble_slot_expired`). This stops endless retries of stale rotating addresses. The end of a connection counts as "seen".
+- A failed `start_scan` is retried every second while the adapter is powered on (`policy::scan_retry_due`).
+- While the adapter state stays `unknown` (for example, first-run permission not yet granted), the adapter is re-acquired through a new `Manager` every 5 s (`policy::adapter_reacquire_due`). `PermissionDenied` maps to `unauthorized`. Only changes of adapter state are reported.
+- Before the adapter is re-acquired, every connection task is closed and drained (2 s at most), so each reports `Disconnected` and none is orphaned.
+
+### D14. `dev-tcp` never in release builds (K5)
+**Decision.** `vq-host-core` has `compile_error!` under `all(feature = "dev-tcp", not(debug_assertions))`. The TCP dev transport is unauthenticated, so it can never be unified into a release build of the app. Tests, the E2E harness and `vq-host` run in debug builds (`cargo test`, `cargo run`). `--all-features` works in debug builds (clippy, tests) and fails in release builds by design.

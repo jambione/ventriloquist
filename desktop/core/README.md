@@ -9,21 +9,27 @@ The Ventriloquist desktop core (SPEC §7). It has no Tauri dependencies and uses
 | `logger` | `Logger`: daily Markdown log (SPEC §6.2) with dedupe by (`id`, `rev`) through `<log_dir>/.vq-index/`. |
 | `pairing_store` | `Identity` (`identity.json`, mode 0600) and `PairingStore` (`peers.json`). |
 | `config` | `config.json`: log directory (default `~/Documents/Ventriloquist/`) and display name (default: the hostname). |
-| `core` | `Core`: the components above combined, with no I/O and an injectable `Clock`. |
-| `host` | `spawn_host`: tokio runtime, with `HostCommand` in and `HostEvent` out over channels. |
-| `transport` | The `Transport` trait; `ble::BleCentralTransport` (feature `ble`, on by default); `tcp::TcpTransport` (feature `dev-tcp`, for tests and dev only); `policy` (backoff, MTU, idle drop). |
+| `core` | `Core`: the components above combined, with no I/O and an injectable `Clock`. File writes leave it as `IoJob`s. |
+| `io_worker` | `IoWorker`: runs `IoJob`s (log, `peers.json`, `config.json`) in order on a dedicated thread; retries failed log entries. |
+| `outbox` | `EventOutbox`: coalescing queue between the host loop and a slow UI. |
+| `pairing_guard` | Pairing rate limits and global lockout (README §7.3; D10). |
+| `host` | `spawn_host`: tokio runtime, with `HostCommand` in and `HostEvent` out over a bounded channel (`spawn_host_with_io` lets tests inject a slow disk). |
+| `transport` | The `Transport` trait; `ble::BleCentralTransport` (feature `ble`, on by default); `tcp::TcpTransport` (feature `dev-tcp`, for tests and dev only); `policy` (backoff, MTU, idle drop, BLE slot expiry, scan retry, adapter re-acquire). |
 
 ## Commands
 
 ```sh
 cargo test  -p vq-host-core --features dev-tcp
-cargo clippy -p vq-host-core --all-targets --all-features -- -D warnings
+cargo clippy -p vq-host-core --all-targets --features dev-tcp -- -D warnings   # --all-features also works (debug)
 cargo build -p vq-host-core                       # default features (ble)
+scripts/verify.sh                                 # all gates
 cargo run   -p vq-host-core --features dev-tcp --bin vq-host -- --connect 127.0.0.1:47800 \
             --log-dir /tmp/vq-logs --config-dir /tmp/vq-cfg [--name "My Mac"]
 ```
 
-`vq-host` is the desktop side of the TCP dev transport, so it is the **client**. It reconnects with backoff (1, 2, 4, 8, max 15 s) until the phone simulator's server is up. Set `VQ_LOG=1` to get diagnostics on stderr. It stops on SIGINT or SIGTERM.
+**`dev-tcp` is refused in release builds** (`compile_error!`; D14): run the tests, the E2E harness and `vq-host` in debug builds only, and never enable `dev-tcp` for the app.
+
+`vq-host` is the desktop side of the TCP dev transport, so it is the **client**. Its default config directory is `<OS local config dir>/com.ventriloquist.desktop.dev`, which is separate from the app's. It reconnects with backoff (1, 2, 4, 8, max 15 s) until the phone simulator's server is up. Set `VQ_LOG=1` to get diagnostics on stderr. It stops on SIGINT or SIGTERM.
 
 ## `vq-host` stdout format (stable; the M4 E2E test parses it)
 
@@ -40,21 +46,25 @@ Events:
 | `event` | Fields |
 |---|---|
 | `started` | `device_id`, `name`, `log_dir`, `paired_peers` (array of `{device_id,name,public_key(b64),paired_at_ms}`) |
-| `connection_status` | `peer`, `state` (`connected`/`hello_exchanged`/`pairing`/`secure`/`closed`), `device_id` (null until the phone's hello), `name` (likewise), `paired` (bool), `reason` (null, or e.g. `unknown_peer`, `keepalive_timeout`, `idle_unpaired`, `protocol`, `version`) |
+| `snapshot` | answer to the `snapshot` command: `device_id`, `name`, `log_dir`, `paired_peers`, `adapter_state`, `peers` (array of `{peer, state, device_id, name, paired, pairing: null or {code, phone_name, expires_in_secs}}`), `entries` (array of entries, oldest first) |
+| `connection_status` | `peer`, `state` (`connected`/`hello_exchanged`/`pairing`/`secure`/`closed`), `device_id` (null until the phone's hello), `name` (likewise), `paired` (bool), `reason` (null, or e.g. `unknown_peer`, `keepalive_timeout`, `idle_unpaired`, `rate_limited`, `protocol`, `version`) |
 | `pairing_code_shown` | `peer`, `device_id`, `phone_name`, `code` (exactly 6 ASCII digits), `expires_in_secs` (120) |
 | `pairing_code_ended` | `peer`, `reason` (`expired`/`too_many_failures`/`cancelled`/`disconnected`) |
 | `pairing_result` | `peer`, `device_id`, `phone_name`, `ok`, `attempts_remaining` |
 | `paired_peers_changed` | `peers` |
-| `entry_upserted` | `entry`: `{id, rev, state ("partial"/"final"/"edit"), text, ts, device_id, device_name, first_received_at, received_at (RFC 3339 local), time ("HH:MM:SS"), partial (bool), edited (bool)}` |
+| `entry_upserted` | `entry`: `{id, rev, state ("partial"/"final"/"edit"/"interrupted"), text, ts, device_id, device_name, first_received_at, received_at (RFC 3339 local), time ("HH:MM:SS"), partial (bool), edited (bool)}` |
 | `entry_evicted` | `id` |
 | `peer_error` | `peer`, `code`, `message`, `authenticated` |
 | `version_mismatch` | `peer`, `device` (the device to update) |
 | `message_rejected` | `peer`, `code` (vq-protocol error code, e.g. `plaintext_not_allowed`, `text_too_long`) |
 | `log_warning` / `storage_warning` | `message` |
+| `log_recovered` | (none): every entry that failed to log has now been written |
 | `adapter_state` | `state` (`unknown`/`no_adapter`/`powered_off`/`unauthorized`/`scanning`; TCP reports `scanning`) |
-| `config_changed` | `log_dir`, `name` |
+| `config_changed` | `log_dir`, `name`, `persisted` (bool) |
 
-`entry_upserted` is emitted only when a revision is **accepted**, meaning its `rev` is higher than any seen for that `id` in this run. Duplicate or older revisions are acked to the phone but produce no event.
+`entry_upserted` is emitted only when a revision is **accepted**, meaning its `rev` is higher than any seen for that `id` in this run (evicted ids included, D8). Duplicate or older revisions are acked to the phone but produce no event. The one exception: when a connection closes, its live partials are re-emitted once with `state:"interrupted"` and `partial:false`.
+
+The event channel is bounded. While a consumer is slow, queued partial updates of the same entry and repeated `message_rejected` events are coalesced (D11). A UI that reloads should send `snapshot`.
 
 Example:
 
@@ -72,6 +82,7 @@ Commands are optional. Send one JSON object per line on stdin. EOF on stdin does
 {"command":"forget_peer","device_id":"…"}
 {"command":"set_log_dir","path":"/tmp/other"}
 {"command":"set_name","name":"Other"}
+{"command":"snapshot"}
 {"command":"shutdown"}
 ```
 
@@ -95,6 +106,6 @@ Rendering rules and the dedupe index are described in `src/logger.rs` and in doc
 The crate keeps to the portable APIs:
 - `btleplug` uses WinRT on Windows.
 - The unix permission code is behind `cfg(unix)`.
-- Config files rely on the per-user `%APPDATA%` ACL.
+- Config files live in the per-user, non-roaming `%LOCALAPPDATA%` and rely on its ACL.
 
 No Windows build is run by the agents.

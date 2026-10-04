@@ -13,16 +13,23 @@
 //! * Partials are never logged.
 //! * Each entry (header included, for a new file) is written with one
 //!   `write_all` and then flushed.
-//! * **Dedupe across restarts.** The Markdown line only carries an 8-digit id
-//!   prefix and no revision, so it cannot identify (`id`, `rev`) by itself.
-//!   Each day file therefore has a sidecar index
+//! * **Dedupe across restarts and midnight.** The Markdown line only
+//!   carries an 8-digit id prefix and no revision, so it cannot identify
+//!   (`id`, `rev`) by itself. Each day file therefore has a sidecar index
 //!   `<log_dir>/.vq-index/YYYY-MM-DD.idx` with one `<uuid> <rev>` line per
-//!   logged entry, appended *after* the Markdown entry is flushed. On the
-//!   first write of a day (and after a log-dir change) the index is loaded,
-//!   so a duplicate (`id`, `rev`) delivered after a restart, on the same day
-//!   file, is not logged again. A crash between the two appends can at worst
-//!   log one entry twice; it never loses one. Dedupe is per day file, as the
-//!   spec scopes it.
+//!   logged entry, appended *after* the Markdown entry is written and
+//!   `sync_data`'d. Dedupe consults the index of the arrival day **and of
+//!   the previous day**, so a `final` re-delivered just after midnight (or
+//!   after a restart) is not logged again. A crash between the two appends
+//!   can at worst log one entry twice; it never loses one.
+//! * **Robust index.** Lines are parsed byte-wise; non-UTF-8, torn or
+//!   otherwise unparseable lines are skipped. A torn last line is
+//!   terminated before the next record is appended. An index that cannot
+//!   be read (other than "not found") is reported through
+//!   [`Logger::take_warnings`] and re-read on the next write instead of
+//!   being cached as empty. If the index cannot be written, the entry
+//!   stays deduplicated in memory for the rest of the run and a warning is
+//!   reported; the Markdown entry itself counts as written.
 //! * **Inert text.** Every text line is indented two spaces, so no text line
 //!   can start at column 0 and mimic an entry or header. LF separates lines
 //!   (a CR directly before an LF is dropped). Control characters other than
@@ -34,7 +41,7 @@
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, FixedOffset, NaiveDate};
@@ -66,13 +73,36 @@ pub struct LogError {
     pub source: io::Error,
 }
 
+#[derive(Debug)]
+struct DayIndex {
+    date: NaiveDate,
+    seen: HashSet<(Uuid, u32)>,
+    /// The on-disk index was read (or does not exist).
+    loaded: bool,
+    /// A read failure was already reported for this day.
+    warned: bool,
+}
+
+impl DayIndex {
+    fn new(date: NaiveDate) -> Self {
+        Self {
+            date,
+            seen: HashSet::new(),
+            loaded: false,
+            warned: false,
+        }
+    }
+}
+
 /// The daily Markdown logger.
 #[derive(Debug)]
 pub struct Logger {
     dir: PathBuf,
-    /// Day whose index is loaded in `seen`.
-    day: Option<NaiveDate>,
-    seen: HashSet<(Uuid, u32)>,
+    /// Index of the day last written to, and of the day before it.
+    today: Option<DayIndex>,
+    prev: Option<DayIndex>,
+    warnings: Vec<String>,
+    index_write_warned: bool,
 }
 
 impl Logger {
@@ -80,8 +110,10 @@ impl Logger {
     pub fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            day: None,
-            seen: HashSet::new(),
+            today: None,
+            prev: None,
+            warnings: Vec::new(),
+            index_write_warned: false,
         }
     }
 
@@ -90,11 +122,18 @@ impl Logger {
         &self.dir
     }
 
-    /// Switch to another directory; its dedupe index is loaded lazily.
+    /// Switch to another directory; its dedupe indexes are loaded lazily.
     pub fn set_dir(&mut self, dir: PathBuf) {
         self.dir = dir;
-        self.day = None;
-        self.seen.clear();
+        self.today = None;
+        self.prev = None;
+        self.index_write_warned = false;
+    }
+
+    /// Non-fatal problems (unreadable or unwritable index) since the last
+    /// call.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     /// Path of the day file for `date`.
@@ -108,22 +147,57 @@ impl Logger {
             .join(format!("{}.idx", date.format("%Y-%m-%d")))
     }
 
-    fn load_day(&mut self, date: NaiveDate) {
-        if self.day == Some(date) {
+    fn select_day(&mut self, date: NaiveDate) {
+        if self.today.as_ref().is_some_and(|d| d.date == date) {
             return;
         }
-        self.seen.clear();
-        if let Ok(f) = fs::File::open(self.index_file(date)) {
-            for line in io::BufReader::new(f).lines().map_while(Result::ok) {
-                let mut parts = line.split_whitespace();
-                if let (Some(id), Some(rev)) = (parts.next(), parts.next()) {
-                    if let (Ok(id), Ok(rev)) = (Uuid::parse_str(id), rev.parse::<u32>()) {
-                        self.seen.insert((id, rev));
+        let yesterday = date.pred_opt();
+        let old_today = self.today.take();
+        let old_prev = self.prev.take();
+        self.prev = [old_today, old_prev]
+            .into_iter()
+            .flatten()
+            .find(|d| Some(d.date) == yesterday)
+            .or_else(|| yesterday.map(DayIndex::new));
+        self.today = Some(DayIndex::new(date));
+    }
+
+    fn load_pending(&mut self) {
+        for slot in [&mut self.today, &mut self.prev] {
+            let Some(day) = slot.as_mut() else { continue };
+            if day.loaded {
+                continue;
+            }
+            let path = self
+                .dir
+                .join(INDEX_DIR)
+                .join(format!("{}.idx", day.date.format("%Y-%m-%d")));
+            match read_index(&path) {
+                Ok(set) => {
+                    day.seen.extend(set);
+                    day.loaded = true;
+                }
+                // A missing or blocked directory: the write path reports
+                // it; just retry the read next time.
+                Err(e) if e.kind() == io::ErrorKind::NotADirectory => {}
+                Err(e) => {
+                    if !day.warned {
+                        day.warned = true;
+                        self.warnings.push(format!(
+                            "cannot read log index {} (duplicates may be logged): {e}",
+                            path.display()
+                        ));
                     }
                 }
             }
         }
-        self.day = Some(date);
+    }
+
+    fn is_duplicate(&self, key: &(Uuid, u32)) -> bool {
+        [&self.today, &self.prev]
+            .into_iter()
+            .flatten()
+            .any(|d| d.seen.contains(key))
     }
 
     /// Log one accepted `final`/`edit` that arrived at `arrived` (local time).
@@ -137,8 +211,10 @@ impl Logger {
             return Ok(LogOutcome::SkippedPartial);
         }
         let date = arrived.date_naive();
-        self.load_day(date);
-        if self.seen.contains(&(utt.id, utt.rev)) {
+        self.select_day(date);
+        self.load_pending();
+        let key = (utt.id, utt.rev);
+        if self.is_duplicate(&key) {
             return Ok(LogOutcome::Duplicate);
         }
         let path = self.day_file(date);
@@ -153,11 +229,48 @@ impl Logger {
             path: path.clone(),
             source,
         })?;
-        self.seen.insert((utt.id, utt.rev));
+        if let Some(d) = self.today.as_mut() {
+            d.seen.insert(key);
+        }
         let idx = self.index_file(date);
-        append_index(&idx, &utt.id, utt.rev).map_err(|source| LogError { path: idx, source })?;
+        match append_index(&idx, &utt.id, utt.rev) {
+            Ok(()) => self.index_write_warned = false,
+            Err(e) => {
+                if !self.index_write_warned {
+                    self.index_write_warned = true;
+                    self.warnings.push(format!(
+                        "cannot write log index {} (deduplicating in memory only): {e}",
+                        idx.display()
+                    ));
+                }
+            }
+        }
         Ok(LogOutcome::Written(path))
     }
+}
+
+/// Read an index file. A missing file is an empty index; unparseable
+/// lines (torn, non-UTF-8, garbage) are skipped.
+fn read_index(path: &Path) -> io::Result<HashSet<(Uuid, u32)>> {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
+        Err(e) => return Err(e),
+    };
+    Ok(bytes
+        .split(|b| *b == b'\n')
+        .filter_map(parse_index_line)
+        .collect())
+}
+
+fn parse_index_line(line: &[u8]) -> Option<(Uuid, u32)> {
+    let line = std::str::from_utf8(line).ok()?;
+    let mut parts = line.split_whitespace();
+    let (id, rev) = (parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((Uuid::parse_str(id).ok()?, rev.parse::<u32>().ok()?))
 }
 
 /// `# Ventriloquist — YYYY-MM-DD` followed by a blank line.
@@ -235,6 +348,9 @@ fn append_entry(dir: &Path, path: &Path, date: NaiveDate, entry: &str) -> io::Re
     buf.push_str(entry);
     f.write_all(buf.as_bytes())?;
     f.flush()?;
+    // The index line is appended only once the entry is durable, so a
+    // power loss cannot leave an index record for a missing entry.
+    f.sync_data()?;
     Ok(())
 }
 
@@ -242,8 +358,23 @@ fn append_index(idx: &Path, id: &Uuid, rev: u32) -> io::Result<()> {
     if let Some(parent) = idx.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut f = OpenOptions::new().append(true).create(true).open(idx)?;
-    f.write_all(format!("{} {}\n", id.hyphenated(), rev).as_bytes())?;
+    let mut f = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(idx)?;
+    let mut line = String::new();
+    if f.metadata()?.len() > 0 {
+        // A torn last line (crash mid-append) must not swallow this record.
+        f.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        f.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            line.push('\n');
+        }
+    }
+    line.push_str(&format!("{} {}\n", id.hyphenated(), rev));
+    f.write_all(line.as_bytes())?;
     f.flush()
 }
 
@@ -318,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn dedupe_survives_restart_same_day_only() {
+    fn dedupe_survives_restart_and_midnight() {
         let dir = tempfile::tempdir().unwrap();
         let id = Uuid::new_v4();
         let t = at("2026-10-03T23:59:00+00:00");
@@ -335,12 +466,25 @@ mod tests {
             l2.log(&utt(id, 2, UttState::Edit, "b"), "P", t).unwrap(),
             LogOutcome::Written(_)
         ));
-        // next day file: dedupe is per day file
+        // next day: the previous day's index still dedupes (A4) …
         let t2 = at("2026-10-04T00:00:01+00:00");
-        let w = l2.log(&utt(id, 1, UttState::Final, "a"), "P", t2).unwrap();
-        assert_eq!(w, LogOutcome::Written(dir.path().join("2026-10-04.md")));
-        let s = fs::read_to_string(dir.path().join("2026-10-04.md")).unwrap();
-        assert!(s.starts_with("# Ventriloquist — 2026-10-04\n\n"));
+        assert_eq!(
+            l2.log(&utt(id, 1, UttState::Final, "a"), "P", t2).unwrap(),
+            LogOutcome::Duplicate
+        );
+        // … also after a restart …
+        assert_eq!(
+            Logger::new(dir.path().into())
+                .log(&utt(id, 2, UttState::Edit, "b"), "P", t2)
+                .unwrap(),
+            LogOutcome::Duplicate
+        );
+        // … but not two days later.
+        let t3 = at("2026-10-05T00:00:01+00:00");
+        let w = l2.log(&utt(id, 1, UttState::Final, "a"), "P", t3).unwrap();
+        assert_eq!(w, LogOutcome::Written(dir.path().join("2026-10-05.md")));
+        let s = fs::read_to_string(dir.path().join("2026-10-05.md")).unwrap();
+        assert!(s.starts_with("# Ventriloquist — 2026-10-05\n\n"));
     }
 
     #[test]
@@ -408,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn write_failure_is_an_error_not_a_panic_and_is_retried() {
+    fn write_failure_is_an_error_not_a_panic_and_a_new_dir_works() {
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("not-a-dir");
         fs::write(&blocker, b"file").unwrap();
@@ -419,5 +563,41 @@ mod tests {
         // after fixing the directory, the same (id, rev) is still logged
         l.set_dir(dir.path().join("ok"));
         assert!(matches!(l.log(&u, "P", t).unwrap(), LogOutcome::Written(_)));
+    }
+
+    #[test]
+    fn unwritable_index_dedupes_in_memory_and_warns_once() {
+        let dir = tempfile::tempdir().unwrap();
+        // `.vq-index` is a file: the index can be neither read nor written.
+        fs::write(dir.path().join(INDEX_DIR), b"").unwrap();
+        let mut l = Logger::new(dir.path().into());
+        let t = at("2026-10-03T10:00:00+00:00");
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(matches!(
+            l.log(&utt(a, 0, UttState::Final, "x"), "P", t).unwrap(),
+            LogOutcome::Written(_)
+        ));
+        l.log(&utt(b, 0, UttState::Final, "y"), "P", t).unwrap();
+        let w = l.take_warnings();
+        assert_eq!(
+            w.iter().filter(|m| m.contains("cannot write")).count(),
+            1,
+            "{w:?}"
+        );
+        assert_eq!(
+            l.log(&utt(a, 0, UttState::Final, "x"), "P", t).unwrap(),
+            LogOutcome::Duplicate
+        );
+    }
+
+    #[test]
+    fn index_parsing_skips_garbage() {
+        assert_eq!(parse_index_line(b"\xff\xfe 1"), None);
+        assert_eq!(parse_index_line(b"1a2b3c4d-0000-40"), None);
+        assert_eq!(parse_index_line(&format!("{ID} 1 extra").into_bytes()), None);
+        assert_eq!(
+            parse_index_line(&format!("{ID} 7").into_bytes()),
+            Some((Uuid::parse_str(ID).unwrap(), 7))
+        );
     }
 }

@@ -24,7 +24,7 @@ pub(crate) fn create_private_dir_all(dir: &Path) -> io::Result<()> {
 ///
 /// On unix the file is created with mode 0600. On Windows, `rename`
 /// replaces the destination (MoveFileEx with REPLACE_EXISTING); the file
-/// inherits the ACL of the per-user config directory (AppData), which is
+/// inherits the ACL of the per-user config directory (LocalAppData), which is
 /// only accessible to the user.
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path

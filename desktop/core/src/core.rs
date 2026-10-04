@@ -1,8 +1,11 @@
 //! [`Core`]: the sans-I/O heart of the desktop host. It combines the
-//! [`SessionManager`], [`PairingStore`], [`TranscriptStore`], [`Logger`] and
-//! config, consumes transport events and commands, and produces transport
-//! commands and [`HostEvent`]s. [`crate::host`] runs it on tokio; tests
-//! drive it directly with a [`crate::clock::ManualClock`].
+//! [`SessionManager`], [`PairingStore`], [`TranscriptStore`] and config,
+//! consumes transport events, commands and I/O results, and produces
+//! transport commands, [`IoJob`]s and [`HostEvent`]s. After
+//! [`Core::open`] it never touches the disk: every write is an [`IoJob`]
+//! run by an [`crate::io_worker::IoExecutor`] off the async loop (D11).
+//! [`crate::host`] runs it on tokio; tests drive it directly with a
+//! [`crate::clock::ManualClock`] and a synchronous [`IoWorker`].
 
 use std::io;
 use std::path::PathBuf;
@@ -10,8 +13,8 @@ use std::sync::Arc;
 
 use crate::clock::Clock;
 use crate::config::{normalize_name, ConfigStore};
-use crate::events::{HostCommand, HostEvent};
-use crate::logger::Logger;
+use crate::events::{AdapterState, HostCommand, HostEvent};
+use crate::io_worker::{IoJob, IoResult, IoWorker, LogJob, PeersOp};
 use crate::pairing_store::{Identity, PairingStore};
 use crate::session::{SessionManager, SessionOutput};
 use crate::transcript::TranscriptStore;
@@ -37,6 +40,8 @@ pub enum CoreOutput {
     Transport(TransportCommand),
     /// For the UI.
     Event(HostEvent),
+    /// For the I/O worker; its results go to [`Core::handle_io`].
+    Io(IoJob),
 }
 
 /// The desktop host core.
@@ -45,25 +50,29 @@ pub struct Core {
     sessions: SessionManager,
     store: PairingStore,
     transcript: TranscriptStore,
-    logger: Logger,
     config: ConfigStore,
+    log_dir: PathBuf,
+    adapter_state: AdapterState,
+    startup_warnings: Vec<String>,
 }
 
 impl std::fmt::Debug for Core {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Core")
             .field("sessions", &self.sessions)
-            .field("log_dir", &self.logger.dir())
+            .field("log_dir", &self.log_dir)
             .finish_non_exhaustive()
     }
 }
 
 impl Core {
-    /// Load (or create) identity, pairing store and config.
+    /// Load (or create) identity and pairing store (errors are fatal) and
+    /// config (a corrupt `config.json` falls back to the defaults with a
+    /// `storage_warning`).
     pub fn open(opts: CoreOptions) -> io::Result<Self> {
         let identity = Identity::load_or_create(&opts.config_dir)?;
         let store = PairingStore::load(&opts.config_dir)?;
-        let config = ConfigStore::load(&opts.config_dir)?;
+        let (config, config_warning) = ConfigStore::load(&opts.config_dir);
         let log_dir = opts.log_dir_override.unwrap_or_else(|| config.log_dir());
         let name = opts
             .name_override
@@ -75,9 +84,32 @@ impl Core {
             sessions: SessionManager::new(identity, name),
             store,
             transcript: TranscriptStore::default(),
-            logger: Logger::new(log_dir),
             config,
+            log_dir,
+            adapter_state: AdapterState::Unknown,
+            startup_warnings: config_warning.into_iter().collect(),
         })
+    }
+
+    /// A worker for this core's files (run it with
+    /// [`crate::io_worker::IoExecutor`]).
+    pub fn io_worker(&self) -> IoWorker {
+        IoWorker::new(
+            self.log_dir.clone(),
+            self.store.path().to_path_buf(),
+            self.config.path().to_path_buf(),
+        )
+    }
+
+    /// What to do at start-up: the `started` event, any load warnings, and
+    /// creating the log directory.
+    pub fn startup(&mut self) -> Vec<CoreOutput> {
+        let mut out = vec![CoreOutput::Event(self.started_event())];
+        for message in self.startup_warnings.drain(..) {
+            out.push(CoreOutput::Event(HostEvent::StorageWarning { message }));
+        }
+        out.push(CoreOutput::Io(IoJob::SetLogDir(self.log_dir.clone())));
+        out
     }
 
     /// The `started` event describing the initial state.
@@ -85,8 +117,21 @@ impl Core {
         HostEvent::Started {
             device_id: self.sessions.identity().device_id,
             name: self.sessions.name().to_owned(),
-            log_dir: self.logger.dir().to_path_buf(),
+            log_dir: self.log_dir.clone(),
             paired_peers: self.store.peers().to_vec(),
+        }
+    }
+
+    /// The complete current state.
+    pub fn snapshot(&self) -> HostEvent {
+        HostEvent::Snapshot {
+            device_id: self.sessions.identity().device_id,
+            name: self.sessions.name().to_owned(),
+            log_dir: self.log_dir.clone(),
+            paired_peers: self.store.peers().to_vec(),
+            adapter_state: self.adapter_state,
+            peers: self.sessions.statuses(&self.store, self.clock.as_ref()),
+            entries: self.transcript.entries().cloned().collect(),
         }
     }
 
@@ -107,27 +152,42 @@ impl Core {
 
     /// Current log directory.
     pub fn log_dir(&self) -> PathBuf {
-        self.logger.dir().to_path_buf()
+        self.log_dir.clone()
+    }
+
+    /// Last reported adapter state.
+    pub fn adapter_state(&self) -> AdapterState {
+        self.adapter_state
     }
 
     /// Handle one transport event.
     pub fn handle_transport(&mut self, ev: TransportEvent) -> Vec<CoreOutput> {
-        let outs = match ev {
+        match ev {
             TransportEvent::Connected { peer, mtu } => {
-                self.sessions.on_connected(peer, mtu, self.clock.as_ref())
+                let o = self.sessions.on_connected(peer, mtu, self.clock.as_ref());
+                self.apply(o)
             }
             TransportEvent::Frame { peer, frame } => {
-                self.sessions
-                    .on_frame(&peer, &frame, self.clock.as_ref(), &mut self.store)
+                let o = self
+                    .sessions
+                    .on_frame(&peer, &frame, self.clock.as_ref(), &mut self.store);
+                self.apply(o)
             }
             TransportEvent::Disconnected { peer, reason } => {
-                self.sessions.on_disconnected(&peer, &reason, &self.store)
+                let o = self.sessions.on_disconnected(&peer, &reason, &self.store);
+                let mut out = self.apply(o);
+                // K18: live partials of this connection will never get
+                // their final here; settle them.
+                for entry in self.transcript.interrupt_partials_from(&peer) {
+                    out.push(CoreOutput::Event(HostEvent::EntryUpserted { entry }));
+                }
+                out
             }
             TransportEvent::Adapter(state) => {
-                return vec![CoreOutput::Event(HostEvent::AdapterState { state })]
+                self.adapter_state = state;
+                vec![CoreOutput::Event(HostEvent::AdapterState { state })]
             }
-        };
-        self.apply(outs)
+        }
     }
 
     /// Handle one command.
@@ -135,48 +195,91 @@ impl Core {
         match cmd {
             HostCommand::ForgetPeer { device_id } => {
                 let mut out = Vec::new();
-                match self.store.remove(&device_id) {
-                    Ok(true) => out.push(CoreOutput::Event(HostEvent::PairedPeersChanged {
+                if let Some(peers) = self.store.begin_remove(&device_id) {
+                    out.push(CoreOutput::Io(IoJob::SavePeers {
+                        op: PeersOp::Forget { device_id },
+                        peers,
+                    }));
+                    out.push(CoreOutput::Event(HostEvent::PairedPeersChanged {
                         peers: self.store.peers().to_vec(),
-                    })),
-                    Ok(false) => {}
-                    Err(e) => out.push(CoreOutput::Event(HostEvent::StorageWarning {
-                        message: format!("Could not forget the phone: {e}"),
-                    })),
+                    }));
                 }
                 let o = self.sessions.disconnect_device(&device_id);
                 out.extend(self.apply(o));
                 out
             }
             HostCommand::SetLogDir { path } => {
-                let mut out = Vec::new();
-                if let Err(e) = self.config.set_log_dir(path.clone()) {
-                    out.push(CoreOutput::Event(HostEvent::StorageWarning {
-                        message: format!("Could not save the settings: {e}"),
-                    }));
+                if !path.is_absolute() {
+                    return vec![CoreOutput::Event(HostEvent::StorageWarning {
+                        message: format!(
+                            "The log folder must be an absolute path (got {:?}); unchanged.",
+                            path.to_string_lossy()
+                        ),
+                    })];
                 }
-                self.logger.set_dir(path);
-                out.push(self.config_changed());
-                out
+                self.log_dir = path.clone();
+                let file = self.config.set_log_dir(path.clone());
+                vec![
+                    CoreOutput::Io(IoJob::SetLogDir(path)),
+                    CoreOutput::Io(IoJob::SaveConfig(file)),
+                ]
             }
             HostCommand::SetName { name } => {
-                let mut out = Vec::new();
-                if let Err(e) = self.config.set_name(&name) {
-                    out.push(CoreOutput::Event(HostEvent::StorageWarning {
-                        message: format!("Could not save the settings: {e}"),
-                    }));
-                }
+                let file = self.config.set_name(&name);
                 let n = normalize_name(&name);
                 let n = if n.is_empty() { self.config.name() } else { n };
                 self.sessions.set_name(n);
-                out.push(self.config_changed());
-                out
+                vec![CoreOutput::Io(IoJob::SaveConfig(file))]
             }
             HostCommand::CancelPairing { peer } => {
                 let o = self.sessions.cancel_pairing(&peer, &self.store);
                 self.apply(o)
             }
+            HostCommand::Snapshot => vec![CoreOutput::Event(self.snapshot())],
             HostCommand::Shutdown => vec![CoreOutput::Transport(TransportCommand::Shutdown)],
+        }
+    }
+
+    /// Handle the result of an [`IoJob`].
+    pub fn handle_io(&mut self, r: IoResult) -> Vec<CoreOutput> {
+        match r {
+            IoResult::Event(e) => vec![CoreOutput::Event(e)],
+            IoResult::ConfigSaved { error } => {
+                let mut out = Vec::new();
+                if let Some(e) = &error {
+                    out.push(CoreOutput::Event(HostEvent::StorageWarning {
+                        message: format!("Could not save the settings: {e}"),
+                    }));
+                }
+                out.push(CoreOutput::Event(HostEvent::ConfigChanged {
+                    log_dir: self.log_dir.clone(),
+                    name: self.sessions.name().to_owned(),
+                    persisted: error.is_none(),
+                }));
+                out
+            }
+            IoResult::PeersSaved {
+                op: PeersOp::Pair { peer, record },
+                error,
+            } => {
+                self.store.finish_upsert(&record.device_id, error.is_none());
+                let o = self.sessions.on_pairing_persisted(
+                    &peer,
+                    error.as_deref(),
+                    &self.store,
+                    self.clock.as_ref(),
+                );
+                self.apply(o)
+            }
+            IoResult::PeersSaved {
+                op: PeersOp::Forget { .. },
+                error: Some(e),
+            } => vec![CoreOutput::Event(HostEvent::StorageWarning {
+                message: format!(
+                    "Could not save that the phone was forgotten ({e}); it may reappear after a restart."
+                ),
+            })],
+            IoResult::PeersSaved { error: None, .. } => Vec::new(),
         }
     }
 
@@ -184,13 +287,6 @@ impl Core {
     pub fn tick(&mut self) -> Vec<CoreOutput> {
         let o = self.sessions.tick(self.clock.as_ref(), &self.store);
         self.apply(o)
-    }
-
-    fn config_changed(&self) -> CoreOutput {
-        CoreOutput::Event(HostEvent::ConfigChanged {
-            log_dir: self.logger.dir().to_path_buf(),
-            name: self.sessions.name().to_owned(),
-        })
     }
 
     fn apply(&mut self, outs: Vec<SessionOutput>) -> Vec<CoreOutput> {
@@ -211,14 +307,23 @@ impl Core {
                     reconnect_after,
                 })),
                 SessionOutput::Event(e) => result.push(CoreOutput::Event(e)),
+                SessionOutput::PersistPairing { peer, record } => {
+                    let peers = self.store.begin_upsert(record.clone());
+                    result.push(CoreOutput::Io(IoJob::SavePeers {
+                        op: PeersOp::Pair { peer, record },
+                        peers,
+                    }));
+                }
                 SessionOutput::Deliver {
-                    peer: _,
+                    peer,
                     device_id,
                     device_name,
                     utt,
                 } => {
                     let now = self.clock.local_now();
-                    let outcome = self.transcript.upsert(&utt, device_id, &device_name, now);
+                    let outcome =
+                        self.transcript
+                            .upsert(&utt, device_id, &device_name, &peer, now);
                     let Some(entry) = outcome.entry else {
                         // Duplicate or older revision: ignored (already acked).
                         continue;
@@ -227,11 +332,12 @@ impl Core {
                     for id in outcome.evicted {
                         result.push(CoreOutput::Event(HostEvent::EntryEvicted { id }));
                     }
-                    if let Err(e) = self.logger.log(&utt, &device_name, now) {
-                        log::warn!("{e}");
-                        result.push(CoreOutput::Event(HostEvent::LogWarning {
-                            message: e.to_string(),
-                        }));
+                    if utt.state != vq_protocol::UttState::Partial {
+                        result.push(CoreOutput::Io(IoJob::Log(LogJob {
+                            utt,
+                            device_name,
+                            arrived: now,
+                        })));
                     }
                 }
             }

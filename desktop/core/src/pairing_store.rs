@@ -2,7 +2,7 @@
 //!
 //! * `identity.json` — this desktop's `device_id` and X25519 private key.
 //!   On unix the file is mode 0600 (enforced on every load). On Windows it
-//!   lives in the per-user `%APPDATA%` config dir, whose default ACL only
+//!   lives in the per-user `%LOCALAPPDATA%` config dir, whose default ACL only
 //!   grants the user (and SYSTEM/Administrators) access; no extra ACL is set.
 //! * `peers.json` — the paired phones (`device_id`, name, public key).
 //!
@@ -123,10 +123,18 @@ struct PeersFile {
 }
 
 /// The persisted set of paired phones.
+///
+/// Writes can run off the async host loop: [`PairingStore::begin_upsert`] /
+/// [`PairingStore::begin_remove`] return the full file contents to write
+/// (with [`write_peers`]) and [`PairingStore::finish_upsert`] applies an
+/// upsert to memory once it is durable. Snapshots include every upsert
+/// still in flight, so writes completing in order never drop one another.
 #[derive(Debug)]
 pub struct PairingStore {
     path: PathBuf,
     peers: Vec<PairedPeer>,
+    /// Upserts submitted for writing, not yet confirmed.
+    pending: Vec<PairedPeer>,
 }
 
 impl PairingStore {
@@ -155,7 +163,11 @@ impl PairingStore {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e),
         };
-        Ok(Self { path, peers })
+        Ok(Self {
+            path,
+            peers,
+            pending: Vec::new(),
+        })
     }
 
     /// All paired phones.
@@ -179,10 +191,7 @@ impl PairingStore {
     /// in-memory store is left unchanged.
     pub fn upsert(&mut self, peer: PairedPeer) -> io::Result<()> {
         let mut next = self.peers.clone();
-        match next.iter_mut().find(|p| p.device_id == peer.device_id) {
-            Some(p) => *p = peer,
-            None => next.push(peer),
-        }
+        upsert_into(&mut next, peer);
         self.persist(&next)?;
         self.peers = next;
         Ok(())
@@ -204,22 +213,78 @@ impl PairingStore {
         Ok(true)
     }
 
-    fn persist(&self, peers: &[PairedPeer]) -> io::Result<()> {
-        let f = PeersFile {
-            version: 1,
-            peers: peers
-                .iter()
-                .map(|p| PeerRecord {
-                    device_id: b64::format_uuid(&p.device_id),
-                    name: p.name.clone(),
-                    public_key: b64::encode(&p.public_key),
-                    paired_at_ms: p.paired_at_ms,
-                })
-                .collect(),
-        };
-        let bytes = serde_json::to_vec_pretty(&f).map_err(|e| invalid(e.to_string()))?;
-        atomic_write_private(&self.path, &bytes)
+    /// Path of `peers.json`.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
+
+    fn disk_view(&self) -> Vec<PairedPeer> {
+        let mut v = self.peers.clone();
+        for p in &self.pending {
+            upsert_into(&mut v, p.clone());
+        }
+        v
+    }
+
+    /// Start persisting `peer`: memory is unchanged until
+    /// [`PairingStore::finish_upsert`]. Returns the contents to write.
+    pub fn begin_upsert(&mut self, peer: PairedPeer) -> Vec<PairedPeer> {
+        self.pending.push(peer);
+        self.disk_view()
+    }
+
+    /// The write started by [`PairingStore::begin_upsert`] for `device_id`
+    /// finished; on success the record is applied to memory.
+    pub fn finish_upsert(&mut self, device_id: &Uuid, ok: bool) {
+        if let Some(i) = self.pending.iter().position(|p| &p.device_id == device_id) {
+            let p = self.pending.remove(i);
+            if ok {
+                upsert_into(&mut self.peers, p);
+            }
+        }
+    }
+
+    /// Remove `device_id` from memory now (also any pending upsert for it).
+    /// Returns the contents to write, or `None` if it was not paired.
+    pub fn begin_remove(&mut self, device_id: &Uuid) -> Option<Vec<PairedPeer>> {
+        let known = self.get(device_id).is_some()
+            || self.pending.iter().any(|p| &p.device_id == device_id);
+        if !known {
+            return None;
+        }
+        self.peers.retain(|p| &p.device_id != device_id);
+        self.pending.retain(|p| &p.device_id != device_id);
+        Some(self.disk_view())
+    }
+
+    fn persist(&self, peers: &[PairedPeer]) -> io::Result<()> {
+        write_peers(&self.path, peers)
+    }
+}
+
+fn upsert_into(v: &mut Vec<PairedPeer>, peer: PairedPeer) {
+    match v.iter_mut().find(|p| p.device_id == peer.device_id) {
+        Some(p) => *p = peer,
+        None => v.push(peer),
+    }
+}
+
+/// Atomically write `peers` as `peers.json` at `path`.
+pub fn write_peers(path: &Path, peers: &[PairedPeer]) -> io::Result<()> {
+    let f = PeersFile {
+        version: 1,
+        peers: peers
+            .iter()
+            .map(|p| PeerRecord {
+                device_id: b64::format_uuid(&p.device_id),
+                name: p.name.clone(),
+                public_key: b64::encode(&p.public_key),
+                paired_at_ms: p.paired_at_ms,
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec_pretty(&f).map_err(|e| invalid(e.to_string()))?;
+    atomic_write_private(path, &bytes)
 }
 
 #[cfg(test)]
@@ -286,5 +351,33 @@ mod tests {
         assert!(s2.remove(&id).unwrap());
         assert!(!s2.remove(&id).unwrap());
         assert!(PairingStore::load(dir.path()).unwrap().peers().is_empty());
+    }
+
+    #[test]
+    fn snapshots_include_in_flight_upserts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = PairingStore::load(dir.path()).unwrap();
+        let rec = |b: u8| PairedPeer {
+            device_id: Uuid::from_bytes([b; 16]),
+            name: "P".into(),
+            public_key: [b; 32],
+            paired_at_ms: 0,
+        };
+        s.upsert(rec(1)).unwrap();
+        let snap = s.begin_upsert(rec(2));
+        assert_eq!(snap.len(), 2);
+        assert_eq!(s.peers().len(), 1, "memory waits for the write");
+        // a forget in between keeps the pending pairing on disk
+        let snap2 = s.begin_remove(&rec(1).device_id).unwrap();
+        assert_eq!(snap2, vec![rec(2)]);
+        write_peers(s.path(), &snap2).unwrap();
+        s.finish_upsert(&rec(2).device_id, true);
+        assert_eq!(s.peers(), &[rec(2)]);
+        assert_eq!(PairingStore::load(dir.path()).unwrap().peers(), &[rec(2)]);
+        // a failed write leaves memory unchanged
+        s.begin_upsert(rec(3));
+        s.finish_upsert(&rec(3).device_id, false);
+        assert_eq!(s.peers(), &[rec(2)]);
+        assert!(s.begin_remove(&rec(9).device_id).is_none());
     }
 }

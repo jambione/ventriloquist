@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use tokio::io::AsyncBufReadExt;
-use vq_host_core::config::default_config_dir;
+use vq_host_core::config::default_dev_config_dir;
 use vq_host_core::transport::tcp::TcpTransport;
 use vq_host_core::{spawn_host, CoreOptions, HostCommand, SystemClock};
 
@@ -20,7 +20,8 @@ const USAGE: &str =
     "usage: vq-host [--connect HOST:PORT] [--log-dir DIR] [--config-dir DIR] [--name NAME]\n\
   --connect     phone simulator address (default 127.0.0.1:47800)\n\
   --log-dir     log directory for this run (default: configured, else ~/Documents/Ventriloquist)\n\
-  --config-dir  identity / pairing / config directory (default: OS config dir)\n\
+  --config-dir  identity / pairing / config directory\n\
+                (default: <OS local config dir>/com.ventriloquist.desktop.dev, never the app's)\n\
   --name        display name for this run (default: configured, else host name)\n\
   env VQ_LOG=1  diagnostics on stderr";
 
@@ -87,7 +88,7 @@ async fn main() -> ExitCode {
         log::set_max_level(log::LevelFilter::Debug);
     }
     let opts = CoreOptions {
-        config_dir: args.config_dir.unwrap_or_else(default_config_dir),
+        config_dir: args.config_dir.unwrap_or_else(default_dev_config_dir),
         log_dir_override: args.log_dir,
         name_override: args.name,
         clock: Arc::new(SystemClock::new()),

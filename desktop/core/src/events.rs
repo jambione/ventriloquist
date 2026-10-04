@@ -1,13 +1,19 @@
 //! The framework-agnostic event/command API used by the Tauri app (M5) and
 //! printed as JSON lines by `vq-host` (see `desktop/core/README.md`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 
 use crate::pairing_store::PairedPeer;
 use crate::transcript::Entry;
+
+/// Paths are serialized lossily (invalid UTF-8 becomes U+FFFD), so an
+/// event can always be serialized.
+fn lossy_path<S: Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&p.to_string_lossy())
+}
 
 /// Opaque transport-level identifier of one connection to one phone
 /// (e.g. `ble:<peripheral id>` or `tcp:127.0.0.1:47800#3`).
@@ -70,9 +76,29 @@ pub enum HostEvent {
         /// Display name sent in `hello`.
         name: String,
         /// Current log directory.
+        #[serde(serialize_with = "lossy_path")]
         log_dir: PathBuf,
         /// Paired phones.
         paired_peers: Vec<PairedPeer>,
+    },
+    /// The complete current state, in answer to [`HostCommand::Snapshot`]
+    /// (e.g. after a UI reload).
+    Snapshot {
+        /// This desktop's `device_id`.
+        device_id: Uuid,
+        /// Display name sent in `hello`.
+        name: String,
+        /// Current log directory.
+        #[serde(serialize_with = "lossy_path")]
+        log_dir: PathBuf,
+        /// Paired phones.
+        paired_peers: Vec<PairedPeer>,
+        /// Last reported adapter state.
+        adapter_state: AdapterState,
+        /// Live connections.
+        peers: Vec<PeerStatus>,
+        /// Transcript entries, oldest first.
+        entries: Vec<Entry>,
     },
     /// An entry was created or changed (a newer revision was accepted).
     EntryUpserted {
@@ -163,11 +189,15 @@ pub enum HostEvent {
         /// `vq-protocol` error code (`plaintext_not_allowed`, `text_too_long`, …).
         code: String,
     },
-    /// The log could not be written. Non-blocking: transcription continues.
+    /// The log could not be written. Non-blocking: transcription continues
+    /// and failed entries are retried.
     LogWarning {
         /// Human-readable description.
         message: String,
     },
+    /// Every entry that failed to be logged has now been written: clear
+    /// the log warning banner.
+    LogRecovered,
     /// A non-log storage problem (pairing store, config).
     StorageWarning {
         /// Human-readable description.
@@ -178,12 +208,16 @@ pub enum HostEvent {
         /// New state.
         state: AdapterState,
     },
-    /// Log directory or display name changed.
+    /// Log directory or display name changed (in effect for this run).
     ConfigChanged {
         /// Current log directory.
+        #[serde(serialize_with = "lossy_path")]
         log_dir: PathBuf,
         /// Current display name.
         name: String,
+        /// Whether the change was saved to `config.json` (if not, a
+        /// `storage_warning` says why and it is lost on restart).
+        persisted: bool,
     },
 }
 
@@ -196,7 +230,8 @@ pub enum HostCommand {
         /// Phone's `device_id`.
         device_id: Uuid,
     },
-    /// Change (and persist) the log directory.
+    /// Change (and persist) the log directory. It must be absolute;
+    /// otherwise the command is refused with a `storage_warning`.
     SetLogDir {
         /// New directory.
         path: PathBuf,
@@ -211,6 +246,36 @@ pub enum HostCommand {
         /// Connection id.
         peer: PeerId,
     },
+    /// Ask for a [`HostEvent::Snapshot`] of the current state.
+    Snapshot,
     /// Stop the host.
     Shutdown,
+}
+
+/// One live connection, as reported in [`HostEvent::Snapshot`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PeerStatus {
+    /// Connection id.
+    pub peer: PeerId,
+    /// State.
+    pub state: PeerState,
+    /// The phone's `device_id`, once its `hello` arrived.
+    pub device_id: Option<Uuid>,
+    /// The phone's name, once its `hello` arrived.
+    pub name: Option<String>,
+    /// Whether our store knows this phone.
+    pub paired: bool,
+    /// The pairing code shown for this connection, if one is active.
+    pub pairing: Option<PairingStatus>,
+}
+
+/// An active pairing code (for restoring the modal).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairingStatus {
+    /// Exactly 6 ASCII digits.
+    pub code: String,
+    /// Requesting phone's name.
+    pub phone_name: String,
+    /// Seconds until expiry.
+    pub expires_in_secs: u64,
 }
