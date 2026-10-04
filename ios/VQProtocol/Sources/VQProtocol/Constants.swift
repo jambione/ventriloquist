@@ -59,6 +59,12 @@ public enum VQ {
 
     /// GATT service UUID advertised by the phone.
     public static let serviceUUID = UUID(uuidString: "77608b26-7b68-49da-bb34-7f05d158e219")!
+    /// v2.3 reversed roles (Windows hosts): service hosted by the desktop; the phone is the central.
+    public static let hostServiceUUID = UUID(uuidString: "63431f70-7c79-402d-8f72-77621879d200")!
+    /// Phone → desktop on the host service (Write with response).
+    public static let hostRxUUID = UUID(uuidString: "bb4ae2cb-17d6-4a2b-8f54-c8cbe6051923")!
+    /// Desktop → phone on the host service (Notify).
+    public static let hostTxUUID = UUID(uuidString: "ded38a53-a1e3-4113-bb80-f577d057e5f3")!
 
     /// GATT `RX` characteristic: Write (with response), desktop → phone.
     public static let rxCharacteristicUUID = UUID(uuidString: "18489603-21ac-4cf2-9d31-62bd5d9c1635")!

@@ -114,6 +114,16 @@ pub const RX_CHAR_UUID: Uuid = uuid!("18489603-21ac-4cf2-9d31-62bd5d9c1635");
 /// GATT `TX` characteristic: Notify, phone → desktop (§3.2).
 pub const TX_CHAR_UUID: Uuid = uuid!("b01127eb-8819-42a7-a0e8-bdd6159d4e2a");
 
+/// v2.3 reversed roles (Windows hosts): the GATT service the **desktop** hosts
+/// as a peripheral; the iPhone is the central. See protocol/README.md §2.3.
+pub const HOST_SERVICE_UUID: Uuid = uuid!("63431f70-7c79-402d-8f72-77621879d200");
+
+/// Phone → desktop on the host service: Write (with response).
+pub const HOST_RX_CHAR_UUID: Uuid = uuid!("bb4ae2cb-17d6-4a2b-8f54-c8cbe6051923");
+
+/// Desktop → phone on the host service: Notify.
+pub const HOST_TX_CHAR_UUID: Uuid = uuid!("ded38a53-a1e3-4113-bb80-f577d057e5f3");
+
 #[cfg(test)]
 mod tests {
     use super::*;
