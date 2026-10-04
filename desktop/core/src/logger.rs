@@ -200,6 +200,19 @@ impl Logger {
             .any(|d| d.seen.contains(key))
     }
 
+    /// Whether [`Logger::log`] would treat this revision as a duplicate
+    /// (already in the index of its arrival day or the day before). Loads
+    /// the indexes like `log` does; an unreadable index counts as "not
+    /// logged", as for `log`.
+    pub fn is_logged(&mut self, utt: &Utt, arrived: DateTime<FixedOffset>) -> bool {
+        if utt.state == UttState::Partial {
+            return false;
+        }
+        self.select_day(arrived.date_naive());
+        self.load_pending();
+        self.is_duplicate(&(utt.id, utt.rev))
+    }
+
     /// Log one accepted `final`/`edit` that arrived at `arrived` (local time).
     pub fn log(
         &mut self,

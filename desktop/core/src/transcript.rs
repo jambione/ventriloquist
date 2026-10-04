@@ -7,7 +7,7 @@
 //! * A partial whose connection closes is settled as
 //!   [`EntryState::Interrupted`] so the UI stops showing "speaking…".
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use chrono::{DateTime, FixedOffset};
 use serde::Serialize;
@@ -97,6 +97,9 @@ pub struct UpsertOutcome {
     pub entry: Option<Entry>,
     /// Ids evicted to respect the cap.
     pub evicted: Vec<Uuid>,
+    /// This was the first accepted `final` for the id (never true for
+    /// partials, edits, stale revisions, or a second `final`).
+    pub first_final: bool,
 }
 
 impl UpsertOutcome {
@@ -110,6 +113,7 @@ impl UpsertOutcome {
             kind: UpsertKind::Stale,
             entry: None,
             evicted: Vec::new(),
+            first_final: false,
         }
     }
 }
@@ -126,6 +130,9 @@ pub struct TranscriptStore {
     tombstone_order: VecDeque<Uuid>,
     /// Connection that delivered each entry whose current state is partial.
     partial_src: HashMap<Uuid, PeerId>,
+    /// Ids whose first `final` was accepted (bounded, oldest forgotten).
+    finaled: HashSet<Uuid>,
+    finaled_order: VecDeque<Uuid>,
 }
 
 impl Default for TranscriptStore {
@@ -144,7 +151,24 @@ impl TranscriptStore {
             tombstones: HashMap::new(),
             tombstone_order: VecDeque::new(),
             partial_src: HashMap::new(),
+            finaled: HashSet::new(),
+            finaled_order: VecDeque::new(),
         }
+    }
+
+    /// Remember that `id` had its first `final` accepted; true if it was
+    /// new.
+    fn mark_finaled(&mut self, id: Uuid) -> bool {
+        if !self.finaled.insert(id) {
+            return false;
+        }
+        self.finaled_order.push_back(id);
+        while self.finaled_order.len() > MAX_TOMBSTONES + MAX_ENTRIES {
+            if let Some(old) = self.finaled_order.pop_front() {
+                self.finaled.remove(&old);
+            }
+        }
+        true
     }
 
     /// Apply one `utt` (README §5.11) received on connection `peer`: keep
@@ -178,10 +202,12 @@ impl TranscriptStore {
             e.edited = utt.state == UttState::Edit;
             let entry = e.clone();
             self.track_partial(utt.id, partial, peer);
+            let first_final = utt.state == UttState::Final && self.mark_finaled(utt.id);
             return UpsertOutcome {
                 kind: UpsertKind::Updated,
                 entry: Some(entry),
                 evicted: Vec::new(),
+                first_final,
             };
         }
         if self.tombstones.get(&utt.id).is_some_and(|r| utt.rev <= *r) {
@@ -217,10 +243,12 @@ impl TranscriptStore {
                 evicted.push(old);
             }
         }
+        let first_final = utt.state == UttState::Final && self.mark_finaled(utt.id);
         UpsertOutcome {
             kind: UpsertKind::Inserted,
             entry: Some(entry),
             evicted,
+            first_final,
         }
     }
 

@@ -24,6 +24,7 @@ use crate::config::{save_config, ConfigFile};
 use crate::events::{HostEvent, PeerId};
 use crate::logger::Logger;
 use crate::pairing_store::{write_peers, PairedPeer};
+use crate::transcript::Entry;
 
 /// Log entries kept for retry at most (the oldest are dropped beyond).
 pub const MAX_PENDING_LOG: usize = 1000;
@@ -37,6 +38,12 @@ pub struct LogJob {
     pub device_name: String,
     /// Local arrival time (picks the day file and the line's time).
     pub arrived: DateTime<FixedOffset>,
+    /// Set for the first accepted `final` of an id: the worker then
+    /// reports [`HostEvent::FinalAccepted`] with this entry unless the log
+    /// already holds this (`id`, `rev`) (a re-delivery after a restart).
+    /// It is reported when the worker takes the job, whether or not the
+    /// write succeeds or is deferred for retry.
+    pub announce: Option<Entry>,
 }
 
 /// Why `peers.json` is being written.
@@ -179,6 +186,20 @@ impl IoExecutor for IoWorker {
         let mut out = Vec::new();
         match job {
             IoJob::Log(j) => {
+                if let Some(entry) = &j.announce {
+                    // Same dedupe the logger applies, decided before the
+                    // write so a failing or backed-up log cannot delay or
+                    // lose the announcement.
+                    if !self.logger.is_logged(&j.utt, j.arrived) {
+                        out.push(IoResult::Event(HostEvent::FinalAccepted {
+                            entry: entry.clone(),
+                        }));
+                    }
+                    for w in self.logger.take_warnings() {
+                        log::warn!("{w}");
+                        out.push(IoResult::Event(HostEvent::LogWarning { message: w }));
+                    }
+                }
                 if self.pending.len() >= MAX_PENDING_LOG {
                     self.pending.pop_front();
                     out.push(IoResult::Event(HostEvent::LogWarning {
@@ -240,6 +261,7 @@ mod tests {
             },
             device_name: "P".into(),
             arrived: DateTime::parse_from_rfc3339("2026-10-03T10:00:00+00:00").unwrap(),
+            announce: None,
         })
     }
 

@@ -108,6 +108,19 @@ pub enum HostEvent {
         /// The entry after the change.
         entry: Entry,
     },
+    /// The first `final` for an utterance id was accepted: emitted exactly
+    /// once per id, right after its `entry_upserted`. Never emitted for
+    /// partials, edits, duplicate or stale revisions, ids evicted from the
+    /// transcript, or a `final` the log's dedupe index (arrival day and the
+    /// day before) already holds (re-delivery after a restart). It fires
+    /// when the I/O worker takes the log job, not when the write succeeds:
+    /// a failing or deferred log write does not delay or suppress it.
+    /// The outbox never coalesces or drops it. Intended as the only
+    /// trigger for automatic delivery of text.
+    FinalAccepted {
+        /// The entry (state `final`).
+        entry: Entry,
+    },
     /// An entry was evicted from the in-memory store (500-entry cap).
     EntryEvicted {
         /// The evicted entry's id.

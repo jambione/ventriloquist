@@ -55,6 +55,7 @@ Events:
 | `pairing_result` | `peer`, `device_id`, `phone_name`, `ok`, `attempts_remaining` |
 | `paired_peers_changed` | `peers` |
 | `entry_upserted` | `entry`: `{id, rev, state ("partial"/"final"/"edit"/"interrupted"), text, ts, device_id, device_name, first_received_at, received_at (RFC 3339 local), time ("HH:MM:SS"), partial (bool), edited (bool)}` |
+| `final_accepted` | `entry` (same shape as in `entry_upserted`, `state:"final"`). Emitted **exactly once per utterance id**, when the first `final` for the id is accepted (right after its `entry_upserted`). Never for partials, edits, duplicate or stale revisions, ids evicted from the transcript, or a `final` that the log's dedupe index (arrival day and the day before) already holds, as when the phone re-delivers it after a host restart. It fires when the I/O worker takes the log job, **not** when the write succeeds, so a failing or deferred log write (retry queue) neither delays nor suppresses it, and later retries never repeat it. If the I/O queue overflows, it is still emitted (the index cannot be consulted then). The outbox never coalesces or drops it. It is the only trigger intended for automatic delivery of text. |
 | `entry_evicted` | `id` |
 | `peer_error` | `peer`, `code`, `message`, `authenticated` |
 | `version_mismatch` | `peer`, `device` (the device to update) |
@@ -66,7 +67,7 @@ Events:
 
 `entry_upserted` is emitted only when a revision is **accepted**, meaning its `rev` is higher than any seen for that `id` in this run (evicted ids included, D8). Duplicate or older revisions are acked to the phone but produce no event. The one exception: when a connection closes, its live partials are re-emitted once with `state:"interrupted"` and `partial:false`.
 
-The event channel is bounded. While a consumer is slow, queued partial updates of the same entry and repeated `message_rejected` events are coalesced (D11). A UI that reloads should send `snapshot`.
+The event channel is bounded. While a consumer is slow, queued partial updates of the same entry and repeated `message_rejected` events are coalesced (D11); `final_accepted` is never coalesced or dropped. A UI that reloads should send `snapshot`.
 
 Example:
 

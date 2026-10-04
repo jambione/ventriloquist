@@ -99,16 +99,25 @@ fn io_thread(
 }
 
 /// What to report when the I/O queue is full (the worker is far behind).
-fn io_overflow(job: IoJob) -> IoResult {
+fn io_overflow(job: IoJob) -> Vec<IoResult> {
     let busy = "the disk is not keeping up".to_owned();
-    match job {
-        IoJob::Log(j) => IoResult::Event(HostEvent::LogWarning {
-            message: format!(
-                "log entry id={} rev={} dropped: {busy}",
-                &j.utt.id.simple().to_string()[..8],
-                j.utt.rev
-            ),
-        }),
+    let one = match job {
+        IoJob::Log(j) => {
+            let mut v = Vec::new();
+            // The log index cannot be consulted, but the final was
+            // accepted: announce it once rather than lose it.
+            if let Some(entry) = j.announce {
+                v.push(IoResult::Event(HostEvent::FinalAccepted { entry }));
+            }
+            v.push(IoResult::Event(HostEvent::LogWarning {
+                message: format!(
+                    "log entry id={} rev={} dropped: {busy}",
+                    &j.utt.id.simple().to_string()[..8],
+                    j.utt.rev
+                ),
+            }));
+            return v;
+        }
         IoJob::SetLogDir(dir) => IoResult::Event(HostEvent::LogWarning {
             message: format!("cannot switch the log folder to {}: {busy}", dir.display()),
         }),
@@ -117,7 +126,8 @@ fn io_overflow(job: IoJob) -> IoResult {
             error: Some(busy),
         },
         IoJob::SaveConfig(_) => IoResult::ConfigSaved { error: Some(busy) },
-    }
+    };
+    vec![one]
 }
 
 async fn run(
@@ -147,7 +157,7 @@ async fn run(
                     Err(std_mpsc::TrySendError::Full(job))
                     | Err(std_mpsc::TrySendError::Disconnected(job)) => {
                         log::warn!("I/O queue full or stopped");
-                        refused.push(io_overflow(job));
+                        refused.extend(io_overflow(job));
                     }
                 },
             }

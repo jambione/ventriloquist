@@ -363,15 +363,21 @@ impl Core {
                         // Duplicate or older revision: ignored (already acked).
                         continue;
                     };
+                    let outcome_entry = Some(entry.clone());
                     result.push(CoreOutput::Event(HostEvent::EntryUpserted { entry }));
                     for id in outcome.evicted {
                         result.push(CoreOutput::Event(HostEvent::EntryEvicted { id }));
                     }
                     if utt.state != vq_protocol::UttState::Partial {
+                        let announce = outcome
+                            .first_final
+                            .then(|| outcome_entry.clone())
+                            .flatten();
                         result.push(CoreOutput::Io(IoJob::Log(LogJob {
                             utt,
                             device_name,
                             arrived: now,
+                            announce,
                         })));
                     }
                 }

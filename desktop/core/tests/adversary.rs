@@ -401,9 +401,15 @@ fn k20_cap_of_500_through_core_evicts_oldest_after_upsert() {
         let f = phone.utt(*id, 0, UttState::Final, "x");
         h.frames(P, f);
     }
-    let tail: Vec<String> = h.events.iter().rev().take(2).map(event_name).collect();
+    // `final_accepted` follows from the I/O worker; ignore it here.
+    let events: Vec<&HostEvent> = h
+        .events
+        .iter()
+        .filter(|e| !matches!(e, HostEvent::FinalAccepted { .. }))
+        .collect();
+    let tail: Vec<String> = events.iter().rev().take(2).map(|e| event_name(e)).collect();
     assert_eq!(tail, vec!["entry_evicted", "entry_upserted"]);
-    assert!(matches!(h.events.last(), Some(HostEvent::EntryEvicted { id }) if *id == ids[0]));
+    assert!(matches!(events.last(), Some(HostEvent::EntryEvicted { id }) if *id == ids[0]));
     assert_eq!(h.core.transcript().len(), MAX_ENTRIES);
 }
 
