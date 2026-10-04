@@ -54,6 +54,7 @@ pub struct Core {
     config: ConfigStore,
     log_dir: PathBuf,
     adapter_state: AdapterState,
+    devices_seen: u64,
     startup_warnings: Vec<String>,
     /// Latest log-write warning while the logger is failing (R2).
     log_warning: Option<String>,
@@ -112,6 +113,7 @@ impl Core {
             config,
             log_dir,
             adapter_state: AdapterState::Unknown,
+            devices_seen: 0,
             startup_warnings: config_warning.into_iter().collect(),
             log_warning: None,
             _lock: lock,
@@ -157,6 +159,7 @@ impl Core {
             log_dir: self.log_dir.clone(),
             paired_peers: self.store.peers().to_vec(),
             adapter_state: self.adapter_state,
+            devices_seen: self.devices_seen,
             peers: self.sessions.statuses(&self.store, self.clock.as_ref()),
             entries: self.transcript.entries().cloned().collect(),
             log_warning: self.log_warning.clone(),
@@ -214,6 +217,10 @@ impl Core {
             TransportEvent::Adapter(state) => {
                 self.adapter_state = state;
                 vec![CoreOutput::Event(HostEvent::AdapterState { state })]
+            }
+            TransportEvent::DevicesSeen(count) => {
+                self.devices_seen = count;
+                vec![CoreOutput::Event(HostEvent::DevicesSeen { count })]
             }
         }
     }

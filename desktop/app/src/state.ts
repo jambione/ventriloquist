@@ -97,6 +97,8 @@ export interface AppState {
   configPersisted: boolean;
   pairedPeers: PairedPeer[];
   adapter: AdapterState;
+  /** Advertisements seen since the current scan started (diagnostics). */
+  devicesSeen: number;
   /** Live connections (closed ones are removed). */
   peers: ReadonlyMap<string, PeerInfo>;
   entries: ReadonlyMap<string, Entry>;
@@ -108,7 +110,6 @@ export interface AppState {
    * append-only, so it is shared (mutated in place) between state versions
    * to keep eviction O(1). Upserts at or below it are ignored. */
   evicted: ReadonlyMap<string, number>;
-  search: string;
   /** The code on screen: the newest of `codes`. */
   pairing: PairingModal | null;
   /** Every still-valid code, oldest first (one per connection). */
@@ -126,7 +127,6 @@ export interface AppState {
 
 export type Action =
   | { type: "host"; event: HostEvent; now: number }
-  | { type: "search"; query: string }
   | { type: "clear_view" }
   | { type: "tick"; now: number }
   | { type: "dismiss_pairing" }
@@ -151,12 +151,12 @@ export function initialState(): AppState {
     configPersisted: true,
     pairedPeers: [],
     adapter: "unknown",
+    devicesSeen: 0,
     peers: new Map(),
     entries: new Map(),
     order: [],
     cleared: new Map(),
     evicted: new Map(),
-    search: "",
     pairing: null,
     codes: [],
     logWarning: null,
@@ -172,8 +172,6 @@ export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "host":
       return onHostEvent(state, action.event, action.now);
-    case "search":
-      return state.search === action.query ? state : { ...state, search: action.query };
     case "clear_view":
       return clearView(state);
     case "tick":
@@ -461,6 +459,8 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
       return state.logWarning === null ? state : { ...state, logWarning: null };
     case "storage_warning":
       return addNotice(state, "storage", clip(ev.message, MAX_NOTICE_TEXT));
+    case "devices_seen":
+      return state.devicesSeen === ev.count ? state : { ...state, devicesSeen: ev.count };
     case "adapter_state":
       return state.adapter === ev.state ? state : { ...state, adapter: ev.state };
     case "config_changed":
@@ -540,6 +540,7 @@ function applySnapshot(
     logDir: snap.log_dir,
     pairedPeers: snap.paired_peers,
     adapter: snap.adapter_state,
+    devicesSeen: snap.devices_seen ?? 0,
     peers,
     entries,
     order: order.length > MAX_ENTRIES ? order.slice(-MAX_ENTRIES) : order,
@@ -611,40 +612,17 @@ export function isCleared(state: AppState, e: Entry): boolean {
   return rev !== undefined && e.rev <= rev;
 }
 
-const foldCache = new WeakMap<Entry, string>();
-// eslint-disable-next-line no-control-regex
-const ASCII_ONLY = /^[\u0000-\u007f]*$/;
-
-/** Case- and accent-insensitive key for searching: NFKD, combining marks
- * removed, then lower-cased, so "İSTANBUL" ("i̇" after lower-casing alone)
- * matches "istanbul". Locale-independent. */
-export function fold(s: string): string {
-  return ASCII_ONLY.test(s) ? s.toLowerCase() : s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
-}
-
-/** Case-insensitive substring match of the entry text (see {@link fold}).
- * The folded text is cached per entry object. */
-export function matchesSearch(e: Entry, query: string): boolean {
-  if (query === "") return true;
-  let f = foldCache.get(e);
-  if (f === undefined) {
-    f = fold(e.text);
-    foldCache.set(e, f);
-  }
-  return f.includes(fold(query));
-}
-
-/** Entries on screen, oldest first: not cleared, matching the search. */
+/** Entries on screen, oldest first: not cleared. */
 export function visibleEntries(state: AppState): Entry[] {
   const out: Entry[] = [];
   for (const id of state.order) {
     const e = state.entries.get(id);
-    if (e !== undefined && !isCleared(state, e) && matchesSearch(e, state.search)) out.push(e);
+    if (e !== undefined && !isCleared(state, e)) out.push(e);
   }
   return out;
 }
 
-/** Entries not hidden by Clear view (search ignored). */
+/** Entries not hidden by Clear view. */
 export function entriesInView(state: AppState): number {
   let n = 0;
   for (const id of state.order) {

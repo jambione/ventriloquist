@@ -94,7 +94,10 @@ export function connectionStatus(state: AppState, platform: Platform): StatusVie
   if (unpaired.length > 0) {
     return { tone: "busy", text: `${names(unpaired)} found — pair from the phone` };
   }
-  if (state.adapter === "scanning") return { tone: "idle", text: "Scanning…" };
+  if (state.adapter === "scanning") {
+    const n = state.devicesSeen;
+    return { tone: "idle", text: `Scanning… (${n} ${n === 1 ? "device" : "devices"} seen)` };
+  }
   return { tone: "idle", text: "Starting Bluetooth…" };
 }
 

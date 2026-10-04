@@ -10,7 +10,6 @@ import {
   copyText,
   entriesInView,
   initialState,
-  matchesSearch,
   reduce,
   visibleEntries,
   type AppState,
@@ -355,25 +354,6 @@ describe("scale", () => {
     let s = ready();
     for (let i = 0; i < 1000; i++) s = feed(s, [conn(`p${i}`, "hello_exchanged", `phone-${i}-${"n".repeat(50)}`)]);
     expect(connectionStatus(s, "mac").text.length).toBeLessThan(1000);
-  });
-
-  it("search over 500 x 32 KB entries completes in < 50 ms", () => {
-    let s = ready();
-    for (let i = 0; i < 500; i++) {
-      s = feed(s, [up(entry(`e${i}`, 1, "final", "Lorem Ipsum ".repeat(2700).slice(0, 32_000)))]);
-    }
-    s = reduce(s, { type: "search", query: "needle" });
-    visibleEntries(s); // warm
-    const t = performance.now();
-    const v = visibleEntries(s);
-    const ms = performance.now() - t;
-    expect(v.length).toBe(0);
-    expect(ms).toBeLessThan(50);
-  });
-
-  it("search is case-insensitive for non-ASCII with length-changing lowercase", () => {
-    // "İ".toLowerCase() is "i̇" (2 code units); the match must still work.
-    expect(matchesSearch(entry("a", 1, "final", "İSTANBUL"), "istanbul")).toBe(true);
   });
 
   it("Clear view then edits re-show only the edited entry", () => {

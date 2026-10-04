@@ -63,6 +63,7 @@ Events:
 | `log_warning` / `storage_warning` | `message` |
 | `log_recovered` | (none): every entry that failed to log has now been written |
 | `adapter_state` | `state` (`unknown`/`no_adapter`/`powered_off`/`unauthorized`/`scanning`; TCP reports `scanning`) |
+| `devices_seen` | `count`: BLE advertisements seen since the current scan started (diagnostics; at most one event per second, coalesced; `snapshot` carries it as `devices_seen`) |
 | `config_changed` | `log_dir`, `name`, `persisted` (bool) |
 
 `entry_upserted` is emitted only when a revision is **accepted**, meaning its `rev` is higher than any seen for that `id` in this run (evicted ids included, D8). Duplicate or older revisions are acked to the phone but produce no event. The one exception: when a connection closes, its live partials are re-emitted once with `state:"interrupted"` and `partial:false`.
@@ -112,3 +113,10 @@ The crate keeps to the portable APIs:
 - Config files live in the per-user, non-roaming `%LOCALAPPDATA%` and rely on its ACL.
 
 No Windows build is run by the agents.
+
+## BLE scanning and diagnostics
+
+- The scan starts with an **empty `ScanFilter`**: nothing is filtered by the OS or by btleplug (some Windows drivers drop filtered advertisements; btleplug's WinRT backend filters in software). `transport::ble` matches every advertisement itself with `policy::is_candidate(services, local_name)`: the advertised services contain the Ventriloquist service UUID **or** the local name is `Ventriloquist` (iOS may put a 128-bit UUID in the scan response or the overflow area).
+- A name-only match is verified after connecting (`discover_services`). If the GATT service is missing, the device is dropped and not retried for 5 minutes (`policy::NAME_ONLY_BLOCK`).
+- The transport logs at info (the desktop app writes these to its log file): the adapter (and `adapter_info`), scan start/stop/errors, every discovered device once per id per 60 s (id, local name, RSSI, advertised services, matched), every connect attempt, the services and characteristics found, the subscribe result and every error with its Debug text.
+- `TransportEvent::DevicesSeen(n)` / `HostEvent::DevicesSeen` carry the advertisement count so the UI can show "Scanning… (N devices seen)".

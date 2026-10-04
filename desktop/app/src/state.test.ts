@@ -166,16 +166,14 @@ describe("snapshot", () => {
     expect(ended.pairing?.code).toBe("111111");
   });
 
-  it("a later snapshot rebuilds entries but keeps Clear view and search", () => {
+  it("a later snapshot rebuilds entries but keeps Clear view", () => {
     let s = ready(up(entry("a", 1, "final", "alpha")));
     s = reduce(s, { type: "clear_view" });
-    s = reduce(s, { type: "search", query: "A" });
     s = reduce(
       s,
       host(snapshot({ entries: [entry("a", 1, "final", "alpha"), entry("b", 1, "final", "beta")] })),
     );
     expect(texts(s)).toEqual(["beta"]);
-    expect(s.search).toBe("A");
   });
 
   it("stays fatal", () => {
@@ -245,21 +243,13 @@ describe("entries", () => {
   });
 });
 
-describe("search and clear view", () => {
+describe("clear view", () => {
   const base = (): AppState =>
     ready(
       up(entry("a", 1, "final", "Kubectl get pods")),
       up(entry("b", 1, "final", "git status")),
       up(entry("c", 1, "final", "KUBECTL logs")),
     );
-
-  it("filters case-insensitively by substring", () => {
-    const s = reduce(base(), { type: "search", query: "kubeCTL" });
-    expect(texts(s)).toEqual(["Kubectl get pods", "KUBECTL logs"]);
-    expect(texts(reduce(s, { type: "search", query: "" }))).toHaveLength(3);
-    expect(texts(reduce(s, { type: "search", query: "t st" }))).toEqual(["git status"]);
-    expect(texts(reduce(s, { type: "search", query: "nothing" }))).toEqual([]);
-  });
 
   it("clear view hides what is on screen; new entries and new revisions show", () => {
     let s = reduce(base(), { type: "clear_view" });
@@ -269,12 +259,6 @@ describe("search and clear view", () => {
     s = reduce(s, host(up(entry("d", 1, "final", "new one"))));
     s = reduce(s, host(up(entry("b", 2, "edit", "git status -s"))));
     expect(texts(s)).toEqual(["git status -s", "new one"]);
-  });
-
-  it("search applies only to entries in view", () => {
-    let s = reduce(base(), { type: "clear_view" });
-    s = reduce(s, { type: "search", query: "kubectl" });
-    expect(texts(s)).toEqual([]);
   });
 
   it("a live partial cleared mid-utterance comes back with its next revision", () => {
@@ -431,5 +415,16 @@ describe("review fixes", () => {
   it("a newer revision of an evicted entry is accepted again", () => {
     const s = ready(up(entry("a", 2, "final", "x")), { event: "entry_evicted", id: "a" }, up(entry("a", 3, "edit", "y")));
     expect(texts(s)).toEqual(["y"]);
+  });
+});
+
+describe("devices seen", () => {
+  it("follows devices_seen events and the snapshot", () => {
+    let s = ready();
+    expect(s.devicesSeen).toBe(0);
+    s = reduce(s, host({ event: "devices_seen", count: 7 }));
+    expect(s.devicesSeen).toBe(7);
+    const fresh = reduce(initialState(), host(snapshot({ devices_seen: 9 })));
+    expect(fresh.devicesSeen).toBe(9);
   });
 });

@@ -54,6 +54,37 @@ pub fn idle_drop_due(secure: bool, last_pairing_activity: Duration, now: Duratio
     !secure && now.saturating_sub(last_pairing_activity) >= IDLE_DROP_AFTER
 }
 
+/// The local name the iOS app advertises. iOS may move the 128-bit service
+/// UUID into the scan response or the overflow area, so a device with this
+/// name is also treated as a candidate.
+pub const BLE_LOCAL_NAME: &str = "Ventriloquist";
+
+/// A name-only candidate that turned out not to have the Ventriloquist GATT
+/// service is not tried again for this long.
+pub const NAME_ONLY_BLOCK: Duration = Duration::from_secs(5 * 60);
+
+/// Every discovered device is logged at most once per id per this long.
+pub const DEVICE_LOG_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Whether an advertisement is from (probably) a Ventriloquist phone: it
+/// advertises [`vq_protocol::SERVICE_UUID`] **or** its local name is
+/// [`BLE_LOCAL_NAME`].
+pub fn is_candidate(services: &[uuid::Uuid], local_name: Option<&str>) -> bool {
+    services.contains(&vq_protocol::SERVICE_UUID) || local_name == Some(BLE_LOCAL_NAME)
+}
+
+/// A candidate with the name but not the service UUID in its advertisement:
+/// the GATT service must be verified after connecting.
+pub fn is_name_only(services: &[uuid::Uuid], local_name: Option<&str>) -> bool {
+    is_candidate(services, local_name) && !services.contains(&vq_protocol::SERVICE_UUID)
+}
+
+/// Whether a device last logged `since_last_log` ago (None: never) is logged
+/// again.
+pub fn device_log_due(since_last_log: Option<Duration>) -> bool {
+    since_last_log.is_none_or(|d| d >= DEVICE_LOG_INTERVAL)
+}
+
 /// A BLE peripheral slot (rotating private addresses make every
 /// advertisement look like a new device) is forgotten when it has not been
 /// seen advertising, nor been connected, for this long.
@@ -96,6 +127,35 @@ pub fn adapter_reacquire_due(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vq_protocol::SERVICE_UUID;
+
+    #[test]
+    fn candidate_by_service_or_by_name() {
+        let other = uuid::Uuid::from_u128(1);
+        assert!(is_candidate(&[SERVICE_UUID], None));
+        assert!(is_candidate(&[other, SERVICE_UUID], Some("Something")));
+        assert!(is_candidate(&[], Some("Ventriloquist")));
+        assert!(is_candidate(&[other], Some("Ventriloquist")));
+        assert!(!is_candidate(&[], None));
+        assert!(!is_candidate(&[other], Some("ventriloquist")));
+        assert!(!is_candidate(&[other], Some("Ventriloquist 2")));
+        assert!(!is_candidate(&[], Some("")));
+    }
+
+    #[test]
+    fn name_only_means_candidate_without_the_uuid() {
+        assert!(is_name_only(&[], Some("Ventriloquist")));
+        assert!(!is_name_only(&[SERVICE_UUID], Some("Ventriloquist")));
+        assert!(!is_name_only(&[SERVICE_UUID], None));
+        assert!(!is_name_only(&[], Some("Other")));
+    }
+
+    #[test]
+    fn device_logging_is_once_per_minute() {
+        assert!(device_log_due(None));
+        assert!(!device_log_due(Some(Duration::from_secs(59))));
+        assert!(device_log_due(Some(Duration::from_secs(60))));
+    }
 
     #[test]
     fn backoff_schedule() {

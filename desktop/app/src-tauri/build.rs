@@ -15,11 +15,15 @@ fn main() {
             "slots_snapshot",
             "select_slot",
             "unbind_slot",
+            "clear_all_slots",
             "set_slot_settings",
             "send_to_active",
             "set_hotkey_modifiers",
             "accessibility_status",
             "open_accessibility_settings",
+            "diagnostics_info",
+            "open_diagnostics_file",
+            "open_diagnostics_folder",
         ]),
     ))
     .expect("tauri build script failed");

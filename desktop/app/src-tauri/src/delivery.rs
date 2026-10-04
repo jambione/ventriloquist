@@ -129,6 +129,7 @@ enum Cmd {
     Bind(SlotId),
     Select(u8),
     Unbind(SlotId),
+    ClearAll,
     SetSettings { slot: SlotId, auto_submit: Option<bool>, newline_mode: Option<String>, follow_title_changes: Option<bool> },
     SetHotkeys(HotkeyView),
     Rematch,
@@ -339,6 +340,11 @@ impl DeliveryManager {
         Ok(())
     }
 
+    /// Clear every binding and set the active slot to Off.
+    pub fn clear_all(&self) {
+        let _ = self.tx.send(Cmd::ClearAll);
+    }
+
     pub fn set_settings(
         &self,
         n: u8,
@@ -447,6 +453,7 @@ impl Worker {
                 Cmd::Bind(slot) => self.bind(slot),
                 Cmd::Select(d) => self.select(d),
                 Cmd::Unbind(slot) => self.unbind(slot),
+                Cmd::ClearAll => self.clear_all(),
                 Cmd::SetSettings { slot, auto_submit, newline_mode, follow_title_changes } => {
                     self.set_settings(slot, auto_submit, newline_mode, follow_title_changes)
                 }
@@ -621,6 +628,19 @@ impl Worker {
             self.save();
             self.publish();
         }
+    }
+
+    fn clear_all(&mut self) {
+        for slot in SlotId::all() {
+            if self.store.unbind(slot) {
+                self.inj.release(slot);
+            }
+        }
+        self.status.clear();
+        self.store.select(0);
+        log::info!("bindings: all cleared");
+        self.save();
+        self.publish();
     }
 
     fn set_settings(
@@ -1223,6 +1243,26 @@ mod tests {
         let v = r.mgr.snapshot();
         assert_eq!((v.active, v.slots.len()), (0, 0));
         assert!(lock(&r.fake.0).assigned.is_empty());
+    }
+
+    #[test]
+    fn clear_all_clears_every_slot_goes_off_releases_and_persists() {
+        let r = rig();
+        r.bind(1, "Notes");
+        r.bind(4, "Teams");
+        r.bind(9, "Code");
+        r.mgr.clear_all();
+        r.mgr.flush();
+        let v = r.mgr.snapshot();
+        assert_eq!((v.active, v.slots.len()), (0, 0));
+        assert!(lock(&r.fake.0).assigned.is_empty());
+        let (stored, _) = BindingsStore::load(&r.dir);
+        assert_eq!(stored.records().count(), 0);
+        assert_eq!(stored.active(), vq_inject::ActiveSlot::Off);
+        // Clearing again (nothing bound) is harmless.
+        r.mgr.clear_all();
+        r.mgr.flush();
+        assert_eq!(r.mgr.snapshot().slots.len(), 0);
     }
 
     #[test]

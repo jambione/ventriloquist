@@ -49,6 +49,8 @@ pub enum TransportEvent {
     },
     /// Adapter state changed.
     Adapter(AdapterState),
+    /// Advertisements seen since the current scan started (diagnostics).
+    DevicesSeen(u64),
 }
 
 /// Something the host wants the transport to do.

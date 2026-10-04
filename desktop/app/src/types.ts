@@ -56,6 +56,7 @@ export type HostEvent =
       log_dir: string;
       paired_peers: PairedPeer[];
       adapter_state: AdapterState;
+      devices_seen?: number;
       peers: PeerStatus[];
       entries: Entry[];
       /** Latest log-write warning while the log is failing, else null. */
@@ -97,6 +98,7 @@ export type HostEvent =
   | { event: "log_recovered" }
   | { event: "storage_warning"; message: string }
   | { event: "adapter_state"; state: AdapterState }
+  | { event: "devices_seen"; count: number }
   | { event: "config_changed"; log_dir: string; name: string; persisted: boolean };
 
 // ---- bindings (SPEC_V2; desktop/app/src-tauri/src/delivery.rs). Every app

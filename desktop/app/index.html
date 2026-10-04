@@ -13,14 +13,6 @@
         <span class="status-text" id="status-text">Starting…</span>
       </div>
       <div class="tools">
-        <input
-          type="search"
-          id="search"
-          placeholder="Search"
-          aria-label="Search transcripts"
-          autocomplete="off"
-          spellcheck="false"
-        />
         <button type="button" id="clear-view" title="Clear the on-screen list (the log is not touched)">
           Clear view
         </button>
@@ -79,6 +71,19 @@
           <fieldset class="mods" id="mods-bind"></fieldset>
           <ul id="bound-slots" class="paired"></ul>
           <p id="bound-empty" class="muted">No bound slots. Focus a text box in another app and press the bind hotkey.</p>
+          <div class="row-buttons">
+            <button type="button" id="clear-all-bindings" class="danger" hidden>Clear all bindings</button>
+          </div>
+        </section>
+
+        <section id="diagnostics">
+          <h3>Diagnostics</h3>
+          <p class="muted">Log file (always on, for troubleshooting):</p>
+          <p class="path" id="diag-path">…</p>
+          <div class="row-buttons">
+            <button type="button" id="open-diag-file">Open log file</button>
+            <button type="button" id="open-diag-folder">Open log folder</button>
+          </div>
         </section>
 
         <section>

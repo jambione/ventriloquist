@@ -46,6 +46,12 @@ export const backend = {
   /** 0 = Off. */
   selectSlot: (slot: number): Promise<void> => invoke("select_slot", { slot }),
   unbindSlot: (slot: number): Promise<void> => invoke("unbind_slot", { slot }),
+  /** Clear every binding; the active slot becomes Off. */
+  clearAllSlots: (): Promise<void> => invoke("clear_all_slots"),
+  diagnosticsInfo: (): Promise<{ log_path: string | null; error: string | null }> =>
+    invoke("diagnostics_info"),
+  openDiagnosticsFile: (): Promise<void> => invoke("open_diagnostics_file"),
+  openDiagnosticsFolder: (): Promise<void> => invoke("open_diagnostics_folder"),
   setSlotSettings: (
     slot: number,
     settings: { autoSubmit?: boolean; newlineMode?: NewlineMode; followTitleChanges?: boolean },

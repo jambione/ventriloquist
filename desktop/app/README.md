@@ -11,7 +11,8 @@ cargo tauri build   # bundle: target/release/bundle/macos/Ventriloquist.app
 
 - **macOS: launch the bundle with `open target/release/bundle/macos/Ventriloquist.app` (or from Finder).** Do not run `Contents/MacOS/Ventriloquist` from a terminal: macOS attributes Bluetooth use to the responsible process (the terminal), which has no usage description, and aborts the app (TCC). `cargo tauri dev` can hit the same abort; grant Bluetooth to the terminal app, or test the bundle (`cargo tauri build --debug`).
 - Only one instance runs: a second launch focuses the first window (`tauri-plugin-single-instance`), and the core also locks `<config dir>/.lock`.
-- `VQ_LOG=1` prints diagnostics on stderr (Debug for this app and the core, Info for dependencies).
+- **Always-on log file** (all OSes): `<config dir>/logs/ventriloquist.log`, rotated at 2 MB, 3 files kept (`.1`, `.2`). Windows: `%LOCALAPPDATA%\com.ventriloquist.desktop\logs\ventriloquist.log`; macOS: `~/Library/Application Support/com.ventriloquist.desktop/logs/ventriloquist.log`. Info level; the app version, OS version and Bluetooth adapter are logged at start-up, plus every BLE scan, device, connect and error. Settings → Diagnostics shows the path and opens the file or folder.
+- `VQ_LOG=1` switches this log to Debug for this app and the core (Info for dependencies) and also prints it on stderr.
 
 ## Notes
 

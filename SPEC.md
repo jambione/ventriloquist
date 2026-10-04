@@ -41,7 +41,7 @@ Revised 2026-10-04 to reflect decisions recorded in docs/SPEC_QUESTIONS.md durin
 | Multiple desktops | Phone chooses one from a list and remembers the last one |
 | Phone UI | Live transcript, edit after stopping (sends a correction) |
 | Edit vs. live | Stream live; an edit after stopping replaces the desktop entry |
-| Desktop UI | Scrolling list (newest at bottom), Copy button per entry, search, clear view |
+| Desktop UI | Scrolling list (newest at bottom), Copy button per entry, clear view |
 | Log | Daily Markdown files in a configurable directory |
 | Language | en-US plus a user-editable custom vocabulary |
 | Background | Foreground only |
@@ -200,14 +200,14 @@ Rules:
 ## 6. Desktop app (Tauri v2, macOS + Windows)
 
 ### 6.1 Window
-- **Toolbar:** connection status (e.g. "● Connected to Jon's iPhone (secure)", "Scanning…", "Bluetooth off"), a search field, a **Clear view** button, and a **Settings** gear.
+- **Toolbar:** connection status (e.g. "● Connected to Jon's iPhone (secure)", "Scanning… (N devices seen)", "Bluetooth off"), a **Clear view** button, and a **Settings** gear.
 - **Transcript list:**
   - Chat-like, with the newest entry at the bottom. The list auto-scrolls to the bottom only if the user is already at the bottom.
   - Each entry shows its time (HH:MM:SS), device name, and text in a **monospace** font. Text is selectable.
   - A **Copy** button per entry copies the exact text, with no trailing newline, and shows "Copied ✓" for 1.5 s.
   - A live partial entry is shown dimmed and italic with a "speaking…" indicator. It becomes normal when it turns `final`.
   - An entry replaced by an `edit` shows an "edited" badge.
-- **Search:** case- and accent-insensitive substring filter over the entry text (not the device name) of the entries Clear view has not hidden.
+- **No search field.** (Removed by owner decision, 2026-10-04; docs/SPEC_QUESTIONS.md O2.)
 - **Clear view:** empties the on-screen list only. It never touches the log. A hidden entry reappears when a higher revision of it arrives (SPEC_QUESTIONS W3).
 - **Pairing modal:** shows the 6-digit code in large type, the requesting phone's name, a countdown, and a Cancel button. A wrong code keeps the modal open with the attempts left; it closes on success, on invalidation, on expiry, on disconnect or on Cancel (W4). When a code is shown, the window is unminimized and requests attention (W13).
 - **Single instance:** a second launch focuses the existing window (`tauri-plugin-single-instance`), and an exclusive lock on `<config dir>/.lock` stops a second core, including `vq-host` (SPEC_QUESTIONS W9).

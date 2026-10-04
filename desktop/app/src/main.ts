@@ -46,7 +46,6 @@ const dom = {
   main: el("list"),
   statusDot: el("status-dot"),
   statusText: el("status-text"),
-  search: el<HTMLInputElement>("search"),
   clearView: el<HTMLButtonElement>("clear-view"),
   openSettings: el<HTMLButtonElement>("open-settings"),
   banners: el("banners"),
@@ -59,6 +58,10 @@ const dom = {
   configNotSaved: el("config-not-saved"),
   pickLogDir: el<HTMLButtonElement>("pick-log-dir"),
   openLogFolder: el<HTMLButtonElement>("open-log-folder"),
+  clearAll: el<HTMLButtonElement>("clear-all-bindings"),
+  diagPath: el("diag-path"),
+  openDiagFile: el<HTMLButtonElement>("open-diag-file"),
+  openDiagFolder: el<HTMLButtonElement>("open-diag-folder"),
   paired: el<HTMLUListElement>("paired"),
   pairedEmpty: el("paired-empty"),
   nameForm: el<HTMLFormElement>("name-form"),
@@ -269,10 +272,7 @@ function renderList(): void {
   }
   if (visible.length === 0) {
     dom.empty.hidden = false;
-    dom.empty.textContent =
-      state.search !== "" && entriesInView(state) > 0
-        ? "No entries match the search."
-        : "Dictate on your iPhone — the text appears here.";
+    dom.empty.textContent = "Dictate on your iPhone — the text appears here.";
   } else {
     dom.empty.hidden = true;
   }
@@ -554,10 +554,11 @@ function renderMenu(): void {
   const unbind = document.createElement("button");
   unbind.type = "button";
   unbind.className = "danger";
-  unbind.textContent = "Unbind";
+  unbind.textContent = "✕ Clear";
+  unbind.title = "Clear this binding";
   unbind.addEventListener("click", () => {
     closeMenu();
-    backend.unbindSlot(n).catch((e: unknown) => report("Could not unbind the slot", e));
+    backend.unbindSlot(n).catch((e: unknown) => report("Could not clear the binding", e));
   });
   items.push(unbind);
   dom.slotMenu.replaceChildren(...items);
@@ -606,7 +607,7 @@ function renderBindingsSettings(): void {
     const unbind = document.createElement("button");
     unbind.type = "button";
     unbind.className = "danger";
-    unbind.textContent = "Unbind";
+    unbind.textContent = "✕ Clear binding";
     unbind.addEventListener("click", () => {
       backend.unbindSlot(s.slot).catch((e: unknown) => report("Could not unbind the slot", e));
     });
@@ -615,7 +616,39 @@ function renderBindingsSettings(): void {
   }
   dom.boundSlots.replaceChildren(...items);
   dom.boundEmpty.hidden = items.length > 0;
+  dom.clearAll.hidden = items.length === 0;
+  dom.clearAll.textContent = clearAllTimer === undefined ? "Clear all bindings" : "Really clear all?";
 }
+
+/** Two-click confirm (like Forget): the first click arms the button for
+ * [`FORGET_CONFIRM_MS`], the second clears every binding and sets Off. */
+let clearAllTimer: number | undefined;
+dom.clearAll.addEventListener("click", () => {
+  if (clearAllTimer !== undefined) {
+    window.clearTimeout(clearAllTimer);
+    clearAllTimer = undefined;
+    backend.clearAllSlots().catch((e: unknown) => report("Could not clear the bindings", e));
+  } else {
+    clearAllTimer = window.setTimeout(() => {
+      clearAllTimer = undefined;
+      renderSettings(true);
+    }, FORGET_CONFIRM_MS);
+  }
+  renderSettings(true);
+});
+
+dom.openDiagFile.addEventListener("click", () => {
+  backend.openDiagnosticsFile().catch((e: unknown) => report("Could not open the log file", e));
+});
+dom.openDiagFolder.addEventListener("click", () => {
+  backend.openDiagnosticsFolder().catch((e: unknown) => report("Could not open the log folder", e));
+});
+backend.diagnosticsInfo().then(
+  (i) => {
+    dom.diagPath.textContent = i.log_path ?? `The log file could not be opened: ${i.error ?? "unknown error"}`;
+  },
+  (e: unknown) => console.error("diagnostics info failed", e),
+);
 
 function renderMods(
   box: HTMLFieldSetElement,
@@ -667,11 +700,10 @@ function render(): void {
 
 // ---------------------------------------------------------------- inputs
 
-dom.search.addEventListener("input", () => dispatch({ type: "search", query: dom.search.value }));
 dom.clearView.addEventListener("click", () => dispatch({ type: "clear_view" }));
 
 /** While a dialog is open the page behind it is inert: Tab cannot leave
- * the dialog and Cmd/Ctrl+F cannot focus the hidden search field. */
+ * the dialog. */
 function updateInert(): void {
   const modal = !dom.settings.hidden || state.pairing !== null;
   for (const e of [dom.header, dom.slotbar, dom.banners, dom.main]) e.inert = modal;
@@ -729,15 +761,6 @@ document.addEventListener("keydown", (e) => {
     if (menuSlot !== null) closeMenu();
     else if (state.pairing !== null) cancelPairing();
     else if (!dom.settings.hidden) closeSettings();
-    else if (document.activeElement === dom.search && dom.search.value !== "") {
-      dom.search.value = "";
-      dispatch({ type: "search", query: "" });
-    }
-  } else if (e.key.toLowerCase() === "f" && (e.metaKey || e.ctrlKey)) {
-    e.preventDefault();
-    if (!dom.settings.hidden || state.pairing !== null) return;
-    dom.search.focus();
-    dom.search.select();
   }
 });
 

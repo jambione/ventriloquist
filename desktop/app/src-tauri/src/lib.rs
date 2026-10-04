@@ -13,6 +13,7 @@
 
 mod delivery;
 mod hotkeys;
+mod logging;
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Component, Path, PathBuf};
@@ -212,17 +213,11 @@ fn refuse_folder(p: &Path) -> Option<&'static str> {
     }
 }
 
-/// Open the current log directory in Finder / Explorer. Only the folder the
-/// host reports is opened; it must exist and must not be a bundle or (on
-/// Windows) a network path. Runs off the main thread: `stat` on a dead
-/// network share or sleeping disk can block for a long time.
-#[tauri::command]
-async fn open_log_folder(app: AppHandle, host: State<'_, Host>) -> Result<(), String> {
-    let dir = host
-        .lock()
-        .log_dir
-        .clone()
-        .ok_or_else(|| "the log folder is not known yet".to_string())?;
+/// Open `dir` (a folder this app chose, never one from the web view) in
+/// Finder / Explorer. It must exist and must not be a bundle or (on Windows)
+/// a network path. Runs off the main thread: `stat` on a dead network share
+/// or sleeping disk can block for a long time.
+async fn open_dir(app: &AppHandle, dir: PathBuf) -> Result<(), String> {
     if let Some(why) = refuse_folder(&dir) {
         return Err(format!("{}: {why}", dir.display()));
     }
@@ -243,6 +238,79 @@ async fn open_log_folder(app: AppHandle, host: State<'_, Host>) -> Result<(), St
     };
     app.opener()
         .open_path(dir.to_string_lossy(), with)
+        .map_err(|e| e.to_string())
+}
+
+/// Open the current (Markdown) log directory.
+#[tauri::command]
+async fn open_log_folder(app: AppHandle, host: State<'_, Host>) -> Result<(), String> {
+    let dir = host
+        .lock()
+        .log_dir
+        .clone()
+        .ok_or_else(|| "the log folder is not known yet".to_string())?;
+    open_dir(&app, dir).await
+}
+
+/// Where the diagnostics log is (decided at start-up).
+struct DiagLog {
+    path: Option<PathBuf>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct DiagnosticsInfo {
+    /// The diagnostics log file; `None` when it could not be opened.
+    log_path: Option<String>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn diagnostics_info(d: State<'_, DiagLog>) -> DiagnosticsInfo {
+    DiagnosticsInfo {
+        log_path: d.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        error: d.error.clone(),
+    }
+}
+
+/// Open the diagnostics log folder.
+#[tauri::command]
+async fn open_diagnostics_folder(app: AppHandle, d: State<'_, DiagLog>) -> Result<(), String> {
+    let dir = d
+        .path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "there is no log file".to_string())?;
+    open_dir(&app, dir).await
+}
+
+/// Open the diagnostics log file in a text editor (named, so the OS never
+/// picks another handler).
+#[tauri::command]
+async fn open_diagnostics_file(app: AppHandle, d: State<'_, DiagLog>) -> Result<(), String> {
+    let file = d.path.clone().ok_or_else(|| "there is no log file".to_string())?;
+    if let Some(dir) = file.parent() {
+        if let Some(why) = refuse_folder(dir) {
+            return Err(format!("{}: {why}", file.display()));
+        }
+    }
+    let shown = file.clone();
+    let exists = tauri::async_runtime::spawn_blocking(move || shown.is_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    if !exists {
+        return Err(format!("{} does not exist", file.display()));
+    }
+    let with = if cfg!(target_os = "macos") {
+        Some("TextEdit")
+    } else if cfg!(windows) {
+        Some("notepad")
+    } else {
+        None
+    };
+    app.opener()
+        .open_path(file.to_string_lossy(), with)
         .map_err(|e| e.to_string())
 }
 
@@ -322,6 +390,12 @@ fn select_slot(m: State<'_, DeliveryManager>, slot: u8) -> Result<(), String> {
 #[tauri::command]
 fn unbind_slot(m: State<'_, DeliveryManager>, slot: u8) -> Result<(), String> {
     m.unbind(slot)
+}
+
+/// Clear every binding; the active slot becomes Off.
+#[tauri::command]
+fn clear_all_slots(m: State<'_, DeliveryManager>) {
+    m.clear_all();
 }
 
 /// Change a slot's auto-submit, newline mode (`shift_enter`/`spaces`) and/or
@@ -511,32 +585,13 @@ fn stop_host(app: &AppHandle) {
     }
 }
 
-struct StderrLog;
-
-impl log::Log for StderrLog {
-    /// Debug for this app and the core; Info for dependencies (their debug
-    /// output, e.g. btleplug's, is noise).
-    fn enabled(&self, m: &log::Metadata<'_>) -> bool {
-        let ours = m.target().starts_with("ventriloquist") || m.target().starts_with("vq_");
-        ours || m.level() <= log::Level::Info
-    }
-    fn log(&self, r: &log::Record<'_>) {
-        if !self.enabled(r.metadata()) {
-            return;
-        }
-        eprintln!("[{}] {}", r.level(), r.args());
-    }
-    fn flush(&self) {}
-}
-
 /// Run the app.
 pub fn run() {
-    if std::env::var_os("VQ_LOG").is_some() {
-        static LOGGER: StderrLog = StderrLog;
-        if log::set_logger(&LOGGER).is_ok() {
-            log::set_max_level(log::LevelFilter::Debug);
-        }
-    }
+    // Always-on file log (a Windows GUI app has no console).
+    let diag = match logging::init(&default_config_dir()) {
+        Ok(path) => DiagLog { path: Some(path), error: None },
+        Err(e) => DiagLog { path: None, error: Some(e) },
+    };
     let app = tauri::Builder::default()
         // First: a second launch must exit before anything else starts, and
         // focus the running instance instead.
@@ -554,6 +609,7 @@ pub fn run() {
         // web view any global-shortcut permission.
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Host::default())
+        .manage(diag)
         .manage(Flow::default())
         .invoke_handler(tauri::generate_handler![
             snapshot,
@@ -567,6 +623,10 @@ pub fn run() {
             slots_snapshot,
             select_slot,
             unbind_slot,
+            clear_all_slots,
+            diagnostics_info,
+            open_diagnostics_file,
+            open_diagnostics_folder,
             set_slot_settings,
             send_to_active,
             set_hotkey_modifiers,
@@ -574,6 +634,16 @@ pub fn run() {
             open_accessibility_settings,
         ])
         .setup(|app| {
+            let version = app.package_info().version.to_string();
+            let log_state = app.state::<DiagLog>();
+            match (&log_state.path, &log_state.error) {
+                (Some(p), _) => log::info!("Ventriloquist {version} starting; log file {}", p.display()),
+                (None, e) => eprintln!("cannot open the log file: {e:?}"),
+            }
+            // `ver` / `sw_vers` run in a thread: they must not delay start-up.
+            std::thread::spawn(move || {
+                log::info!("platform: {}", logging::os_version());
+            });
             let dir = default_config_dir();
             let cfg = HotkeyConfig::load(&dir);
             let view = hotkeys::register_all(app.handle(), &cfg);

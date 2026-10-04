@@ -130,7 +130,7 @@ On `FinalAccepted`, when the active slot ≠ Off:
 - **Slot bar** under the toolbar:
   - chips **Off · 1 … 9**. Each bound chip shows `N · App — window title` (truncated, full text in a tooltip).
   - Unbound chips are dimmed; the active chip is highlighted. Click a chip to select it, the same as the hotkey.
-  - Each bound chip has a ⋯ menu: **Auto-submit (Enter)** toggle, **Follow window when its title changes** toggle (§4.3; default on for terminals, off otherwise), **Unbind**.
+  - Each bound chip has a ⋯ menu: **Auto-submit (Enter)** toggle, **Follow window when its title changes** toggle (§4.3; default on for terminals, off otherwise), **✕ Clear** (clears that binding; if it was the active slot, the active slot becomes Off).
   - The bar is one wrapping row of chips at any window width ≥ 320 px.
   - Re-matched-but-unverified chips show a small "?" until the first successful delivery.
 - **Entry badge:** `→ 2 · Teams ✓`, `not sent (Off)`, `✗ slot 2 missing`, `⚠ blocked (secure input)`, `✗ failed: <reason>`, or `sending…`.
@@ -141,7 +141,8 @@ On `FinalAccepted`, when the active slot ≠ Off:
     - select: default Ctrl+Shift;
     - bind: default Ctrl+Option+Shift.
     - Digits stay 0–9. If a combination fails to register, it is shown as "taken by another app".
-  - The list of slots, with Unbind.
+  - The list of slots, each with **Clear binding**.
+  - **Clear all bindings** (two-click confirm, like Forget): clears every slot and sets the active slot to Off (backend command `clear_all_slots`).
 - Each bound chip's ⋯ menu also has the **Newline mode** choice (`Shift+Enter` / `Spaces`).
 
 ### 4.6 Persistence and re-match

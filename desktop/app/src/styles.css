@@ -108,7 +108,6 @@ button.danger {
   color: var(--warn);
 }
 
-input[type="search"],
 input[type="text"] {
   border: 1px solid var(--border);
   background: var(--bg);
@@ -176,10 +175,6 @@ input[type="text"] {
   flex: 1 1 260px;
   justify-content: flex-end;
   min-width: 0;
-}
-.tools input[type="search"] {
-  flex: 1 1 120px;
-  max-width: 260px;
 }
 
 /* ------------------------------------------------------------ banners */
@@ -429,9 +424,6 @@ input[type="text"] {
   }
   .list {
     padding: 4px 8px 8px;
-  }
-  .tools input[type="search"] {
-    max-width: none;
   }
 }
 

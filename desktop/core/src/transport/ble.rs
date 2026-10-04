@@ -1,7 +1,13 @@
 //! BLE central transport (SPEC §3.1, §6.3) on `btleplug`.
 //!
-//! * Scans for the Ventriloquist service UUID and connects to **every**
-//!   advertising phone.
+//! * Scans with an **empty** filter (some Windows drivers drop filtered
+//!   advertisements) and matches ourselves with [`policy::is_candidate`]: the
+//!   service UUID **or** the local name `Ventriloquist` (iOS may put the UUID
+//!   in the scan response). Connects to **every** such phone; a name-only
+//!   match without the GATT service is dropped for 5 minutes.
+//! * Logs (info) the adapter, scan start/stop/errors, every discovered
+//!   device (once per id per 60 s), every connect attempt, the services
+//!   found, the subscribe result and every error with its Debug text.
 //! * Per connection: discover services, subscribe to `TX` (notify), write
 //!   frames to `RX` **with response**, one frame per write, in order.
 //! * `mtu` = negotiated ATT MTU − 3, or 20 when unknown ([`ble_frame_mtu`]).
@@ -36,8 +42,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use btleplug::api::{
-    Central, CentralEvent, CentralState, Characteristic, Manager as _, Peripheral as _, ScanFilter,
-    WriteType,
+    Central, CentralEvent, CentralState, Characteristic, Manager as _, Peripheral as _,
+    PeripheralProperties, ScanFilter, WriteType,
 };
 use btleplug::platform::{Adapter, Manager, PeripheralId};
 use futures::StreamExt;
@@ -47,7 +53,8 @@ use tokio::time::Instant;
 use vq_protocol::{RX_CHAR_UUID, SERVICE_UUID, TX_CHAR_UUID};
 
 use super::policy::{
-    adapter_reacquire_due, ble_frame_mtu, ble_slot_expired, next_attempt_delay, scan_retry_due,
+    self, adapter_reacquire_due, ble_frame_mtu, ble_slot_expired, device_log_due,
+    next_attempt_delay, scan_retry_due, NAME_ONLY_BLOCK,
 };
 use super::{Transport, TransportCommand, TransportEvent};
 use crate::events::{AdapterState, PeerId};
@@ -127,6 +134,9 @@ struct Slot {
     wanted: bool,
     /// Last advertisement or end of connection.
     last_seen: Instant,
+    /// Matched by local name only (the UUID was not advertised): the GATT
+    /// service is verified after connecting.
+    name_only: bool,
 }
 
 impl Slot {
@@ -138,6 +148,7 @@ impl Slot {
             holdoff: None,
             wanted: false,
             last_seen: now,
+            name_only: false,
         }
     }
 }
@@ -146,6 +157,8 @@ impl Slot {
 struct Ended {
     pid: PeripheralId,
     was_connected: bool,
+    /// A name-only match without the Ventriloquist GATT service.
+    not_ours: bool,
 }
 
 enum Flow {
@@ -196,7 +209,13 @@ async fn acquire_adapter(
         let state = match manager.as_ref() {
             Some(m) => match m.adapters().await {
                 Ok(list) => match list.into_iter().next() {
-                    Some(a) => return Some(a),
+                    Some(a) => {
+                        match a.adapter_info().await {
+                            Ok(info) => log::info!("ble: adapter acquired: {info}"),
+                            Err(e) => log::info!("ble: adapter acquired (adapter_info failed: {e:?})"),
+                        }
+                        return Some(a);
+                    }
                     None => AdapterState::NoAdapter,
                 },
                 Err(e) => error_state(&e),
@@ -212,7 +231,7 @@ async fn acquire_adapter(
 }
 
 fn error_state(e: &btleplug::Error) -> AdapterState {
-    log::warn!("bluetooth: {e}");
+    log::warn!("ble: bluetooth error: {e} ({e:?})");
     match e {
         btleplug::Error::PermissionDenied => AdapterState::Unauthorized,
         btleplug::Error::NoAdapterAvailable => AdapterState::NoAdapter,
@@ -268,6 +287,10 @@ async fn run(
             powered_on: false,
             unknown_since: Some(now),
             last_scan_attempt: now,
+            devices_seen: 0,
+            devices_reported: 0,
+            device_logged: HashMap::new(),
+            blocked: HashMap::new(),
         };
         let initial = match ble.central.adapter_state().await {
             Ok(state) => ble.on_state(state).await,
@@ -295,7 +318,7 @@ async fn run(
                 c = cmds.recv() => {
                     if let Flow::Shutdown = ble.on_command(c) {
                         ble.close_all();
-                        let _ = ble.central.stop_scan().await;
+                        ble.stop_scan_logged().await;
                         // Let connection tasks send their final writes and
                         // Disconnected events.
                         ble.drain(&mut ended_rx).await;
@@ -307,6 +330,9 @@ async fn run(
                     let now = Instant::now();
                     ble.expire_slots(now);
                     ble.retry_due(now);
+                    if !ble.flush_seen().await {
+                        return;
+                    }
                     if scan_retry_due(ble.powered_on, ble.scanning, now - ble.last_scan_attempt)
                         && !ble.start_scan().await
                     {
@@ -327,7 +353,7 @@ async fn run(
         // Restart: end every connection (each reports Disconnected) before
         // the new adapter is used.
         ble.close_all();
-        let _ = ble.central.stop_scan().await;
+        ble.stop_scan_logged().await;
         ble.drain(&mut ended_rx).await;
         last_state = ble.last_state;
         if !wait_or_shutdown(&mut cmds, ADAPTER_RETRY).await {
@@ -348,6 +374,39 @@ struct Ble {
     /// Since when the adapter state has been unknown (None when known).
     unknown_since: Option<Instant>,
     last_scan_attempt: Instant,
+    /// Advertisements seen since the scan started.
+    devices_seen: u64,
+    /// Last count sent to the host.
+    devices_reported: u64,
+    /// When each device was last logged.
+    device_logged: HashMap<PeripheralId, Instant>,
+    /// Name-only matches that lacked the GATT service: ignored until then.
+    blocked: HashMap<PeripheralId, Instant>,
+}
+
+/// The scan filter: empty, so nothing is filtered by the OS or the library;
+/// matching is done by [`matches_advertisement`].
+fn scan_filter() -> ScanFilter {
+    ScanFilter { services: Vec::new() }
+}
+
+/// The advertised services (merged with `extra`) and local name of a device.
+fn advert_parts(props: &PeripheralProperties, extra: &[uuid::Uuid]) -> (Vec<uuid::Uuid>, Option<String>) {
+    let mut services = props.services.clone();
+    for u in extra {
+        if !services.contains(u) {
+            services.push(*u);
+        }
+    }
+    let name = props.local_name.clone().or_else(|| props.advertisement_name.clone());
+    (services, name)
+}
+
+/// Whether a device's advertisement makes it one of ours (the policy code
+/// decides).
+fn matches_advertisement(props: &PeripheralProperties, extra: &[uuid::Uuid]) -> bool {
+    let (services, name) = advert_parts(props, extra);
+    policy::is_candidate(&services, name.as_deref())
 }
 
 impl Ble {
@@ -358,27 +417,45 @@ impl Ble {
     /// Try to start scanning; `false` if the host is gone.
     async fn start_scan(&mut self) -> bool {
         self.last_scan_attempt = Instant::now();
-        match self
-            .central
-            .start_scan(ScanFilter {
-                services: vec![SERVICE_UUID],
-            })
-            .await
-        {
+        match self.central.start_scan(scan_filter()).await {
             Ok(()) => {
+                log::info!("ble: scan started (empty filter; matching by service UUID or local name)");
                 self.scanning = true;
-                self.emit(AdapterState::Scanning).await
+                self.devices_seen = 0;
+                self.device_logged.clear();
+                self.emit(AdapterState::Scanning).await && self.flush_seen().await
             }
             Err(e) => {
+                log::warn!("ble: scan start failed: {e:?}");
                 let s = error_state(&e);
                 self.emit(s).await
             }
         }
     }
 
+    async fn stop_scan_logged(&mut self) {
+        match self.central.stop_scan().await {
+            Ok(()) => log::info!("ble: scan stopped"),
+            Err(e) => log::info!("ble: scan stop failed: {e:?}"),
+        }
+    }
+
+    /// Tell the host the advertisement count if it changed.
+    async fn flush_seen(&mut self) -> bool {
+        if self.devices_seen == self.devices_reported {
+            return true;
+        }
+        self.devices_reported = self.devices_seen;
+        self.events
+            .send(TransportEvent::DevicesSeen(self.devices_seen))
+            .await
+            .is_ok()
+    }
+
     async fn on_state(&mut self, state: CentralState) -> bool {
         match state {
             CentralState::PoweredOn => {
+                log::info!("ble: adapter powered on");
                 self.powered_on = true;
                 self.unknown_since = None;
                 if self.scanning {
@@ -388,6 +465,7 @@ impl Ble {
                 }
             }
             CentralState::PoweredOff => {
+                log::info!("ble: adapter powered off (scan stopped)");
                 self.powered_on = false;
                 self.scanning = false;
                 self.unknown_since = None;
@@ -404,16 +482,11 @@ impl Ble {
     async fn on_central_event(&mut self, ev: CentralEvent) -> bool {
         match ev {
             CentralEvent::StateUpdate(state) => return self.on_state(state).await,
-            CentralEvent::DeviceDiscovered(id)
-            | CentralEvent::DeviceUpdated(id)
-            | CentralEvent::ServicesAdvertisement { id, .. } => {
-                if self.advertises_service(&id).await {
-                    let now = Instant::now();
-                    let slot = self.slots.entry(id.clone()).or_insert_with(|| Slot::new(now));
-                    slot.wanted = true;
-                    slot.last_seen = now;
-                    self.try_connect(&id);
-                }
+            CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) => {
+                self.on_advertisement(id, &[]).await;
+            }
+            CentralEvent::ServicesAdvertisement { id, services } => {
+                self.on_advertisement(id, &services).await;
             }
             CentralEvent::DeviceDisconnected(id) => {
                 if let Some(a) = self.slots.get(&id).and_then(|s| s.active.as_ref()) {
@@ -425,14 +498,47 @@ impl Ble {
         true
     }
 
-    async fn advertises_service(&self, id: &PeripheralId) -> bool {
-        // Some platforms ignore the scan filter: check the advertisement.
-        match self.central.peripheral(id).await {
-            Ok(p) => {
-                matches!(p.properties().await, Ok(Some(props)) if props.services.contains(&SERVICE_UUID))
+    /// One advertisement (or update) of `id`: count it, log it (once per
+    /// minute per device) and, if it is one of ours, mark it wanted and try
+    /// to connect.
+    async fn on_advertisement(&mut self, id: PeripheralId, extra: &[uuid::Uuid]) {
+        self.devices_seen += 1;
+        let props = match self.central.peripheral(&id).await {
+            Ok(p) => match p.properties().await {
+                Ok(Some(props)) => props,
+                Ok(None) => PeripheralProperties::default(),
+                Err(e) => {
+                    log::info!("ble: properties of {id:?} failed: {e:?}");
+                    PeripheralProperties::default()
+                }
+            },
+            Err(e) => {
+                log::info!("ble: peripheral {id:?} lookup failed: {e:?}");
+                return;
             }
-            Err(_) => false,
+        };
+        let (services, name) = advert_parts(&props, extra);
+        let candidate = matches_advertisement(&props, extra);
+        let now = Instant::now();
+        if device_log_due(self.device_logged.get(&id).map(|t| now - *t)) {
+            self.device_logged.insert(id.clone(), now);
+            log::info!(
+                "ble: device {id:?} local_name={name:?} rssi={:?} services={services:?} matched={candidate}",
+                props.rssi
+            );
         }
+        if !candidate {
+            return;
+        }
+        if self.blocked.get(&id).is_some_and(|until| now < *until) {
+            return;
+        }
+        self.blocked.remove(&id);
+        let slot = self.slots.entry(id.clone()).or_insert_with(|| Slot::new(now));
+        slot.wanted = true;
+        slot.last_seen = now;
+        slot.name_only = policy::is_name_only(&services, name.as_deref());
+        self.try_connect(&id);
     }
 
     fn on_command(&mut self, c: Option<TransportCommand>) -> Flow {
@@ -520,6 +626,16 @@ impl Ble {
 
     fn on_ended(&mut self, ended: Ended) {
         let now = Instant::now();
+        if ended.not_ours {
+            log::info!(
+                "ble: {:?} advertises our name but has no Ventriloquist service: ignoring it for {} s",
+                ended.pid,
+                NAME_ONLY_BLOCK.as_secs()
+            );
+            self.slots.remove(&ended.pid);
+            self.blocked.insert(ended.pid, now + NAME_ONLY_BLOCK);
+            return;
+        }
         if let Some(slot) = self.slots.get_mut(&ended.pid) {
             slot.active = None;
             slot.last_seen = now;
@@ -533,6 +649,8 @@ impl Ble {
     }
 
     fn expire_slots(&mut self, now: Instant) {
+        self.blocked.retain(|_, until| now < *until);
+        self.device_logged.retain(|_, t| now - *t < 10 * policy::DEVICE_LOG_INTERVAL);
         self.slots
             .retain(|_, s| !ble_slot_expired(s.active.is_some(), now - s.last_seen));
     }
@@ -572,9 +690,11 @@ impl Ble {
         let events = self.events.clone();
         let ended = self.ended_tx.clone();
         let pid = id.clone();
+        let name_only = slot.name_only;
         tokio::spawn(async move {
-            let was_connected = connection(central, pid.clone(), peer, rx, abort, events).await;
-            let _ = ended.send(Ended { pid, was_connected });
+            let (was_connected, not_ours) =
+                connection(central, pid.clone(), peer, rx, abort, events, name_only).await;
+            let _ = ended.send(Ended { pid, was_connected, not_ours });
         });
     }
 }
@@ -619,7 +739,8 @@ async fn write_loop(
     }
 }
 
-/// One connection. Returns whether it got as far as `Connected`.
+/// One connection. Returns `(got as far as Connected, name-only match
+/// without the Ventriloquist GATT service)`.
 async fn connection(
     central: Adapter,
     pid: PeripheralId,
@@ -627,26 +748,52 @@ async fn connection(
     cmds: mpsc::Receiver<PeerCmd>,
     abort: Arc<Abort>,
     events: mpsc::Sender<TransportEvent>,
-) -> bool {
+    name_only: bool,
+) -> (bool, bool) {
+    log::info!("ble: {peer}: connect attempt (name_only={name_only})");
     let p = match central.peripheral(&pid).await {
         Ok(p) => p,
         Err(e) => {
-            log::debug!("{peer}: {e}");
-            return false;
+            log::info!("ble: {peer}: peripheral lookup failed: {e:?}");
+            return (false, false);
         }
     };
+    let not_ours = std::sync::atomic::AtomicBool::new(false);
     let setup = async {
-        p.connect().await?;
-        p.discover_services().await?;
+        p.connect().await.inspect_err(|e| log::info!("ble: {peer}: connect error: {e:?}"))?;
+        log::info!("ble: {peer}: connected; discovering services");
+        p.discover_services()
+            .await
+            .inspect_err(|e| log::info!("ble: {peer}: discover_services error: {e:?}"))?;
+        let services = p.services();
+        let listing: Vec<String> = services
+            .iter()
+            .map(|s| {
+                let chars: Vec<String> = s.characteristics.iter().map(|c| c.uuid.to_string()).collect();
+                format!("{} [{}]", s.uuid, chars.join(", "))
+            })
+            .collect();
+        log::info!("ble: {peer}: services found: {listing:?}");
+        if name_only && !services.iter().any(|s| s.uuid == SERVICE_UUID) {
+            not_ours.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(btleplug::Error::NoSuchCharacteristic);
+        }
         let chars = p.characteristics();
         let (Some(rx), Some(tx)) = (
             find_char(&chars, RX_CHAR_UUID),
             find_char(&chars, TX_CHAR_UUID),
         ) else {
+            log::info!("ble: {peer}: RX/TX characteristics missing");
             return Err(btleplug::Error::NoSuchCharacteristic);
         };
-        let notifications = p.notifications().await?;
-        p.subscribe(&tx).await?;
+        let notifications = p
+            .notifications()
+            .await
+            .inspect_err(|e| log::info!("ble: {peer}: notifications error: {e:?}"))?;
+        p.subscribe(&tx)
+            .await
+            .inspect_err(|e| log::info!("ble: {peer}: subscribe error: {e:?}"))?;
+        log::info!("ble: {peer}: subscribed to TX");
         Ok::<_, btleplug::Error>((rx, notifications))
     };
     let setup = async {
@@ -658,21 +805,23 @@ async fn connection(
     let (rx_char, mut notifications) = match setup.await {
         Some(Ok(Ok(v))) => v,
         Some(Ok(Err(e))) => {
-            log::info!("{peer}: connect failed: {e}");
+            log::info!("ble: {peer}: connect failed: {e:?}");
             let _ = p.disconnect().await;
-            return false;
+            return (false, not_ours.load(std::sync::atomic::Ordering::SeqCst));
         }
         Some(Err(_)) => {
-            log::info!("{peer}: connect timed out");
+            log::info!("ble: {peer}: connect timed out after {} s", CONNECT_TIMEOUT.as_secs());
             let _ = p.disconnect().await;
-            return false;
+            return (false, false);
         }
         None => {
+            log::info!("ble: {peer}: connect aborted: {}", abort.reason());
             let _ = p.disconnect().await;
-            return false;
+            return (false, false);
         }
     };
     let mtu = ble_frame_mtu(p.mtu());
+    log::info!("ble: {peer}: ready (frame mtu {mtu})");
     if events
         .send(TransportEvent::Connected {
             peer: peer.clone(),
@@ -682,7 +831,7 @@ async fn connection(
         .is_err()
     {
         let _ = p.disconnect().await;
-        return true;
+        return (true, false);
     }
     let mut writer = tokio::spawn(write_loop(p.clone(), rx_char, cmds));
     let reason = loop {
@@ -700,10 +849,39 @@ async fn connection(
             _ = abort.notify.notified() => break abort.reason(),
         }
     };
+    log::info!("ble: {peer}: disconnected: {reason}");
     writer.abort();
     let _ = p.disconnect().await;
     let _ = events
         .send(TransportEvent::Disconnected { peer, reason })
         .await;
-    true
+    (true, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_filter_is_empty() {
+        assert!(scan_filter().services.is_empty());
+    }
+
+    #[test]
+    fn matching_uses_the_policy() {
+        let mut props = PeripheralProperties::default();
+        assert!(!matches_advertisement(&props, &[]));
+        props.services = vec![SERVICE_UUID];
+        assert!(matches_advertisement(&props, &[]));
+        props.services.clear();
+        props.local_name = Some(policy::BLE_LOCAL_NAME.to_owned());
+        assert!(matches_advertisement(&props, &[]));
+        props.local_name = None;
+        props.advertisement_name = Some(policy::BLE_LOCAL_NAME.to_owned());
+        assert!(matches_advertisement(&props, &[]));
+        props.advertisement_name = Some("Other".to_owned());
+        assert!(!matches_advertisement(&props, &[]));
+        // A services advertisement event carries the UUID itself.
+        assert!(matches_advertisement(&props, &[SERVICE_UUID]));
+    }
 }

@@ -62,7 +62,7 @@ describe("connectionStatus", () => {
 
   it("reports the adapter and connections", () => {
     expect(connectionStatus(initialState(), "mac").text).toBe("Starting…");
-    expect(connectionStatus(snap("scanning", []), "mac")).toEqual({ tone: "idle", text: "Scanning…" });
+    expect(connectionStatus(snap("scanning", []), "mac")).toEqual({ tone: "idle", text: "Scanning… (0 devices seen)" });
     expect(connectionStatus(snap("powered_off", []), "mac").text).toBe("Bluetooth off");
     expect(connectionStatus(snap("unauthorized", []), "mac").text).toBe(
       "Bluetooth not authorized — enable in System Settings",

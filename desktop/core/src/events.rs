@@ -95,6 +95,8 @@ pub enum HostEvent {
         paired_peers: Vec<PairedPeer>,
         /// Last reported adapter state.
         adapter_state: AdapterState,
+        /// Advertisements seen since the current scan started.
+        devices_seen: u64,
         /// Live connections.
         peers: Vec<PeerStatus>,
         /// Transcript entries, oldest first.
@@ -223,6 +225,12 @@ pub enum HostEvent {
     AdapterState {
         /// New state.
         state: AdapterState,
+    },
+    /// Advertisements seen since the current scan started (at most once per
+    /// second, latest wins).
+    DevicesSeen {
+        /// The count.
+        count: u64,
     },
     /// Log directory or display name changed (in effect for this run).
     ConfigChanged {

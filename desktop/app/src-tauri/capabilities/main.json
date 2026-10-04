@@ -17,10 +17,14 @@
     "allow-slots-snapshot",
     "allow-select-slot",
     "allow-unbind-slot",
+    "allow-clear-all-slots",
     "allow-set-slot-settings",
     "allow-send-to-active",
     "allow-set-hotkey-modifiers",
     "allow-accessibility-status",
-    "allow-open-accessibility-settings"
+    "allow-open-accessibility-settings",
+    "allow-diagnostics-info",
+    "allow-open-diagnostics-file",
+    "allow-open-diagnostics-folder"
   ]
 }
