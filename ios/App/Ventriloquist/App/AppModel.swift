@@ -40,6 +40,7 @@ final class AppModel {
     @ObservationIgnored let settings: AppSettings
     @ObservationIgnored let engine: PhoneEngine
     @ObservationIgnored let ble: BLEPeripheralTransport
+    @ObservationIgnored let central: BLECentralTransport
     let dictation = DictationEngine()
     @ObservationIgnored private var started = false
     @ObservationIgnored private var tickTask: Task<Void, Never>?
@@ -118,6 +119,9 @@ final class AppModel {
         }
         let ble = BLEPeripheralTransport()
         self.ble = ble
+        let central = BLECentralTransport()
+        self.central = central
+        let composite = CompositeTransport(routes: [("ble:", ble), (BLECentralTransport.peerPrefix, central)])
         // With a temporary identity the real paired-host file must stay
         // untouched: a pairing made under the wrong identity would otherwise
         // replace or hide valid ones (M9).
@@ -126,7 +130,7 @@ final class AppModel {
         engine = PhoneEngine(identity: identity, deviceName: settings.deviceName,
                              partialStreamingEnabled: settings.partialStreaming,
                              hostStore: hostStore, settings: settingsStore,
-                             transport: ble, clock: SystemClock())
+                             transport: composite, clock: SystemClock())
         needsDeviceName = !settings.deviceNameChosen
         if engine.pairedHostsUnreadable {
             hostsProblem = "The list of paired computers could not be read. The old file was kept; pair again."
@@ -136,6 +140,7 @@ final class AppModel {
         vocabulary = settings.vocabulary
         identityProblem = problem
         ble.engine = engine
+        central.engine = engine
         ble.onStateChange = { [weak self] state in self?.radioChanged(state) }
         engine.onChange = { [weak self] in self?.syncFromEngine() }
         engine.onEvent = { [weak self] event in self?.handle(event) }
@@ -147,6 +152,7 @@ final class AppModel {
         guard !started else { return }
         started = true
         ble.start()
+        central.start()
         // Fetch the speech model on first run, with the progress overlay (M11).
         Task { [weak self] in try? await self?.dictation.prepareModel() }
         dictation.onInterrupted = { [weak self] in
@@ -185,12 +191,13 @@ final class AppModel {
             await stopRecording()
             let deadline = ContinuousClock.now + .seconds(5)
             while ContinuousClock.now < deadline, gen == sceneGeneration,
-                  ble.hasQueuedFrames || (engine.indicator == .secure && engine.inFlightDeliveryCount > 0) {
+                  ble.hasQueuedFrames || central.hasQueuedFrames || (engine.indicator == .secure && engine.inFlightDeliveryCount > 0) {
                 try? await Task.sleep(for: .milliseconds(100))
             }
             if gen == sceneGeneration {
                 engine.disconnectAll()
                 ble.enterBackground()
+                central.enterBackground()
             }
             UIApplication.shared.endBackgroundTask(bgTask)
         }
@@ -199,6 +206,7 @@ final class AppModel {
     func enterForeground() {
         sceneGeneration += 1
         ble.enterForeground()
+        central.enterForeground()
     }
 
     func confirmDeviceName(_ name: String) {
