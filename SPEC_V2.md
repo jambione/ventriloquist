@@ -231,3 +231,32 @@ Owner-device checks are done by the owner. N3 can't be completed by agents alone
 
 ## v2.2 BLE polling mode
 iOS 26.1+ refuses CCCD writes from some third-party centrals (Windows: HRESULT 0x80650003 while subscribing to TX; Apple forums thread 812318, no workaround). The desktop therefore falls back, per connection, to **polling**: if `subscribe(TX)` fails it reads TX repeatedly (empty read: wait 50 ms; data: deliver and read again at once). The phone treats a central that writes RX without subscribing as a poll peer, answers each TX read with one queued frame (or empty), and drops it after 60 s of silence. Normative text: protocol/README.md §2.2. `VQ_BLE_FORCE_POLL=1` forces it on the desktop. The "devices seen" counter now counts unique peripheral ids since the scan started.
+
+---
+
+## v2.3 — Windows: reversed Bluetooth roles (owner decision 2026-10-04)
+
+**Why.** On iOS 26.1+ the iPhone, acting as a GATT peripheral, refuses app-level GATT access from non-Apple centrals: subscribe, read and write all fail. That holds even when the link is OS-bonded and encrypted. Bluetooth LE Explorer showed the same thing for the phone's standard services (Battery and Current Time were "Unreachable"). macOS is unaffected. Wi-Fi was rejected because the owner's PC is on a corporate network.
+
+**Design.**
+- **The PC is the peripheral and the iPhone is the central.** This applies to Windows hosts only. macOS keeps the v1 roles (the iPhone is the peripheral).
+- **New GATT service on the PC** (`HOST_SERVICE_UUID`, distinct from the v1 `SERVICE_UUID`; constants live in vq-protocol, documented in protocol/README.md §2.3):
+  - `H_RX`: phone → desktop, Write (with response).
+  - `H_TX`: desktop → phone, Notify.
+  - Both use protection level **Plain**, so no OS bonding is needed. Owners should remove any OS-level pairing between the phone and the PC.
+- **Advertising.** The Windows host advertises `HOST_SERVICE_UUID` (connectable, discoverable) using WinRT `GattServiceProvider`. If the adapter lacks peripheral-role support (`BluetoothAdapter.IsPeripheralRoleSupported == false`), the toolbar says "This PC's Bluetooth adapter can't accept connections from the iPhone (peripheral role not supported)".
+- **Session flow.** Everything above the transport is unchanged: framing, envelope, hello, pairing, the session, and delivery. In particular:
+  - when the iPhone subscribes to `H_TX`, the desktop treats that as "connected" and sends its `hello` by notification to that client, exactly as v1 does after subscribing;
+  - the phone replies by writing to `H_RX`;
+  - frame size: the desktop uses the GattSession MaxPduSize − 3, and the phone uses `maximumWriteValueLength(for: .withResponse)`. Both are capped at 512.
+- **Multiple clients.** Notifications are targeted per subscribed client (`NotifyValueAsync(value, client)`). A client unsubscribing, or its session closing, counts as a disconnect.
+- **iPhone.** The app runs **both** roles in the foreground:
+  - the existing peripheral, for Macs;
+  - a new `BLECentralTransport` (`CBCentralManager`) that scans for `HOST_SERVICE_UUID`, connects, discovers, subscribes to `H_TX` and writes `H_RX`.
+
+  Hosts from both transports appear in the one host list. Reconnect uses backoff (1, 2, 4, 8, max 15 s), and the central role stops when the app goes to the background.
+- **Windows desktop transport.** A Windows-only `BlePeripheralTransport` in vq-host-core (`cfg(windows)`, `windows` crate) implements the existing `Transport` trait. On Windows it **replaces** the central transport; macOS keeps using `BleCentralTransport`.
+- **Testing.**
+  - Pure logic (client/peer bookkeeping, MTU choice, the reconnect policy) gets unit tests on both sides.
+  - Windows code is cross-checked here and unit-tested on the Windows CI runner.
+  - Real-radio behaviour is verified by the owner's checklist, added to MANUAL_TEST.md.
