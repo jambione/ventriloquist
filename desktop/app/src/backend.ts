@@ -15,11 +15,13 @@ export const backend = {
   /** Ask the host for a `snapshot` event. Rejects if the host is not running. */
   snapshot: (): Promise<void> => invoke("snapshot"),
   forgetPeer: (deviceId: string): Promise<void> => invoke("forget_peer", { deviceId }),
-  setLogDir: (path: string): Promise<void> => invoke("set_log_dir", { path }),
+  /** Tell the host how many events were handled (flow control). */
+  ackEvents: (count: number): Promise<void> => invoke("ack_events", { count }),
   setName: (name: string): Promise<void> => invoke("set_name", { name }),
   cancelPairing: (peer: string): Promise<void> => invoke("cancel_pairing", { peer }),
   openLogFolder: (): Promise<void> => invoke("open_log_folder"),
-  /** Folder picker; resolves to the chosen absolute path, or null. */
-  pickLogDir: (): Promise<string | null> => invoke("pick_log_dir"),
+  /** Folder picker; the host itself sets the chosen folder as the log
+   * folder. Resolves to false when the user cancelled. */
+  pickLogDir: (): Promise<boolean> => invoke("pick_log_dir"),
   copyText: (text: string): Promise<void> => invoke("copy_text", { text }),
 };

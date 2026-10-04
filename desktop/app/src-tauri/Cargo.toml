@@ -28,3 +28,4 @@ tokio = { version = "1.45", features = ["time", "sync"] }
 serde = { version = "1.0", features = ["derive"] }
 uuid = "1.11"
 log = "0.4"
+tauri-plugin-single-instance = "2"

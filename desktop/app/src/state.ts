@@ -10,6 +10,7 @@
 // replayed. Any later snapshot (e.g. a reply meant for a previous page
 // load) is applied the same way.
 
+import { clip, isolate, stripBidi } from "./bidi";
 import type {
   AdapterState,
   Entry,
@@ -26,6 +27,26 @@ export const MAX_BUFFERED = 2000;
 export const MAX_NOTICES = 5;
 /** Longest peer-provided message shown in a notice (characters). */
 export const MAX_NOTICE_TEXT = 200;
+/** Evicted ids remembered (id → highest rev), mirroring the core (A3). */
+export const MAX_TOMBSTONES = 10_000;
+/** Pairing codes kept at once (one per connection; the newest is shown). */
+export const MAX_CODES = 8;
+/** Longest accepted code lifetime; the core uses 120 s. */
+const MAX_CODE_SECS = 3600;
+const DEFAULT_CODE_SECS = 120;
+
+/** Monotonic milliseconds (unaffected by wall-clock changes). Pairing
+ * deadlines live in this domain: `tick` actions must carry the same clock. */
+export function mono(): number {
+  return performance.now();
+}
+
+/** Lifetime of a code in ms: invalid (NaN, infinite, negative) → 0 (already
+ * expired); longer than an hour → the default of 120 s. */
+function codeLifetimeMs(secs: number): number {
+  if (!Number.isFinite(secs) || secs < 0) return 0;
+  return (secs > MAX_CODE_SECS ? DEFAULT_CODE_SECS : secs) * 1000;
+}
 
 export interface PeerInfo {
   peer: string;
@@ -77,8 +98,15 @@ export interface AppState {
   order: readonly string[];
   /** Clear view: id → highest rev hidden. A later revision shows it again. */
   cleared: ReadonlyMap<string, number>;
+  /** Evicted ids → highest rev seen (bounded, insertion-ordered). It is
+   * append-only, so it is shared (mutated in place) between state versions
+   * to keep eviction O(1). Upserts at or below it are ignored. */
+  evicted: ReadonlyMap<string, number>;
   search: string;
+  /** The code on screen: the newest of `codes`. */
   pairing: PairingModal | null;
+  /** Every still-valid code, oldest first (one per connection). */
+  codes: readonly PairingModal[];
   logWarning: string | null;
   notices: readonly Notice[];
   nextNoticeId: number;
@@ -108,8 +136,10 @@ export function initialState(): AppState {
     entries: new Map(),
     order: [],
     cleared: new Map(),
+    evicted: new Map(),
     search: "",
     pairing: null,
+    codes: [],
     logWarning: null,
     notices: [],
     nextNoticeId: 1,
@@ -125,11 +155,16 @@ export function reduce(state: AppState, action: Action): AppState {
     case "clear_view":
       return clearView(state);
     case "tick":
-      return state.pairing !== null && action.now >= state.pairing.deadline
-        ? { ...state, pairing: null }
+      return state.codes.some((c) => action.now >= c.deadline)
+        ? withCodes(
+            state,
+            state.codes.filter((c) => action.now < c.deadline),
+          )
         : state;
-    case "dismiss_pairing":
-      return state.pairing === null ? state : { ...state, pairing: null };
+    case "dismiss_pairing": {
+      const shown = state.pairing;
+      return shown === null ? state : withCodes(state, withoutPeer(state.codes, shown.peer));
+    }
     case "dismiss_notice":
       return { ...state, notices: state.notices.filter((n) => n.id !== action.id) };
     case "fatal":
@@ -144,7 +179,7 @@ function onHostEvent(state: AppState, ev: HostEvent, now: number): AppState {
     return applySnapshot(state, ev, now);
   }
   if (state.phase === "loading") {
-    const buffered = [...state.buffered, { event: ev, at: now }];
+    const buffered = [...state.buffered, { event: ev, at: mono() }];
     if (buffered.length > MAX_BUFFERED) buffered.splice(0, buffered.length - MAX_BUFFERED);
     return { ...state, buffered };
   }
@@ -166,6 +201,8 @@ export function accepts(existing: Entry | undefined, incoming: Entry): boolean {
 function upsertEntry(state: AppState, entry: Entry): AppState {
   const existing = state.entries.get(entry.id);
   if (!accepts(existing, entry)) return state;
+  const tomb = state.evicted.get(entry.id);
+  if (tomb !== undefined && entry.rev <= tomb) return state;
   const entries = new Map(state.entries);
   entries.set(entry.id, entry);
   let order = state.order;
@@ -176,6 +213,8 @@ function upsertEntry(state: AppState, entry: Entry): AppState {
       const gone = next.splice(0, next.length - MAX_ENTRIES);
       const c = new Map(cleared);
       for (const id of gone) {
+        const rev = entries.get(id)?.rev;
+        if (rev !== undefined) tombstone(state.evicted, id, rev);
         entries.delete(id);
         c.delete(id);
       }
@@ -186,8 +225,22 @@ function upsertEntry(state: AppState, entry: Entry): AppState {
   return { ...state, entries, order, cleared };
 }
 
+/** Remember `id` as evicted at `rev` (never lowering a known rev). */
+function tombstone(map: ReadonlyMap<string, number>, id: string, rev: number): void {
+  const m = map as Map<string, number>;
+  const rev2 = Math.max(rev, m.get(id) ?? -1);
+  m.delete(id); // refresh the insertion order
+  m.set(id, rev2);
+  if (m.size > MAX_TOMBSTONES) {
+    const oldest = m.keys().next();
+    if (oldest.done !== true) m.delete(oldest.value);
+  }
+}
+
 function evictEntry(state: AppState, id: string): AppState {
-  if (!state.entries.has(id)) return state;
+  const existing = state.entries.get(id);
+  tombstone(state.evicted, id, existing?.rev ?? -1);
+  if (existing === undefined) return state;
   const entries = new Map(state.entries);
   entries.delete(id);
   const cleared = new Map(state.cleared);
@@ -195,19 +248,19 @@ function evictEntry(state: AppState, id: string): AppState {
   return { ...state, entries, cleared, order: state.order.filter((x) => x !== id) };
 }
 
+/** `text` is already bounded and its peer-provided parts isolated. */
 function addNotice(state: AppState, kind: NoticeKind, text: string): AppState {
-  const notice: Notice = { id: state.nextNoticeId, kind, text: truncate(text, MAX_NOTICE_TEXT) };
+  const notice: Notice = { id: state.nextNoticeId, kind, text };
   const notices = [...state.notices, notice].slice(-MAX_NOTICES);
   return { ...state, notices, nextNoticeId: state.nextNoticeId + 1 };
 }
 
-function truncate(s: string, max: number): string {
-  const chars = Array.from(s);
-  return chars.length <= max ? s : chars.slice(0, max).join("") + "…";
-}
+const MAX_LABEL_CHARS = 64;
 
-function peerLabel(state: AppState, peer: string, fallback: string | null = null): string {
-  return state.peers.get(peer)?.name ?? fallback ?? "a phone";
+/** A peer's name for a sentence: clipped, bidi-stripped, isolated. */
+function peerLabel(state: AppState, peer: string): string {
+  const name = state.peers.get(peer)?.name;
+  return name === null || name === undefined ? "a phone" : isolate(clip(name, MAX_LABEL_CHARS));
 }
 
 function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
@@ -239,30 +292,38 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
           paired: ev.paired,
         });
       }
-      const pairing =
-        ev.state === "closed" && state.pairing?.peer === ev.peer ? null : state.pairing;
-      return { ...state, peers, pairing };
+      const next = { ...state, peers };
+      return ev.state === "closed" ? withCodes(next, withoutPeer(state.codes, ev.peer)) : next;
     }
-    case "pairing_code_shown":
-      // One modal at a time; a new code replaces any previous one.
-      return {
-        ...state,
-        pairing: {
+    case "pairing_code_shown": {
+      const rest = withoutPeer(state.codes, ev.peer);
+      const ms = codeLifetimeMs(ev.expires_in_secs);
+      if (ms <= 0) return withCodes(state, rest); // already expired
+      return withCodes(state, [
+        ...rest,
+        {
           peer: ev.peer,
-          phoneName: ev.phone_name,
+          phoneName: stripBidi(ev.phone_name),
           code: ev.code,
-          deadline: now + ev.expires_in_secs * 1000,
+          deadline: mono() + ms,
           attemptsRemaining: null,
         },
-      };
+      ]);
+    }
     case "pairing_code_ended":
-      return state.pairing?.peer === ev.peer ? { ...state, pairing: null } : state;
+      return withCodes(state, withoutPeer(state.codes, ev.peer));
     case "pairing_result": {
-      if (state.pairing?.peer !== ev.peer) return state;
+      const code = state.codes.find((c) => c.peer === ev.peer);
+      if (code === undefined) return state;
       // A wrong code keeps the modal open (the code is still valid) until
       // the attempts run out.
-      if (ev.ok || ev.attempts_remaining === 0) return { ...state, pairing: null };
-      return { ...state, pairing: { ...state.pairing, attemptsRemaining: ev.attempts_remaining } };
+      if (ev.ok || !(ev.attempts_remaining > 0)) {
+        return withCodes(state, withoutPeer(state.codes, ev.peer));
+      }
+      return withCodes(
+        state,
+        state.codes.map((c) => (c === code ? { ...c, attemptsRemaining: ev.attempts_remaining } : c)),
+      );
     }
     case "paired_peers_changed":
       return { ...state, pairedPeers: ev.peers };
@@ -270,10 +331,16 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
       return addNotice(
         state,
         "peer",
-        `${peerLabel(state, ev.peer)} reported an error (${ev.code}): ${ev.message}`,
+        `${peerLabel(state, ev.peer)} reported an error (${isolate(clip(ev.code, MAX_LABEL_CHARS))}): ${isolate(
+          clip(ev.message, MAX_NOTICE_TEXT),
+        )}`,
       );
     case "version_mismatch":
-      return addNotice(state, "version", `Update Ventriloquist on ${ev.device}`);
+      return addNotice(
+        state,
+        "version",
+        `Update Ventriloquist on ${isolate(clip(ev.device, MAX_LABEL_CHARS))}`,
+      );
     case "message_rejected":
       return state; // diagnostics only
     case "log_warning":
@@ -281,7 +348,7 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
     case "log_recovered":
       return state.logWarning === null ? state : { ...state, logWarning: null };
     case "storage_warning":
-      return addNotice(state, "storage", ev.message);
+      return addNotice(state, "storage", clip(ev.message, MAX_NOTICE_TEXT));
     case "adapter_state":
       return state.adapter === ev.state ? state : { ...state, adapter: ev.state };
     case "config_changed":
@@ -289,13 +356,33 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
   }
 }
 
+function withoutPeer(codes: readonly PairingModal[], peer: string): PairingModal[] {
+  return codes.filter((c) => c.peer !== peer);
+}
+
+/** Set the pending codes (oldest dropped past the cap); the newest is shown. */
+function withCodes(state: AppState, codes: readonly PairingModal[]): AppState {
+  const kept = codes.length > MAX_CODES ? codes.slice(-MAX_CODES) : codes;
+  return { ...state, codes: kept, pairing: kept.length > 0 ? kept[kept.length - 1]! : null };
+}
+
 function applySnapshot(
   state: AppState,
   snap: Extract<HostEvent, { event: "snapshot" }>,
   now: number,
 ): AppState {
+  if (state.phase === "ready") {
+    // A snapshot after ready is a late reply to an earlier request (ask()
+    // retries): it may be older than live events. Merge, highest rev wins;
+    // never regress or drop an entry (U4, U5).
+    let next = state;
+    for (const e of snap.entries) next = upsertEntry(next, e);
+    return next;
+  }
+  void now;
   const peers = new Map<string, PeerInfo>();
-  let pairing: PairingModal | null = null;
+  const codes: PairingModal[] = [];
+  const t = mono();
   for (const p of snap.peers) {
     if (p.state === "closed") continue;
     peers.set(p.peer, {
@@ -305,21 +392,29 @@ function applySnapshot(
       name: p.name,
       paired: p.paired,
     });
-    if (p.pairing !== null && pairing === null) {
-      pairing = {
-        peer: p.peer,
-        phoneName: p.pairing.phone_name,
-        code: p.pairing.code,
-        deadline: now + p.pairing.expires_in_secs * 1000,
-        attemptsRemaining: null,
-      };
+    if (p.pairing !== null) {
+      const ms = codeLifetimeMs(p.pairing.expires_in_secs);
+      if (ms > 0) {
+        codes.push({
+          peer: p.peer,
+          phoneName: stripBidi(p.pairing.phone_name),
+          code: p.pairing.code,
+          deadline: t + ms,
+          attemptsRemaining: null,
+        });
+      }
     }
   }
   const entries = new Map<string, Entry>();
   const order: string[] = [];
   for (const e of snap.entries) {
-    if (!entries.has(e.id)) order.push(e.id);
-    entries.set(e.id, e);
+    const prev = entries.get(e.id);
+    if (prev === undefined) {
+      order.push(e.id);
+      entries.set(e.id, e);
+    } else if (accepts(prev, e)) {
+      entries.set(e.id, e); // a duplicated id: the highest rev wins (U6)
+    }
   }
   const keepCleared = new Map<string, number>();
   for (const [id, rev] of state.cleared) if (entries.has(id)) keepCleared.set(id, rev);
@@ -337,13 +432,14 @@ function applySnapshot(
     entries,
     order: order.length > MAX_ENTRIES ? order.slice(-MAX_ENTRIES) : order,
     cleared: keepCleared,
-    pairing,
+    logWarning: snap.log_warning ?? null,
   };
   if (order.length > MAX_ENTRIES) {
     const kept = new Set(next.order);
     const trimmed = new Map([...entries].filter(([id]) => kept.has(id)));
     next = { ...next, entries: trimmed };
   }
+  next = withCodes(next, codes);
 
   // Merge what arrived before the snapshot.
   const lastCode = new Map<string, { code: string; phoneName: string; deadline: number }>();
@@ -361,8 +457,8 @@ function applySnapshot(
       case "pairing_code_shown":
         lastCode.set(ev.peer, {
           code: ev.code,
-          phoneName: ev.phone_name,
-          deadline: at + ev.expires_in_secs * 1000,
+          phoneName: stripBidi(ev.phone_name),
+          deadline: at + codeLifetimeMs(ev.expires_in_secs),
         });
         break;
       case "pairing_code_ended":
@@ -372,12 +468,17 @@ function applySnapshot(
         break; // state events: the snapshot supersedes them
     }
   }
-  if (next.pairing !== null) {
-    const newer = lastCode.get(next.pairing.peer);
-    if (newer !== undefined && newer.code !== next.pairing.code) {
-      next = { ...next, pairing: { ...next.pairing, ...newer } };
-    }
-  }
+  // A code delivered ahead of the snapshot (coalescing) is newer than the
+  // snapshot's code for the same connection.
+  next = withCodes(
+    next,
+    next.codes
+      .map((c) => {
+        const newer = lastCode.get(c.peer);
+        return newer !== undefined && newer.code !== c.code ? { ...c, ...newer } : c;
+      })
+      .filter((c) => c.deadline > t),
+  );
   return next;
 }
 
@@ -398,10 +499,27 @@ export function isCleared(state: AppState, e: Entry): boolean {
   return rev !== undefined && e.rev <= rev;
 }
 
-/** Case-insensitive substring match of the entry text. */
+const foldCache = new WeakMap<Entry, string>();
+// eslint-disable-next-line no-control-regex
+const ASCII_ONLY = /^[\u0000-\u007f]*$/;
+
+/** Case- and accent-insensitive key for searching: NFKD, combining marks
+ * removed, then lower-cased, so "İSTANBUL" ("i̇" after lower-casing alone)
+ * matches "istanbul". Locale-independent. */
+export function fold(s: string): string {
+  return ASCII_ONLY.test(s) ? s.toLowerCase() : s.normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase();
+}
+
+/** Case-insensitive substring match of the entry text (see {@link fold}).
+ * The folded text is cached per entry object. */
 export function matchesSearch(e: Entry, query: string): boolean {
   if (query === "") return true;
-  return e.text.toLowerCase().includes(query.toLowerCase());
+  let f = foldCache.get(e);
+  if (f === undefined) {
+    f = fold(e.text);
+    foldCache.set(e, f);
+  }
+  return f.includes(fold(query));
 }
 
 /** Entries on screen, oldest first: not cleared, matching the search. */

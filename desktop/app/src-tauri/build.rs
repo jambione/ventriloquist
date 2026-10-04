@@ -6,7 +6,7 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "snapshot",
             "forget_peer",
-            "set_log_dir",
+            "ack_events",
             "set_name",
             "cancel_pairing",
             "open_log_folder",

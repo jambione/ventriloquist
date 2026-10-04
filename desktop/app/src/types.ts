@@ -58,6 +58,8 @@ export type HostEvent =
       adapter_state: AdapterState;
       peers: PeerStatus[];
       entries: Entry[];
+      /** Latest log-write warning while the log is failing, else null. */
+      log_warning?: string | null;
     }
   | { event: "entry_upserted"; entry: Entry }
   | { event: "entry_evicted"; id: string }

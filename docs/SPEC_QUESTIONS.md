@@ -332,10 +332,10 @@ The page subscribes first and then asks for a snapshot, retrying every 3 s until
 The UI accepts an entry revision when its `rev` is higher, or when the `rev` is equal and a `partial` becomes `interrupted` (D8).
 
 ### W3. Clear view
-Clear view records each visible entry's id and current `rev`. An entry stays hidden until a higher revision arrives, which shows it again. That covers an edit to a cleared entry and a partial that was still live when the view was cleared. New ids always show. The record lives only in memory, so a page reload brings everything back from the snapshot. The log and the core are never touched. Search is a case-insensitive substring match on the entry text only, not the device name, and it applies to the entries that Clear view has not hidden.
+Clear view records each visible entry's id and current `rev`. An entry stays hidden until a higher revision arrives, which shows it again. That covers an edit to a cleared entry and a partial that was still live when the view was cleared. New ids always show. The record lives only in memory, so a page reload brings everything back from the snapshot. The log and the core are never touched. Search is a case- and accent-insensitive substring match (W11) on the entry text only, not the device name, and it applies to the entries that Clear view has not hidden.
 
 ### W4. Pairing modal
-The modal opens on `pairing_code_shown`. A newer code replaces any open one, so only one modal shows at a time. The countdown runs from the local receipt time plus `expires_in_secs`, or the snapshot's remaining seconds. The modal closes on `pairing_code_ended`, on `pairing_result{ok:true}`, on `pairing_result{ok:false, attempts_remaining:0}`, when its connection closes, at local expiry, and on Cancel or Esc. Cancel closes the modal immediately and sends `cancel_pairing`. A wrong code (`ok:false` with attempts left) keeps the modal open, because the code is still valid, and shows "Wrong code entered on the phone — N attempts left". This reading of "closes on result" is the only one that lets the user retry.
+The modal opens on `pairing_code_shown`. Only one modal shows at a time (the newest code; W11 for several connections). The countdown runs from the local (monotonic) receipt time plus `expires_in_secs`, or the snapshot's remaining seconds. The modal closes on `pairing_code_ended`, on `pairing_result{ok:true}`, on `pairing_result{ok:false, attempts_remaining:0}`, when its connection closes, at local expiry, and on Cancel or Esc. Cancel closes the modal immediately and sends `cancel_pairing`. A wrong code (`ok:false` with attempts left) keeps the modal open, because the code is still valid, and shows "Wrong code entered on the phone — N attempts left". This reading of "closes on result" is the only one that lets the user retry.
 
 ### W5. Toolbar status text
 The status line is chosen in this priority order:
@@ -355,13 +355,33 @@ The status line is chosen in this priority order:
 
 ### W7. Commands and permissions
 - **App commands.** The app's commands are declared in an app manifest (`build.rs`), so each one needs an explicit `allow-<command>` permission.
-- **Webview capability.** The only capability, `main`, grants exactly those 8 commands plus `core:event:allow-listen` and `core:event:allow-unlisten`.
+- **Webview capability.** The only capability, `main`, grants exactly those 8 commands (`snapshot`, `ack_events`, `forget_peer`, `set_name`, `cancel_pairing`, `open_log_folder`, `pick_log_dir`, `copy_text`) plus `core:event:allow-listen` and `core:event:allow-unlisten`.
 - **Plugins.** The clipboard, dialog and opener plugins are called from Rust, so the webview gets none of their permissions:
-  - `copy_text` writes the given string unchanged.
-  - `pick_log_dir` only returns the chosen folder, and the UI then calls `set_log_dir`.
-  - `open_log_folder` opens the host's current log directory, which Rust tracks from `started`, `snapshot` and `config_changed`. It takes no path argument.
-- **Argument limits.** String arguments are capped at 4 KiB, and `forget_peer` checks that the device id is a UUID.
+  - `copy_text` writes the given string unchanged, capped at 65,536 bytes (utterances can be 32,000 bytes; R3).
+  - `pick_log_dir` shows the picker in Rust and sends `SetLogDir` itself. The web view supplies no path and there is no `set_log_dir` command. A package (`.app`, `.bundle`, …) is refused, and so is a UNC path on Windows (it would send NTLM credentials to the server).
+  - `open_log_folder` opens the host's current log directory, which Rust tracks from `started`, `snapshot` and `config_changed`. It takes no path argument, refuses packages and (Windows) UNC paths, checks that the directory exists off the main thread, and names the file manager explicitly (`Finder`, `explorer`), so the OS never launches a bundle.
+- **Argument limits.** Other string arguments (name, peer id) are capped at 4 KiB, and `forget_peer` checks that the device id is a UUID.
 - **CSP.** The CSP allows only `'self'` and the IPC origins.
+
+### W9. Single instance (R1)
+Two layers: `tauri-plugin-single-instance` (registered first; a second launch exits and shows, unminimizes and focuses the main window) and an exclusive advisory lock on `<config dir>/.lock` taken by `Core::open` (also protects `vq-host`). If the lock is held, `Core::open` fails with `AddrInUse` ("Ventriloquist is already running…"), which the window shows as the fatal banner. The lock is released when the `Core` drops, so a restart in the same process works.
+
+### W10. Snapshot carries the log warning (R2)
+`snapshot` has `log_warning` (the latest message while the log is failing, else null). `Core` tracks it from the I/O results (`log_warning` sets it, `log_recovered` clears it). The UI applies it when the snapshot starts the page. A snapshot that arrives after the page is ready is merged for entries only (below), so it cannot resurrect a recovered warning. This keeps the banner across page reloads, including the automatic reload after a WebContent crash.
+
+### W11. Hostile and out-of-order input in the UI (adversary U1–U18)
+- **Bidi.** Every peer-provided string put into a sentence (names in the status line and notices, error messages, device names) has U+202A–202E, U+2066–2069, U+200E/F and U+061C removed and is wrapped in FSI…PDI (U+2068…U+2069). Status names are clipped to 32 characters, at most 2 are listed, then "and N more".
+- **Late snapshots.** A snapshot after the page is ready only merges entries under the highest-`rev` rule; it never regresses or drops an entry, and it does not touch peers, adapter or pairing. A duplicated id inside a snapshot keeps the highest `rev`.
+- **Tombstones.** The UI remembers evicted ids with their highest `rev` (at most 10,000, oldest dropped; mirrors the core's A3) and ignores upserts at or below it, so an evicted entry is not resurrected by a re-emitted `interrupted` or a stale revision. Clear view needs no extra record: the tombstone blocks the same revision.
+- **Pairing codes.** The UI keeps one code per connection (at most 8) and shows the newest; when it ends, another still-valid code is shown. `attempts_remaining <= 0` closes a code. `expires_in_secs` that is NaN, infinite or negative means already expired (no modal); more than 3600 means 120 s.
+- **Clocks.** Pairing deadlines and ticks use `performance.now()` (monotonic), so a wall-clock jump cannot extend a code. `formatCountdown` clamps to 0:00…60:00. `formatDate` returns "" outside the years 1900–9999 or for non-finite input (the adversary test requires 1969/1970 to format, so the lower bound is 1900, not 2000).
+- **Search.** Both sides are folded with NFKD, combining marks removed, then `toLowerCase()` (locale-independent), so "İSTANBUL" matches "istanbul". The folded text is cached per entry.
+
+### W12. Event flow control (R6)
+The forwarder emits at most 256 unacknowledged events to the page. The page acknowledges with `ack_events(n)` (every 16 events or after 100 ms, from a timer, not from rendering). With a full window the forwarder stops draining the host's bounded, coalescing channel, so a stalled page pushes back on the core. The window is reset when the page asks for a snapshot (a reload loses its acknowledgements) and after 5 s without any acknowledgement. A failed emit is logged and not counted; the page asks for a snapshot every 3 s while loading and shows a notice after 10 unanswered tries. Paths that are not valid Unicode are serialized lossily by the core, so events always serialize.
+
+### W13. Pairing code while the window is hidden
+On `pairing_code_shown`, Rust unminimizes and shows the window and requests user attention (informational; focus is not taken).
 
 ### W8. Shutdown and BLE permission on macOS
 - **Shutdown.** On `RunEvent::Exit`, after the last window closes or on Quit, the app sends `Shutdown` and waits up to 8 s for the host task. The host itself waits at most 3 + 2 + 1 s. A SIGTERM or SIGKILL skips this.

@@ -8,7 +8,7 @@
     "core:event:allow-unlisten",
     "allow-snapshot",
     "allow-forget-peer",
-    "allow-set-log-dir",
+    "allow-ack-events",
     "allow-set-name",
     "allow-cancel-pairing",
     "allow-open-log-folder",

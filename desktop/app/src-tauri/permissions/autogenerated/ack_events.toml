@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-ack-events"
+description = "Enables the ack_events command without any pre-configured scope."
+commands.allow = ["ack_events"]
+
+[[permission]]
+identifier = "deny-ack-events"
+description = "Denies the ack_events command without any pre-configured scope."
+commands.deny = ["ack_events"]

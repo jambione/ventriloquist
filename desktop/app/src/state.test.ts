@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_ENTRIES,
   copyText,
@@ -43,6 +43,14 @@ function snapshot(over: Partial<Extract<HostEvent, { event: "snapshot" }>> = {})
     ...over,
   };
 }
+
+// Pairing deadlines use the monotonic clock (performance.now()); tests set it.
+let clockNow = 0;
+function setClock(ms: number): void {
+  clockNow = ms;
+  vi.spyOn(performance, "now").mockImplementation(() => clockNow);
+}
+afterEach(() => vi.restoreAllMocks());
 
 const host = (event: HostEvent, now = 0): Action => ({ type: "host", event, now });
 const up = (e: Entry): HostEvent => ({ event: "entry_upserted", entry: e });
@@ -130,6 +138,7 @@ describe("snapshot", () => {
         },
       ],
     });
+    setClock(1000);
     const restored = run([host(withCode, 1000)]);
     expect(restored.pairing).toMatchObject({ peer: "p1", code: "111111", deadline: 31000 });
 
@@ -141,14 +150,19 @@ describe("snapshot", () => {
       code: "222222",
       expires_in_secs: 120,
     };
-    const newer = run([host(shown, 500), host(withCode, 1000)]);
+    setClock(500);
+    let newer = run([host(shown, 500)]);
+    setClock(1000);
+    newer = run([host(withCode, 1000)], newer);
     expect(newer.pairing).toMatchObject({ code: "222222", deadline: 120500 });
 
-    const ended = run([
+    setClock(500);
+    let ended = run([
       host(shown, 500),
       host({ event: "pairing_code_ended", peer: "p1", reason: "expired" }, 600),
-      host(withCode, 1000),
     ]);
+    setClock(1000);
+    ended = run([host(withCode, 1000)], ended);
     expect(ended.pairing?.code).toBe("111111");
   });
 
@@ -283,6 +297,7 @@ describe("pairing modal", () => {
   });
 
   it("opens with a deadline and closes on expiry", () => {
+    setClock(10_000);
     let s = run([host(snapshot()), host(shown("p1", "123456"), 10_000)]);
     expect(s.pairing).toMatchObject({ code: "123456", deadline: 130_000 });
     s = reduce(s, { type: "tick", now: 129_999 });
@@ -351,7 +366,7 @@ describe("warnings and settings", () => {
     );
     expect(s.notices.map((n) => n.text)).toEqual([
       "Could not save the settings: denied",
-      "Update Ventriloquist on Jon's iPhone",
+      "Update Ventriloquist on \u2068Jon's iPhone\u2069",
     ]);
     const first = s.notices[0];
     if (first === undefined) throw new Error("no notice");
@@ -386,5 +401,35 @@ describe("warnings and settings", () => {
     expect(s.peers.size).toBe(1);
     s = reduce(s, host(cs("closed")));
     expect(s.peers.size).toBe(0);
+  });
+});
+
+describe("review fixes", () => {
+  it("a snapshot carries the log warning, so the banner survives a page reload (R2)", () => {
+    const s = run([host(snapshot({ log_warning: "disk full (will retry)" }))]);
+    expect(s.logWarning).toBe("disk full (will retry)");
+    const none = run([host(snapshot({ log_warning: null }))]);
+    expect(none.logWarning).toBeNull();
+    // a buffered recovery that arrived before the snapshot still wins
+    const recovered = run([host({ event: "log_recovered" }), host(snapshot({ log_warning: "x" }))]);
+    expect(recovered.logWarning).toBeNull();
+  });
+
+  it("a late snapshot after ready does not bring back a recovered log warning", () => {
+    const s = run([host(snapshot({ log_warning: "x" })), host({ event: "log_recovered" }), host(snapshot({ log_warning: "x" }))]);
+    expect(s.logWarning).toBeNull();
+  });
+
+  it("tombstones are bounded", () => {
+    let s = ready();
+    for (let i = 0; i < 10_500; i++) s = reduce(s, host({ event: "entry_evicted", id: `x${i}` }));
+    expect(s.evicted.size).toBe(10_000);
+    expect(s.evicted.has("x0")).toBe(false);
+    expect(s.evicted.has("x10499")).toBe(true);
+  });
+
+  it("a newer revision of an evicted entry is accepted again", () => {
+    const s = ready(up(entry("a", 2, "final", "x")), { event: "entry_evicted", id: "a" }, up(entry("a", 3, "edit", "y")));
+    expect(texts(s)).toEqual(["y"]);
   });
 });

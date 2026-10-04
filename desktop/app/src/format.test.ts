@@ -70,17 +70,17 @@ describe("connectionStatus", () => {
     expect(connectionStatus(snap("unauthorized", []), "windows").text).toContain("Settings");
     expect(connectionStatus(snap("scanning", [{ state: "secure", name: "Jon's iPhone", paired: true }]), "mac")).toEqual({
       tone: "ok",
-      text: "Connected to Jon's iPhone (secure)",
+      text: "Connected to \u2068Jon's iPhone\u2069 (secure)",
     });
     expect(connectionStatus(snap("scanning", [{ state: "pairing", name: "A", paired: false }]), "mac").text).toBe(
-      "Pairing with A…",
+      "Pairing with \u2068A\u2069…",
     );
     expect(connectionStatus(snap("scanning", [{ state: "connected", name: "A", paired: false }]), "mac").text).toBe(
-      "Connecting to A…",
+      "Connecting to \u2068A\u2069…",
     );
     expect(
       connectionStatus(snap("scanning", [{ state: "hello_exchanged", name: "A", paired: false }]), "mac").text,
-    ).toBe("A found — pair from the phone");
+    ).toBe("\u2068A\u2069 found — pair from the phone");
     expect(connectionStatus(reduce(initialState(), { type: "fatal", message: "x" }), "mac").tone).toBe("warn");
   });
 

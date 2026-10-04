@@ -4,6 +4,7 @@
 
 import "./styles.css";
 import { backend } from "./backend";
+import { stripBidi } from "./bidi";
 import {
   connectionStatus,
   detectPlatform,
@@ -22,7 +23,7 @@ import {
   type Action,
   type AppState,
 } from "./state";
-import type { Entry } from "./types";
+import type { Entry, HostEvent } from "./types";
 
 const COPIED_MS = 1500;
 const SNAPSHOT_RETRY_MS = 3000;
@@ -35,6 +36,8 @@ function el<T extends HTMLElement = HTMLElement>(id: string): T {
 }
 
 const dom = {
+  header: el("toolbar"),
+  main: el("list"),
   statusDot: el("status-dot"),
   statusText: el("status-text"),
   search: el<HTMLInputElement>("search"),
@@ -66,6 +69,9 @@ const platform = detectPlatform(navigator.userAgent);
 let state: AppState = initialState();
 let renderQueued = false;
 
+/** Monotonic clock for every action (pairing deadlines, ticks). */
+const now = (): number => performance.now();
+
 function dispatch(action: Action): void {
   const next = reduce(state, action);
   if (next === state) return;
@@ -83,7 +89,7 @@ function report(what: string, err: unknown): void {
   console.error(what, err);
   dispatch({
     type: "host",
-    now: Date.now(),
+    now: now(),
     event: { event: "storage_warning", message: `${what}: ${String(err)}` },
   });
 }
@@ -170,7 +176,7 @@ function updateRow(row: Row, e: Entry): void {
   const old = row.shown;
   if (old === e) return;
   if (old?.time !== e.time) row.time.textContent = e.time;
-  if (old?.device_name !== e.device_name) row.device.textContent = e.device_name;
+  if (old?.device_name !== e.device_name) row.device.textContent = stripBidi(e.device_name);
   // Only touch the text when it changed, so a selection survives updates.
   if (old?.text !== e.text) row.text.textContent = e.text;
   const interrupted = e.state === "interrupted";
@@ -299,7 +305,7 @@ function renderSettings(force = false): void {
     const li = document.createElement("li");
     const info = document.createElement("div");
     info.className = "peer-info";
-    const name = span("peer-name isolate", p.name);
+    const name = span("peer-name isolate", stripBidi(p.name));
     const meta = span("muted", `paired ${formatDate(p.paired_at_ms)}`);
     info.append(name, meta);
     if (online.has(p.device_id)) info.append(span("badge online", "connected"));
@@ -345,9 +351,9 @@ function renderPairing(): void {
   }
   const wasHidden = dom.pairing.hidden;
   dom.pairing.hidden = false;
-  dom.pairingPhone.textContent = p.phoneName;
+  dom.pairingPhone.textContent = stripBidi(p.phoneName);
   dom.pairingCode.textContent = formatCode(p.code);
-  dom.pairingCountdown.textContent = formatCountdown(p.deadline - Date.now());
+  dom.pairingCountdown.textContent = formatCountdown(p.deadline - now());
   if (p.attemptsRemaining === null) {
     dom.pairingFailed.hidden = true;
   } else {
@@ -358,9 +364,9 @@ function renderPairing(): void {
   }
   if (pairingTimer === undefined) {
     pairingTimer = window.setInterval(() => {
-      dispatch({ type: "tick", now: Date.now() });
+      dispatch({ type: "tick", now: now() });
       if (state.pairing !== null) {
-        dom.pairingCountdown.textContent = formatCountdown(state.pairing.deadline - Date.now());
+        dom.pairingCountdown.textContent = formatCountdown(state.pairing.deadline - now());
       }
     }, 250);
   }
@@ -374,6 +380,7 @@ function render(): void {
   renderSettings();
   renderPairing();
   dom.clearView.disabled = entriesInView(state) === 0;
+  updateInert();
 }
 
 // ---------------------------------------------------------------- inputs
@@ -381,13 +388,23 @@ function render(): void {
 dom.search.addEventListener("input", () => dispatch({ type: "search", query: dom.search.value }));
 dom.clearView.addEventListener("click", () => dispatch({ type: "clear_view" }));
 
+/** While a dialog is open the page behind it is inert: Tab cannot leave
+ * the dialog and Cmd/Ctrl+F cannot focus the hidden search field. */
+function updateInert(): void {
+  const modal = !dom.settings.hidden || state.pairing !== null;
+  for (const e of [dom.header, dom.banners, dom.main]) e.inert = modal;
+  dom.settings.inert = state.pairing !== null;
+}
+
 function openSettings(): void {
   dom.settings.hidden = false;
+  updateInert();
   renderSettings(true);
   dom.closeSettings.focus();
 }
 function closeSettings(): void {
   dom.settings.hidden = true;
+  updateInert();
   dom.openSettings.focus();
 }
 dom.openSettings.addEventListener("click", openSettings);
@@ -397,10 +414,15 @@ dom.settings.addEventListener("click", (e) => {
 });
 
 dom.pickLogDir.addEventListener("click", () => {
+  // One picker at a time (the host sets the folder itself).
+  if (dom.pickLogDir.disabled) return;
+  dom.pickLogDir.disabled = true;
   backend
     .pickLogDir()
-    .then((path) => (path === null ? undefined : backend.setLogDir(path)))
-    .catch((e: unknown) => report("Could not change the log folder", e));
+    .catch((e: unknown) => report("Could not change the log folder", e))
+    .finally(() => {
+      dom.pickLogDir.disabled = false;
+    });
 });
 dom.openLogFolder.addEventListener("click", () => {
   backend.openLogFolder().catch((e: unknown) => report("Could not open the log folder", e));
@@ -429,6 +451,7 @@ document.addEventListener("keydown", (e) => {
     }
   } else if (e.key.toLowerCase() === "f" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
+    if (!dom.settings.hidden || state.pairing !== null) return;
     dom.search.focus();
     dom.search.select();
   }
@@ -436,12 +459,44 @@ document.addEventListener("keydown", (e) => {
 
 // ---------------------------------------------------------------- start
 
+/** Events handled but not yet acknowledged to the host (flow control). */
+let unacked = 0;
+let ackTimer: number | undefined;
+const ACK_EVERY = 16;
+const ACK_DELAY_MS = 100;
+
+function flushAcks(): void {
+  window.clearTimeout(ackTimer);
+  ackTimer = undefined;
+  const n = unacked;
+  unacked = 0;
+  if (n > 0) backend.ackEvents(n).catch((e: unknown) => console.error("ack failed", e));
+}
+
+function onHostEvent(event: HostEvent): void {
+  dispatch({ type: "host", event, now: now() });
+  // Acknowledge from a timer, not the render loop: rAF is paused while the
+  // window is hidden.
+  unacked++;
+  if (unacked >= ACK_EVERY) flushAcks();
+  else ackTimer ??= window.setTimeout(flushAcks, ACK_DELAY_MS);
+}
+
+/** Unanswered snapshot requests after which the user is told. */
+const SNAPSHOT_TRIES_BEFORE_NOTICE = 10;
+
 async function start(): Promise<void> {
   // Subscribe first, then ask for the snapshot: events that arrive before
-  // its reply are buffered by the reducer.
-  await backend.onHostEvent((event) => dispatch({ type: "host", event, now: Date.now() }));
+  // its reply are buffered by the reducer. A lost or undeliverable
+  // snapshot is requested again until one arrives.
+  await backend.onHostEvent(onHostEvent);
+  let tries = 0;
   const ask = (): void => {
     if (state.phase !== "loading") return;
+    tries++;
+    if (tries === SNAPSHOT_TRIES_BEFORE_NOTICE) {
+      report("The host is not answering", "still waiting for its state");
+    }
     backend.snapshot().then(
       () => window.setTimeout(ask, SNAPSHOT_RETRY_MS),
       (e: unknown) => dispatch({ type: "fatal", message: String(e) }),

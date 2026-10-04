@@ -99,6 +99,9 @@ pub enum HostEvent {
         peers: Vec<PeerStatus>,
         /// Transcript entries, oldest first.
         entries: Vec<Entry>,
+        /// Latest log-write warning while the log is failing, else `None`
+        /// (`log_warning` is only emitted on the transition).
+        log_warning: Option<String>,
     },
     /// An entry was created or changed (a newer revision was accepted).
     EntryUpserted {

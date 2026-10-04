@@ -27,6 +27,8 @@ cargo run   -p vq-host-core --features dev-tcp --bin vq-host -- --connect 127.0.
             --log-dir /tmp/vq-logs --config-dir /tmp/vq-cfg [--name "My Mac"]
 ```
 
+`Core::open` takes an exclusive advisory lock on `<config_dir>/.lock` for as long as the core lives; a second host on the same config directory fails to open with `AddrInUse` ("Ventriloquist is already running").
+
 **`dev-tcp` is refused in release builds** (`compile_error!`; D14): run the tests, the E2E harness and `vq-host` in debug builds only, and never enable `dev-tcp` for the app.
 
 `vq-host` is the desktop side of the TCP dev transport, so it is the **client**. Its default config directory is `<OS local config dir>/com.ventriloquist.desktop.dev`, which is separate from the app's. It reconnects with backoff (1, 2, 4, 8, max 15 s) until the phone simulator's server is up. Set `VQ_LOG=1` to get diagnostics on stderr. It stops on SIGINT or SIGTERM.
@@ -46,7 +48,7 @@ Events:
 | `event` | Fields |
 |---|---|
 | `started` | `device_id`, `name`, `log_dir`, `paired_peers` (array of `{device_id,name,public_key(b64),paired_at_ms}`) |
-| `snapshot` | answer to the `snapshot` command: `device_id`, `name`, `log_dir`, `paired_peers`, `adapter_state`, `peers` (array of `{peer, state, device_id, name, paired, pairing: null or {code, phone_name, expires_in_secs}}`), `entries` (array of entries, oldest first) |
+| `snapshot` | answer to the `snapshot` command: `device_id`, `name`, `log_dir`, `paired_peers`, `adapter_state`, `peers` (array of `{peer, state, device_id, name, paired, pairing: null or {code, phone_name, expires_in_secs}}`), `entries` (array of entries, oldest first), `log_warning` (string while the log folder cannot be written, else null) |
 | `connection_status` | `peer`, `state` (`connected`/`hello_exchanged`/`pairing`/`secure`/`closed`), `device_id` (null until the phone's hello), `name` (likewise), `paired` (bool), `reason` (null, or e.g. `unknown_peer`, `keepalive_timeout`, `idle_unpaired`, `rate_limited`, `protocol`, `version`) |
 | `pairing_code_shown` | `peer`, `device_id`, `phone_name`, `code` (exactly 6 ASCII digits), `expires_in_secs` (120) |
 | `pairing_code_ended` | `peer`, `reason` (`expired`/`too_many_failures`/`cancelled`/`disconnected`) |

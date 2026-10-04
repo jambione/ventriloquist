@@ -7,8 +7,9 @@
 //! [`crate::host`] runs it on tokio; tests drive it directly with a
 //! [`crate::clock::ManualClock`] and a synchronous [`IoWorker`].
 
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::clock::Clock;
@@ -54,6 +55,29 @@ pub struct Core {
     log_dir: PathBuf,
     adapter_state: AdapterState,
     startup_warnings: Vec<String>,
+    /// Latest log-write warning while the logger is failing (R2).
+    log_warning: Option<String>,
+    /// Exclusive advisory lock on `<config_dir>/.lock`, held while this
+    /// core exists (one host per config directory).
+    _lock: File,
+}
+
+/// Take the single-instance lock of `config_dir` (created if needed).
+fn lock_config_dir(config_dir: &Path) -> io::Result<File> {
+    crate::fsutil::create_private_dir_all(config_dir)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(config_dir.join(".lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "Ventriloquist is already running (its settings folder is locked by another process)",
+        )),
+        Err(TryLockError::Error(e)) => Err(e),
+    }
 }
 
 impl std::fmt::Debug for Core {
@@ -70,6 +94,7 @@ impl Core {
     /// config (a corrupt `config.json` falls back to the defaults with a
     /// `storage_warning`).
     pub fn open(opts: CoreOptions) -> io::Result<Self> {
+        let lock = lock_config_dir(&opts.config_dir)?;
         let identity = Identity::load_or_create(&opts.config_dir)?;
         let store = PairingStore::load(&opts.config_dir)?;
         let (config, config_warning) = ConfigStore::load(&opts.config_dir);
@@ -88,6 +113,8 @@ impl Core {
             log_dir,
             adapter_state: AdapterState::Unknown,
             startup_warnings: config_warning.into_iter().collect(),
+            log_warning: None,
+            _lock: lock,
         })
     }
 
@@ -132,6 +159,7 @@ impl Core {
             adapter_state: self.adapter_state,
             peers: self.sessions.statuses(&self.store, self.clock.as_ref()),
             entries: self.transcript.entries().cloned().collect(),
+            log_warning: self.log_warning.clone(),
         }
     }
 
@@ -243,7 +271,14 @@ impl Core {
     /// Handle the result of an [`IoJob`].
     pub fn handle_io(&mut self, r: IoResult) -> Vec<CoreOutput> {
         match r {
-            IoResult::Event(e) => vec![CoreOutput::Event(e)],
+            IoResult::Event(e) => {
+                match &e {
+                    HostEvent::LogWarning { message } => self.log_warning = Some(message.clone()),
+                    HostEvent::LogRecovered => self.log_warning = None,
+                    _ => {}
+                }
+                vec![CoreOutput::Event(e)]
+            }
             IoResult::ConfigSaved { error } => {
                 let mut out = Vec::new();
                 if let Some(e) = &error {
@@ -343,5 +378,51 @@ impl Core {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::ManualClock;
+    use chrono::DateTime;
+
+    fn opts(dir: &Path) -> CoreOptions {
+        CoreOptions {
+            config_dir: dir.to_path_buf(),
+            log_dir_override: Some(dir.join("log")),
+            name_override: Some("T".into()),
+            clock: Arc::new(ManualClock::new(
+                DateTime::parse_from_rfc3339("2026-10-03T14:00:00+02:00").unwrap(),
+            )),
+        }
+    }
+
+    #[test]
+    fn second_core_on_the_same_config_dir_is_refused_until_the_first_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Core::open(opts(dir.path())).unwrap();
+        let err = Core::open(opts(dir.path())).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(err.to_string().contains("already running"), "{err}");
+        drop(first);
+        Core::open(opts(dir.path())).expect("the lock is released on drop");
+    }
+
+    #[test]
+    fn snapshot_carries_the_log_warning_until_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = Core::open(opts(dir.path())).unwrap();
+        let warning = |c: &Core| match c.snapshot() {
+            HostEvent::Snapshot { log_warning, .. } => log_warning,
+            e => panic!("{e:?}"),
+        };
+        assert_eq!(warning(&core), None);
+        core.handle_io(IoResult::Event(HostEvent::LogWarning {
+            message: "disk full".into(),
+        }));
+        assert_eq!(warning(&core).as_deref(), Some("disk full"));
+        core.handle_io(IoResult::Event(HostEvent::LogRecovered));
+        assert_eq!(warning(&core), None);
     }
 }

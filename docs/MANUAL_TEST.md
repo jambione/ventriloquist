@@ -110,7 +110,7 @@ Owner's verification checklist for iPhone app + desktop app over Bluetooth LE. R
 
 ## Single Instance
 
-- [ ] **macOS: open -n** — `open -n Ventriloquist.app` → second window shows error, first window stays active
+- [ ] **macOS: open -n** — `open -n Ventriloquist.app` → the second launch exits and the first window is shown and focused (if it somehow got past the plugin, the core's lock file shows "already running" in the window)
 - [ ] **Windows: double-click** — double-click installer or app icon → second launch focuses existing window
 - [ ] **Daemon disconnection** — confirm only one host connects to phone as BLE central, not two
 

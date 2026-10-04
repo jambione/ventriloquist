@@ -282,6 +282,17 @@ impl Harness {
 
     /// Simulate an app restart: a fresh Core on the same directories.
     pub fn restart(&mut self) {
+        // The old core holds the config-dir lock: release it first (swap in
+        // a throwaway core on another config dir).
+        let spare = tempfile::tempdir().expect("tempdir");
+        let placeholder = Core::open(CoreOptions {
+            config_dir: spare.path().join("config"),
+            log_dir_override: Some(spare.path().join("logs")),
+            name_override: None,
+            clock: self.clock.clone(),
+        })
+        .expect("placeholder core");
+        drop(std::mem::replace(&mut self.core, placeholder));
         self.core = open_core(&self.dir, self.clock.clone());
         self.io = self.core.io_worker();
         self.events.clear();
