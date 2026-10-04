@@ -37,6 +37,8 @@ jobs:
         run: cargo test -p vq-protocol
       - name: Injector tests (vq-inject)
         run: cargo test -p vq-inject
+      - name: Relay tests (vq-relay)
+        run: cargo test -p vq-relay
       - name: Desktop core tests (debug, dev-tcp)
         run: cargo test -p vq-host-core --features dev-tcp
       - name: Clippy

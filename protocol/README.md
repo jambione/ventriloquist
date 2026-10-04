@@ -102,6 +102,10 @@ Frame size: the desktop uses the client session's `MaxPduSize − 3`; the phone 
 
 If the PC's adapter does not support the peripheral role (`BluetoothAdapter.IsPeripheralRoleSupported == false`) the desktop reports it and cannot accept phones. The desktop restarts advertising with backoff (1, 2, 4, 8, 15 s) if it aborts. `VQ_BLE_MODE=central|peripheral` selects the desktop transport for diagnostics.
 
+### 2.4 Relay transport (v3)
+
+In v3 the frames of §3 travel through a cloud relay (`relay.jbrasfield.com`) instead of BLE. The relay forwards opaque frames between a desktop and its phones, so the envelope, messages, pairing and session rules are unchanged. `mtu` is 8192 bytes. The relay's own protocol (endpoints, authentication, WebSocket and long-poll messages, limits, close codes) is specified in [relay/README.md](../relay/README.md), and in SPEC_V3.md section 4.
+
 ## 3. Framing
 
 ```

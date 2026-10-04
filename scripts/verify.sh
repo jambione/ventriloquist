@@ -114,7 +114,15 @@ gate6_inject() {
   fi
 }
 
-GATES=(gate1_protocol gate2_desktop_core gate3_e2e gate4_desktop gate4_ios gate5_frontend gate6_inject)
+# Gate 7: the relay server (vq-relay): protocol integration tests and clippy.
+gate7_relay() {
+  step "gate 7: cargo test -p vq-relay"
+  cargo test -p vq-relay
+  step "gate 7: cargo clippy -p vq-relay"
+  cargo clippy -p vq-relay --all-targets -- -D warnings
+}
+
+GATES=(gate1_protocol gate2_desktop_core gate3_e2e gate4_desktop gate4_ios gate5_frontend gate6_inject gate7_relay)
 
 # Run all gates, or only those named on the command line.
 if [ "$#" -gt 0 ]; then

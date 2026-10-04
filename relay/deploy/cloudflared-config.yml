@@ -1,0 +1,10 @@
+# Sample cloudflared config (~/.cloudflared/config.yml).
+# Replace <TUNNEL-UUID> and the credentials path with the values printed by
+# `cloudflared tunnel create ventriloquist`.
+tunnel: <TUNNEL-UUID>
+credentials-file: /Users/<you>/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: relay.jbrasfield.com
+    service: http://127.0.0.1:8787
+  - service: http_status:404

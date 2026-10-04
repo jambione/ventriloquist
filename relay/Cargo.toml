@@ -1,0 +1,31 @@
+[package]
+name = "vq-relay"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Ventriloquist relay: forwards end-to-end encrypted frames between desktops and phones"
+publish = false
+
+[lib]
+name = "vq_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vq-relay"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1.45", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+sha2 = "0.10"
+subtle = "2.6"
+rand = "0.8.5"
+
+[dev-dependencies]
+tokio-tungstenite = "0.29"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = "3"
