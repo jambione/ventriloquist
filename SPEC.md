@@ -4,13 +4,15 @@ Speak into an iPhone; the words appear in a desktop app window, ready to copy an
 
 Status: **APPROVED by owner 2026-10-03.**
 
+Revised 2026-10-04 to reflect decisions recorded in docs/SPEC_QUESTIONS.md during the build. Amended after M7 to fold in the decisions recorded in `docs/SPEC_QUESTIONS.md`; where they differ, the decision there wins until this spec is updated.
+
 ---
 
 ## 1. Goals and non-goals
 
 ### Goals
 - G1. Dictate on an iPhone. Text appears live in a desktop app over **Bluetooth LE**, with no network required.
-- G2. On-device transcription on the iPhone (Apple **SpeechAnalyzer**, iOS 26+). Audio never leaves the phone.
+- G2. On-device transcription on the iPhone (Apple **SpeechAnalyzer** + `DictationTranscriber`, iOS 26+). Audio never leaves the phone.
 - G3. Desktop app on **macOS and Windows** (Tauri + Rust). It shows transcripts for manual copying and appends them to a daily Markdown log.
 - G4. One-time pairing with a 6-digit code, after which all traffic is end-to-end encrypted at the application layer.
 - G5. Personal use: everything is built from source. There is no App Store, notarization or installer signing.
@@ -28,7 +30,7 @@ Status: **APPROVED by owner 2026-10-03.**
 
 | Topic | Decision |
 |---|---|
-| Speech-to-text | On iPhone, Apple SpeechAnalyzer (iOS 26 minimum) |
+| Speech-to-text | On iPhone, Apple SpeechAnalyzer with DictationTranscriber (iOS 26 minimum) |
 | Transport | Bluetooth LE |
 | Desktop app | Cross-platform GUI: Tauri v2 + Rust, BLE through `btleplug` |
 | Desktop OSes | macOS and Windows |
@@ -51,17 +53,18 @@ Status: **APPROVED by owner 2026-10-03.**
 ## 3. Architecture
 
 ```
-┌──────────────── iPhone (iOS 26, SwiftUI) ───────────────┐        ┌──────────── Desktop (Tauri v2) ──────────────┐
-│ DictationEngine (SpeechAnalyzer + AVAudioEngine)        │        │ Web UI (Vite + TypeScript)                   │
-│        │ partial/final text                             │        │        ▲ Tauri events / commands             │
-│ UtteranceController (ids, revisions, throttling, edit)  │        │ vq-host-core (Rust lib, no Tauri deps)       │
-│        │                                                │        │   SessionManager · TranscriptStore · Logger  │
-│ VQProtocol (Swift pkg): messages · crypto · framing     │◄──────►│ vq-protocol (Rust crate)                     │
-│        │                                                │  BLE   │        │                                     │
-│ Transport protocol                                      │  GATT  │ Transport trait                              │
-│   ├─ BLEPeripheralTransport (CoreBluetooth peripheral)  │        │   ├─ BleCentralTransport (btleplug)          │
-│   └─ TCPTransport (tests/dev only, server)              │        │   └─ TcpTransport (tests/dev only, client)   │
-└─────────────────────────────────────────────────────────┘        └──────────────────────────────────────────────┘
+┌─────────────────────── iPhone (iOS 26, SwiftUI) ────────────────────────┐        ┌──────────── Desktop (Tauri v2) ──────────────┐
+│ DictationEngine (SpeechAnalyzer + DictationTranscriber + AVAudioEngine) │        │ Web UI (Vite + TypeScript)                   │
+│        │ partial/final text                                             │        │        ▲ Tauri events / commands             │
+│ VQPhoneCore: PhoneEngine (ids, revisions, throttling,                   │        │ vq-host-core (Rust lib, no Tauri deps)       │
+│   edit, pairing, sessions, keepalive)                                   │        │   SessionManager · TranscriptStore · Logger  │
+│        │                                                                │        │                                              │
+│ VQProtocol (Swift pkg): messages · crypto · framing                     │◄──────►│ vq-protocol (Rust crate)                     │
+│        │                                                                │  BLE   │        │                                     │
+│ PhoneTransport protocol                                                 │  GATT  │ Transport trait                              │
+│   ├─ BLEPeripheralTransport (app, CoreBluetooth)                        │        │   ├─ BleCentralTransport (btleplug)          │
+│   └─ TCPServer (PhoneSim only, dev/tests)                               │        │   └─ TcpTransport (tests/dev only, client)   │
+└─────────────────────────────────────────────────────────────────────────┘        └──────────────────────────────────────────────┘
 ```
 
 ### 3.1 BLE roles (fixed decision)
@@ -83,15 +86,19 @@ All application traffic goes through the framing layer (§4.2). The two characte
 ### 3.3 Repository layout
 ```
 /SPEC.md
+/README.md                  Overview, prerequisites, build and verify instructions
 /protocol/                  Rust crate `vq-protocol` + README (wire spec) + vectors/*.json
-/desktop/core/              Rust crate `vq-host-core` (session, store, logger, transports); no Tauri deps
-/desktop/app/               Tauri v2 app (src-tauri depends on vq-host-core; frontend is Vite + TS)
-/ios/VQProtocol/            Swift package mirroring vq-protocol, tested against the same vectors
+/desktop/core/              Rust crate `vq-host-core` (session, store, logger, transports) + README; no Tauri deps
+/desktop/app/               Tauri v2 app (src-tauri depends on vq-host-core; frontend is Vite + TS) + README
+/ios/VQProtocol/            Swift package: `VQProtocol` (mirrors vq-protocol, tested against the same vectors),
+                            `VQPhoneCore` (PhoneEngine: utterances, pairing, sessions, keepalive; transport-agnostic)
 /ios/VQProtocol/Sources/PhoneSim/  Swift CLI (same package): fake phone over TCP for the E2E test
 /ios/App/                   iOS app; project generated by XcodeGen from project.yml
-/tests/e2e/                 E2E script: host-core over TCP <-> PhoneSim
+/tests/e2e/                 E2E harness (run.sh + e2e.py): vq-host over TCP <-> PhoneSim
 /docs/MANUAL_TEST.md        On-device checklist
+/docs/SPEC_QUESTIONS.md     Recorded decisions where this spec was silent or changed
 /scripts/verify.sh          Runs every automated gate (§9)
+/.github/workflows/         CI: desktop tests and macOS/Windows desktop builds
 ```
 A Cargo workspace at the repo root contains `protocol`, `desktop/core` and `desktop/app/src-tauri`.
 
@@ -127,25 +134,25 @@ encrypted   : counter (u64 BE) ‖ ciphertext‖tag (ChaCha20-Poly1305)
 - After a session is established, every non-plaintext-allowed message **must** be encrypted. Plaintext utterances are rejected.
 
 ### 4.4 Identity and pairing
-- Each install generates a long-term **X25519 identity key pair** and a random 128-bit `device_id`. iOS stores the private key in the Keychain (`ThisDeviceOnly`). The desktop stores it in a 0600 file in the app config dir (Windows: per-user AppData, ACL'd to the user).
+- Each install generates a long-term **X25519 identity key pair** and a random `device_id` (UUID v4; SPEC_QUESTIONS Q2). iOS stores the private key in the Keychain (`ThisDeviceOnly`). The desktop stores it in a 0600 file in the app config dir (Windows: `%LOCALAPPDATA%`, relying on its per-user ACL; SPEC_QUESTIONS D7).
 - Pairing is started from the phone, by tapping an unpaired desktop:
-  1. Desktop → phone `hello {device_id, name, pub, paired:bool}` is sent automatically after subscribing. The phone replies with `hello`. If both sides already know each other's `device_id` and `pub`, skip to §4.5.
+  1. Desktop → phone `hello {v, device_id, name, pub, paired, session_nonce}` (the desktop always sends `paired:false`; the phone sends `paired:true` exactly when it knows the desktop; SPEC_QUESTIONS Q1/Q3) is sent automatically after subscribing. The phone replies with `hello`. If both sides already know each other's `device_id` and `pub`, skip to §4.5.
   2. Phone → desktop `pair_request {nonce_p (32B b64)}`.
   3. The desktop generates a 6-digit code `C` (CSPRNG, uniform over 000000–999999) and shows it in a modal: *"Pairing request from <phone name>. Enter this code on your phone: 123 456"*. It replies `pair_challenge {nonce_d}`. The code expires after **120 s**.
   4. The user enters `C` on the phone. Both sides compute `ss = X25519(own_priv, peer_pub)` and `K_pair = HKDF-SHA256(ikm=ss, salt=nonce_p‖nonce_d, info="vq/pair/v1"‖C)`. The phone sends `pair_confirm {mac = HMAC-SHA256(K_pair, "phone"‖pub_p‖pub_d)}`.
-  5. The desktop verifies the MAC. On success it stores the phone (`device_id`, `pub`, name) and replies `pair_result {ok:true, mac = HMAC(K_pair, "desktop"‖pub_d‖pub_p)}`. The phone verifies that MAC and stores the desktop. On failure it replies `pair_result {ok:false}`. **After 3 failures, the code is invalidated** and the user must start pairing again.
+  5. The desktop verifies the MAC. On success it stores the phone (`device_id`, `pub`, name) and replies `pair_result {ok:true, mac = HMAC(K_pair, "desktop"‖pub_d‖pub_p)}`. The phone verifies that MAC and stores the desktop. On failure it replies `pair_result {ok:false}`. **After 3 failures, the code is invalidated** and the user must start pairing again. Pairing is rate-limited (normative text: `protocol/README.md` §7.3; SPEC_QUESTIONS D10): per phone `device_id`, at most one accepted `pair_request` per 10 s, and a 6th within 10 minutes disconnects and refuses that phone for 10 minutes. Each invalidated code locks pairing for all phones for 30 s, doubling per further invalidation up to 1 h, and is reset by a successful pairing. Only one pairing code is active at a time; a request on another connection gets `error{busy}`. Refused requests get `error{rate_limited}` or `error{busy}`, and the connection stays open (except as above).
 - **Threat model (explicit):** this design defends against passive eavesdroppers, unpaired devices sending text, and tampering or replay after pairing. An active man-in-the-middle present *during* the 120-second pairing window could brute-force the code offline from the phone's MAC. The owner accepts that risk for a personal tool. Do not "fix" it by adding complexity without the owner's approval.
 
 ### 4.5 Session establishment (on every connection)
 - After `hello` is exchanged between paired peers, both sides send fresh `session_nonce` values inside `hello`. The session key is `K_sess = HKDF-SHA256(ikm=ss, salt=nonce_phone‖nonce_desktop, info="vq/session/v1")`, 32 bytes, and counters reset to 0.
-- Either side may send `error {code, msg}` (plaintext) and disconnect. Codes include `unknown_peer`, `bad_mac`, `decrypt_failed`, `version`.
+- Either side may send `error {code, msg}` (plaintext) and disconnect. Codes include `unknown_peer`, `bad_mac`, `decrypt_failed`, `version`, `protocol`, `rate_limited` and `busy`. After `rate_limited` or `busy` the desktop keeps the connection open. An unauthenticated `error` never changes stored pairing state (SPEC_QUESTIONS Q18). Each side sends exactly one `hello` per connection; a second one is `error{protocol}` (Q14).
 - `hello` carries `v: 1`. On a version mismatch, the peer sends `error{code:"version"}`, and both UIs show "Update Ventriloquist on <device>".
 
 ### 4.6 Application messages (encrypted)
 | `t` | Direction | Fields | Semantics |
 |---|---|---|---|
 | `utt` | phone → desktop | `id` (UUID), `rev` (u32), `state` (`partial`/`final`/`edit`), `text`, `ts` (ms epoch, start of utterance) | Full current text, not a diff. The desktop keeps the highest `rev` per `id` and ignores lower or equal ones. |
-| `ack` | desktop → phone | `id`, `rev` | Sent for `final` and `edit` only. |
+| `ack` | desktop → phone | `id`, `rev` | Sent for every `final` and `edit` received, including duplicates and stale revisions (Q20). Never for partials. |
 | `ping` / `pong` | both | — | Keepalive every 15 s. Missing 3 in a row means the peer is treated as disconnected. |
 
 Rules:
@@ -171,6 +178,7 @@ Rules:
 - Tapping a paired online host makes it active and remembers it. Tapping an unpaired host starts pairing and opens the code-entry sheet (6 digits, numeric keypad, auto-submits on the 6th digit, shows a clear error on failure).
 - Swipe to **Forget** a paired host.
 - On launch, the remembered last host is selected automatically when it connects.
+- The code-entry sheet enforces the desktop's pairing limits on the phone side (≥ 10 s between requests, ≤ 5 per 10 minutes per desktop; after 3 wrong codes, wait for the desktop's lockout) and shows a countdown instead of sending. `rate_limited`/`busy` are non-fatal ("Try again later"). Details: SPEC_QUESTIONS P3.
 
 **History**
 - A list of past utterances (newest first): text, time, and delivery status (✓ acked, ⏳ pending, ✗ failed).
@@ -178,15 +186,15 @@ Rules:
 - History is stored locally with SwiftData, capped at 1,000 entries (oldest pruned first).
 
 **Settings**
-- Custom vocabulary: an editable list of terms (e.g. `kubectl`, `PostgreSQL`), passed to SpeechAnalyzer as contextual strings.
-- Device name shown to desktops (defaults to the iPhone's name).
+- Custom vocabulary: an editable list of terms (e.g. `kubectl`, `PostgreSQL`), passed to SpeechAnalyzer as contextual strings. At most 100 terms.
+- Device name shown to desktops. On first run the app asks for it, prefilled with `UIDevice.name` (which is only "iPhone" without a special entitlement). Names are cleaned (control and bidi characters removed, trimmed, at most 64 scalars).
 - Partial streaming on/off. Off means only `final`/`edit` are sent.
 
 ### 5.2 Dictation engine
-- Uses `SpeechAnalyzer` with `SpeechTranscriber` (locale en-US, volatile results enabled). On first run, the model is fetched through `AssetInventory` with progress UI.
-- Custom vocabulary goes in through `AnalysisContext` contextual strings. The builder must verify the API against the iOS 26 SDK. If contextual strings are unsupported for `SpeechTranscriber`, use `DictationTranscriber` and document the choice.
-- Audio comes from `AVAudioEngine` with the `.record` category in `.measurement` mode. Audio is processed in memory only and never written to disk.
-- Permissions requested on first use: microphone, speech recognition (if required by the API), and Bluetooth. If a permission is denied, the screen explains why it's needed and gives a "Open Settings" button.
+- Uses `SpeechAnalyzer` with **`DictationTranscriber`** (locale en-US, `.punctuation`, `.volatileResults`). `SpeechTranscriber` was rejected because the iOS 26 SDK documents `AnalysisContext.contextualStrings` only for `DictationTranscriber` (SPEC_QUESTIONS P1). On first run, the model is fetched through `AssetInventory` with progress UI. Audio is converted with `AVAudioConverter` (`AnalyzerInputConverter` is iOS 27+).
+- Custom vocabulary goes in through `AnalysisContext.contextualStrings[.general]`, at most 100 terms (the SDK's documented limit; Settings enforces it).
+- Audio comes from `AVAudioEngine` with the `.record` category in `.measurement` mode. Audio is processed in memory only and never written to disk. Audio route-change handling ignores the `.categoryChange` iOS posts when recording starts and reacts only to real input-device changes (fixed after on-device testing, commit 6098480).
+- Permissions requested on first use: microphone, speech recognition (requested with the microphone on the first recording; SPEC_QUESTIONS P2), and Bluetooth. If a permission is denied, the screen explains why it's needed and gives a "Open Settings" button.
 - Interruptions such as a phone call or Siri stop the recording gracefully and send `final`.
 - When the app is backgrounded during a recording, the recording stops and sends `final`. Advertising stops in the background, and the BLE state is restored on returning to the foreground.
 
@@ -202,9 +210,10 @@ Rules:
   - A **Copy** button per entry copies the exact text, with no trailing newline, and shows "Copied ✓" for 1.5 s.
   - A live partial entry is shown dimmed and italic with a "speaking…" indicator. It becomes normal when it turns `final`.
   - An entry replaced by an `edit` shows an "edited" badge.
-- **Search:** case-insensitive substring filter over the entries currently in view.
-- **Clear view:** empties the on-screen list only. It never touches the log.
-- **Pairing modal:** shows the 6-digit code in large type, the requesting phone's name, a countdown, and a Cancel button.
+- **Search:** case- and accent-insensitive substring filter over the entry text (not the device name) of the entries Clear view has not hidden.
+- **Clear view:** empties the on-screen list only. It never touches the log. A hidden entry reappears when a higher revision of it arrives (SPEC_QUESTIONS W3).
+- **Pairing modal:** shows the 6-digit code in large type, the requesting phone's name, a countdown, and a Cancel button. A wrong code keeps the modal open with the attempts left; it closes on success, on invalidation, on expiry, on disconnect or on Cancel (W4). When a code is shown, the window is unminimized and requests attention (W13).
+- **Single instance:** a second launch focuses the existing window (`tauri-plugin-single-instance`), and an exclusive lock on `<config dir>/.lock` stops a second core, including `vq-host` (SPEC_QUESTIONS W9).
 - **Settings:** log directory (folder picker; default `~/Documents/Ventriloquist/`), paired phones with a Forget button, this desktop's display name (default: hostname), and an "Open log folder" button.
 - In-memory history keeps the last 500 entries for the current run. Earlier history lives in the log files.
 
@@ -218,11 +227,12 @@ Rules:
 - Appended on `edit`: the same format with `· edited`. The original line is never rewritten, so the log is append-only.
 - Partials are never logged. Duplicate (`id`, `rev`) deliveries are never logged twice.
 - Writes are append plus flush. If the log can't be written, the UI shows a non-blocking warning banner and transcription keeps working.
+- The header is followed by one blank line. Dedupe across restarts uses a sidecar index `<log_dir>/.vq-index/YYYY-MM-DD.idx` and checks the arrival day and the previous day (SPEC_QUESTIONS D1). Only a revision the store accepts is logged (D2). Control and bidi characters in text and names are written as visible `\u{XX}` escapes (D3).
 
 ### 6.3 BLE central (`BleCentralTransport`)
 - Scans for the service UUID, connects to every advertising phone, subscribes to `TX`, and sends `hello`.
 - Unpaired phones are kept connected while pairing may happen, and are dropped after 5 minutes of no pairing activity.
-- Auto-reconnects with backoff (1, 2, 4, 8, max 15 s) whenever the peripheral disappears.
+- Auto-reconnects with backoff (immediately, then 1, 2, 4, 8, max 15 s) whenever the peripheral disappears. A reconnect waits 60 s after an idle drop and 30 s after `error{unknown_peer}` (SPEC_QUESTIONS D4).
 - macOS: `NSBluetoothAlwaysUsageDescription` goes in Info.plist. Windows: WinRT through btleplug. If Bluetooth is off or unauthorized, the toolbar says so.
 
 ---
@@ -232,23 +242,23 @@ Rules:
 - `TranscriptStore`: entries keyed by `id`, revision handling, and a 500-entry cap. Emits `entry_upserted` events.
 - `Logger`: append-only daily Markdown with dedupe by (`id`, `rev`).
 - `PairingStore`: persisted peers in JSON in the app config dir.
-- `Transport` trait implemented by BLE and TCP. The TCP transport is **behind a `dev-tcp` cargo feature** and must not be enabled in release builds of the app.
+- `Transport` trait implemented by BLE and TCP. The TCP transport is **behind a `dev-tcp` cargo feature** and must not be enabled in release builds of the app. The `dev-tcp` feature is a `compile_error!` in release builds (SPEC_QUESTIONS D14).
 - It is fully usable headlessly. A `vq-host` binary (feature `dev-tcp`) runs the core over TCP and prints entries to stdout, for the E2E test.
 
 ## 8. iOS internals
 - `VQProtocol` (Swift package, CryptoKit only, no third-party deps) contains messages, framing, envelope, pairing and session crypto.
-- A `Transport` protocol has `BLEPeripheralTransport` and `TCPTransport` (`#if DEBUG` or a test target only).
-- `PhoneSim` (an executable target in the same package) is a scripted fake phone that serves TCP, pairs with a given code, sends partial/final/edit, and verifies acks. It is used by the E2E test.
+- `VQPhoneCore` (a second library target in the same package) holds `PhoneEngine`: host list, pairing, sessions, utterance ids and revisions, throttling, retries and keepalive. It talks to a `PhoneTransport` protocol. The app implements it with `BLEPeripheralTransport`; the app contains no TCP code.
+- `PhoneSim` (an executable target in the same package) runs the real `PhoneEngine` over a TCP server (`TCPServer`, port 47800, `u16 BE length ‖ frame`; SPEC_QUESTIONS Q17/E2). It is scripted over stdin, pairs with a given code, sends partial/final/edit and verifies acks. It is used by the E2E test.
 - The app is generated by **XcodeGen** (`ios/App/project.yml`). The generated `.xcodeproj` is gitignored.
 
 ---
 
 ## 9. Verification gates (all must pass; `scripts/verify.sh` runs them)
-1. **Protocol vectors:** `cargo test -p vq-protocol` and `swift test` in `ios/VQProtocol`. Both consume `protocol/vectors/*.json`, which covers framing split/reassembly, the envelope, HKDF outputs, the pairing MACs, encryption with fixed keys, nonces and counters, and replay rejection.
-2. **Core tests:** `cargo test -p vq-host-core`. These cover revision ordering, duplicate and out-of-order delivery, the edit-before-final case, log dedupe and formatting, pairing failure lockout after 3 tries, code expiry, plaintext-utterance rejection, and oversize-message rejection.
-3. **E2E (mock transport):** `tests/e2e/run.sh` starts `vq-host` (TCP) and `PhoneSim`, pairs, sends partials, a final and an edit, and then asserts the log file contents and the stdout entries. It also covers reconnect and re-delivery without duplicates.
-4. **Clean builds:** `cargo clippy --workspace -- -D warnings`, `cargo tauri build` (on macOS), and `xcodegen && xcodebuild -scheme Ventriloquist -destination 'generic/platform=iOS Simulator' build` with zero errors and zero Swift compiler warnings in project code.
-5. **Frontend:** `npm run build` plus `tsc --noEmit` with strict mode.
+1. **Protocol vectors:** `cargo test -p vq-protocol`, `cargo clippy -p vq-protocol --all-targets -- -D warnings` and `swift test` in `ios/VQProtocol`. Both consume `protocol/vectors/*.json`, which covers framing split/reassembly, the envelope, HKDF outputs, the pairing MACs, encryption with fixed keys, nonces and counters, and replay rejection.
+2. **Core tests:** `cargo test -p vq-host-core --features dev-tcp` and clippy with `--features dev-tcp`. The crate also builds with default and with no default features, and a release build with `dev-tcp` must fail. These cover revision ordering, duplicate and out-of-order delivery, the edit-before-final case, log dedupe and formatting, pairing failure lockout after 3 tries, code expiry, plaintext-utterance rejection, and oversize-message rejection.
+3. **E2E (mock transport):** `tests/e2e/run.sh` builds `vq-host` (debug, `dev-tcp`) and `PhoneSim`, starts them, pairs, sends partials, a final and an edit, and then asserts the log file contents and the stdout entries. It also covers reconnect and re-delivery without duplicates.
+4. **Clean builds:** `cargo clippy --workspace --all-targets -- -D warnings`; the app must not enable `vq-host-core/dev-tcp`; `cargo tauri build` (on macOS), and the bundle's Info.plist must contain `NSBluetoothAlwaysUsageDescription`; `xcodegen && xcodebuild -scheme Ventriloquist -destination 'generic/platform=iOS Simulator' build` (unchanged), with zero errors and zero Swift compiler warnings in project code.
+5. **Frontend:** `npm ci`, `tsc --noEmit` (strict), `npm test` (vitest) and `npm run build`.
 6. **Manual checklist:** `docs/MANUAL_TEST.md` covers pairing, live streaming, edits, re-sends, two desktops, Bluetooth off and on, walking out of range and back, a 5-minute continuous dictation, and Windows-specific steps. The owner runs this checklist; agents only write it.
 
 ### Prerequisites the owner must install
@@ -288,4 +298,4 @@ Roles:
 - Apple Team ID: **`D5K4MV7298`** (automatic signing). iOS bundle id: **`com.ventriloquist.app`**. Desktop Tauri identifier: **`com.ventriloquist.desktop`**.
 - Toolchain installed on the build Mac: Rust 1.99 (rustup; run `. "$HOME/.cargo/env"` in a fresh shell), tauri-cli 2.12.1, XcodeGen 2.46, Xcode 27, Node 20.
 - Windows is built and verified by the owner. Agents only keep the code Windows-compatible (no macOS-only APIs outside `cfg(target_os)`).
-- Still open, to be settled by the M6 builder: the custom vocabulary API details (§5.2). Use the documented fallback if needed.
+- Custom vocabulary API (§5.2): **settled in M6**. The fallback `DictationTranscriber` is used (SPEC_QUESTIONS P1).

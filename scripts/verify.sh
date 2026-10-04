@@ -65,8 +65,25 @@ gate4_desktop() {
   if [ "$(uname)" = "Darwin" ]; then
     step "gate 4: cargo tauri build (desktop/app)"
     (cd desktop/app && cargo tauri build)
+    step "gate 4: bundle Info.plist has NSBluetoothAlwaysUsageDescription"
+    plutil -extract NSBluetoothAlwaysUsageDescription raw \
+      target/release/bundle/macos/Ventriloquist.app/Contents/Info.plist >/dev/null
   else
     echo "skipping cargo tauri build (macOS only for agents; Windows is built by the owner)"
+  fi
+}
+
+# Gate 4 (iOS half): generate the project with XcodeGen and build it for
+# the simulator with zero Swift compiler warnings in project code.
+gate4_ios() {
+  if [ "$(uname)" != "Darwin" ]; then echo "skipping iOS build (macOS only)"; return 0; fi
+  step "gate 4: xcodegen (ios/App)"
+  (cd ios/App && xcodegen)
+  step "gate 4: xcodebuild Ventriloquist (iOS Simulator), zero project warnings"
+  local out; out="$(cd ios/App && xcodebuild -scheme Ventriloquist \
+      -destination 'generic/platform=iOS Simulator' build 2>&1)" || { echo "$out"; return 1; }
+  if grep -E '/ios/(App|VQProtocol)/.*: warning:' <<<"$out"; then
+    echo "error: Swift compiler warnings in project code" >&2; return 1
   fi
 }
 
@@ -82,7 +99,7 @@ gate5_frontend() {
   (cd desktop/app && npm run build)
 }
 
-GATES=(gate1_protocol gate2_desktop_core gate3_e2e gate4_desktop gate5_frontend)
+GATES=(gate1_protocol gate2_desktop_core gate3_e2e gate4_desktop gate4_ios gate5_frontend)
 
 # Run all gates, or only those named on the command line.
 if [ "$#" -gt 0 ]; then

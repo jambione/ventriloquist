@@ -317,6 +317,9 @@ A peripheral cannot disconnect a central. "Disconnect" on the phone marks the li
 - Identity: one Keychain generic-password item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, not synchronizable); `kSecValueData` is the 32-byte private key written through `IdentityKeyPair.withSecretBytes`; `kSecAttrGeneric` is the 16-byte `device_id`. If the item exists but cannot be read, the app runs with a temporary identity and shows a warning. It never overwrites the stored item.
 - Paired hosts: `Application Support/paired-hosts.json` (atomic, protected until first unlock). Settings and the last host: `UserDefaults`. History: SwiftData, 1,000 entries, oldest pruned first.
 
+### P7. VQPhoneCore, PhoneTransport and where the phone-side TCP lives (SPEC §3, §8)
+**Decision.** SPEC §3/§8 put a `Transport` protocol with `BLEPeripheralTransport` and `TCPTransport` in the iOS app. The code is stricter. The protocol is `PhoneTransport` (`ios/VQProtocol/Sources/VQPhoneCore/Transport.swift`), in a third SwiftPM target, `VQPhoneCore`, which also holds `PhoneEngine` (utterances, pairing, sessions, keepalive). The app conforms `BLEPeripheralTransport` to `PhoneTransport`. The TCP side is `TCPServer` in the `PhoneSim` executable (`Sources/PhoneSim/TCPServer.swift`), so the app contains no TCP code at all and nothing needs an `#if DEBUG` guard. E1/E2 cover only PhoneSim's location and threading. SPEC §3, §3.3 and §8 were updated to match.
+
 ## M5 (desktop app)
 
 Numbered W1… so they cannot collide with entries written by other milestones at the same time.
