@@ -284,9 +284,15 @@ Checked against the installed SDK (Xcode 27, `iPhoneOS27.0.sdk`, `Speech.framewo
 The SDK documentation for `SpeechAnalyzer`/`DictationTranscriber` does not say whether `SFSpeechRecognizer` authorization is required. `DictationTranscriber` is the dictation engine historically gated by that authorization, so the app requests it (with `NSSpeechRecognitionUsageDescription`) together with the microphone on the first recording, and shows the Open Settings screen if either is denied. If on-device testing shows it is unnecessary, the request can be removed.
 
 ### P3. Phone-side pairing behaviour not fixed by the README
-- **Wrong code** (`pair_result{ok:false}`): the sheet says "Wrong code" and lets the user retry with the same nonces. After the 3rd `ok:false` on one challenge (the desktop has then invalidated the code) the phone sends a new `pair_request` itself and asks for the new code. A "Get a new code" button does the same at any time.
-- **Expired code**: if the user submits 120 s or more after the `pair_challenge` arrived, the phone sends a new `pair_request` instead of a `pair_confirm` that would certainly fail.
+- **Wrong code** (`pair_result{ok:false}`): the sheet says "Wrong code" and lets the user retry with the same nonces. After the 3rd `ok:false` the desktop has invalidated the code and started its global lockout (30 s, doubling, max 1 h). The phone does **not** send a new `pair_request` by itself: the sheet shows "wait, then try again" with a countdown (`PairingStatus.retryIn`, at least the 30 s lockout for the first invalidation, doubling for each further one since the last success, tracked per desktop). "Get a new code" sends a request only within the limits below.
+- **Client-side pairing limits** (mirror of `desktop/core/src/pairing_guard.rs`, README §7.3): per desktop, at least 10 s between `pair_request`s and at most 5 per 10 minutes (refused ones count). When a request would break a limit, nothing is sent and the sheet shows the wait with a disabled, counting-down Try again button. A `rate_limited` that arrives outside a pairing exchange (a refused `hello`) blocks pairing to that desktop for 10 minutes. Beyond the 10 s spacing there is no extra backoff after `rate_limited`/`busy` (the retry is the user's tap).
+- **Expired code**: if the user submits 120 s or more after the `pair_challenge` arrived, the phone sends a new `pair_request` (if within the limits) instead of a `pair_confirm` that would certainly fail.
 - **`rate_limited` / `busy`** (README §7.3): non-fatal. The pairing sheet shows "…Try again later" with a Try again button, the connection is kept and goes back to the unpaired state. If the desktop does close the link, the transport reports it as usual.
+- **Same `device_id` on several connections** (V1): an unauthenticated `hello` never closes an existing connection. A new Secure connection of a desktop we already have is pinged at once; only when a message from it decrypts does it replace the older ones. Until then the older/authenticated one carries utterances and defines the host row.
+- **Silent connections** (M20): no `hello` within 30 s closes the connection; at most 8 unproven connections are kept (oldest silent first).
+- **Closes tell the desktop** (M8): engine-initiated closes (replaced, forgotten, protocol errors, cap) send plaintext `error{protocol}` first and the transport closes gracefully (queued frames are delivered). Not sent for keepalive timeout (dead link), `disconnectAll` (backgrounding; the vanishing GATT service is the signal) or when an `error` was just sent.
+- **Names** (M14, M15): desktop names and our own name are cleaned like the desktop's K13 (control and bidi characters removed, trimmed, at most 64 scalars; empty becomes "Unnamed desktop" / "iPhone"). First run asks for a device name, prefilled with `UIDevice.name` (which is only "iPhone" without a special entitlement).
+- **Unreadable host file** (M10): `PhoneEngine.pairedHostsUnreadable` is set, the app shows a banner, and the file is renamed `paired-hosts.unreadable-<time>.json` before the first save; if that fails the pairing is not saved. With a temporary identity (Keychain read failure, M9) the app uses in-memory host and settings stores.
 - **Other `error`s** (any provenance): shown, and the phone closes the connection. None of them changes the paired-host store; `unknown_peer` only marks the host "not recognised" in memory.
 - A desktop `hello` with `v ≠ 1` shows "Update Ventriloquist on <desktop name>" (README §5.2 wording); a received `error{version}` shows "Update Ventriloquist on this iPhone" (mirrors D6).
 - A second connection from the same `device_id` (after `hello`) replaces the older one.
@@ -295,14 +301,17 @@ The SDK documentation for `SpeechAnalyzer`/`DictationTranscriber` does not say w
 ### P4. Utterance pipeline details
 - `rev` counts every revision actually sent for an `id`, starting at 0 (partials, then the final, then each edit). Retries resend the same `rev`.
 - Partials are sent at most every 200 ms (latest text wins; an identical text is not resent). Partials that could not be sent because no host was Secure are not queued, except that the latest one goes out once the host is Secure and the utterance is still open.
-- Only the newest `final`/`edit` per `id` is kept for delivery; an `ack` with `rev` ≥ the pending one completes it.
+- Only the newest `final`/`edit` per `id` is kept for delivery; an `ack` completes it only when its `rev` equals the pending `rev` (lower is stale, higher was never sent, V2).
+- Partials are limited to 5/s across the connection, also between back-to-back utterances (V3).
+- Memory bounds (V4–V6): at most 1,000 deliveries wait for an ack or a host; on overflow the oldest becomes `failed` and leaves the queue (Re-send from history). Per-id state of acked or dropped ids is kept for the last 1,000 only; `forgetDelivery` releases everything (a later `sendEdit` for it returns `nil`); the app calls it for every history entry pruned or deleted.
+- On stop, the app waits up to about 1.5 s in total for the analyzer to finalize (M22).
 - Retries: every 2 s, up to 5 per connection; then the status is **failed**. A failed or pending delivery is sent again, with a fresh retry budget, whenever the active host (re)becomes Secure or a different paired host is made active. Pending deliveries follow the active host.
 - Pending deliveries are kept in memory only. History entries still "pending" at the next launch are shown as failed so the user can Re-send them.
 - An utterance that stops with empty text and never sent a partial is dropped. Deleting a history entry stops its retries.
 - `ts` of an `edit` is the original utterance's `ts`. Re-send uses the current time.
 
 ### P5. Background and BLE peripheral lifecycle
-A peripheral cannot disconnect a central. "Disconnect" on the phone marks the link closed: its queued frames are discarded and its writes ignored until it subscribes again. On backgrounding, the app stops the recording (the `final` is queued), drops every engine connection, stops advertising and removes the GATT service so desktops see the service disappear. On returning to the foreground it re-adds the service and advertises again. A write from a central that has not subscribed yet is treated as its connect. Each link queues at most 12,000 frames for `peripheralManagerIsReady`; beyond that the link is closed.
+A peripheral cannot disconnect a central. "Disconnect" on the phone marks the link closed: its queued frames are discarded and its writes ignored until it subscribes again. On backgrounding, the app stops the recording (the `final` is queued), waits up to 5 s (inside a background task) until the final is acked and the BLE queue is empty, then drops every engine connection, stops advertising and removes the GATT service so desktops see the service disappear. A return to the foreground within that wait cancels the teardown. "Disconnect" is graceful: frames already queued (such as an `error`) are still sent (`FrameSendQueue`). On returning to the foreground it re-adds the service and advertises again. A write from a central that has not subscribed yet is treated as its connect. Each link queues at most 12,000 frames for `peripheralManagerIsReady`; beyond that the link is closed.
 
 ### P6. Persistence
 - Identity: one Keychain generic-password item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, not synchronizable); `kSecValueData` is the 32-byte private key written through `IdentityKeyPair.withSecretBytes`; `kSecAttrGeneric` is the 16-byte `device_id`. If the item exists but cannot be read, the app runs with a temporary identity and shows a warning. It never overwrites the stored item.
@@ -358,3 +367,32 @@ The status line is chosen in this priority order:
 - **Shutdown.** On `RunEvent::Exit`, after the last window closes or on Quit, the app sends `Shutdown` and waits up to 8 s for the host task. The host itself waits at most 3 + 2 + 1 s. A SIGTERM or SIGKILL skips this.
 - **Info.plist.** `NSBluetoothAlwaysUsageDescription` comes from `src-tauri/Info.plist`, which the bundler merges into the app's plist.
 - **Launching the binary.** macOS kills a process that uses Bluetooth when the *responsible* process has no usage description. Running `Contents/MacOS/Ventriloquist` directly from a terminal therefore crashes with a TCC violation, because the terminal is the responsible process. Launch the bundle with `open Ventriloquist.app`, or from Finder.
+
+## M4 (E2E)
+
+Numbered E1… so they cannot collide with entries written by other milestones at the same time.
+
+### E1. Where PhoneSim lives
+SPEC §3.3 lists `/ios/PhoneSim/`. SwiftPM does not allow a target path outside the package root, so the target is `ios/VQProtocol/Sources/PhoneSim` (an `executableTarget` plus an `executable` product in `ios/VQProtocol/Package.swift`), with its docs in `ios/VQProtocol/PhoneSim-README.md`. **Proposed SPEC change:** §3.3 should read `/ios/VQProtocol/Sources/PhoneSim/`.
+
+### E2. PhoneSim design
+- **Threading.** One thread with non-blocking POSIX sockets and a `poll(2)` loop. `PhoneEngine` is not `Sendable`, so nothing crosses threads. The loop runs `tick()` about every 20 ms on the real `SystemClock`.
+- **State.** `--state-dir` stores the identity (with the private key in a plain 0600 file), the paired hosts and the last host. This is for tests only.
+- **`wait-acked`.** It takes no rev argument. The engine marks a delivery acked only for an `ack` with `rev` ≥ the pending `rev`, so "acked" always means the latest `final`/`edit` of that utterance was acked.
+- **Test controls.** `tx-pause`, `rx-pause`, `drop-connection` and `inject-plaintext-utt` exist only in PhoneSim, so the e2e test can create unacked finals and send a forged message deterministically.
+
+### E3. E2E harness decisions
+- **Driving PhoneSim.** `tests/e2e/run.sh` drives PhoneSim through a FIFO on stdin. Each command is answered by `command_done`/`command_failed` with its `seq`. The pairing code reaches PhoneSim as a file (`pair @file`): the script copies it from vq-host's `pairing_code_shown`.
+- **Log assertions.**
+  - In scenario b, the log file is compared literally.
+  - After every scenario, every log file must equal the header plus the SPEC §6.2 rendering of every accepted `final`/`edit` `entry_upserted`, in order. `tests/e2e/e2e.py` re-implements the `inert()` rules of `desktop/core/src/logger.rs` for this. If those rules change, `e2e.py` must change with them.
+  - A run that crosses local midnight can split entries across two day files. The helper groups entries by `received_at` date, so this is handled.
+- **Scenario d** is split into two cases:
+  - d1: the desktop never received the final. The final goes out under a TX pause and the link is dropped. On reconnect it is re-delivered and logged once.
+  - d2: the desktop logged the final but the ack was lost. RX is paused and the link is dropped. On reconnect the re-delivery is deduplicated: there is no second event or log line, and the phone records one ack.
+- **Scenario g** uses a fresh phone and the code shown + 1 (mod 10⁶), so there is only one failure and no global lockout. It also injects a plaintext `utt`. The test asserts `message_rejected{plaintext_not_allowed}`, and that the phone produced no entry, no `paired_peers_changed` and no secure session.
+- Reconnects rely on vq-host's TCP backoff, which is 1 s after a dropped connection. A full run takes about 12–16 s, with a 300 s overall watchdog (`E2E_TIMEOUT`).
+- `run.sh` is compatible with bash 3.2 (macOS `/bin/bash`): it uses no associative arrays.
+
+### E4. Interop findings
+None. PhoneSim (the real `PhoneEngine`) and `vq-host` agreed on every scenario on the first attempt. `pairing_result.attempts_remaining` is `0` on success. That is harmless but slightly odd. It is informational and was not changed.

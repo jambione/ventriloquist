@@ -13,6 +13,9 @@ struct MainView: View {
                 if let problem = model.identityProblem {
                     Banner(text: problem, systemImage: "exclamationmark.triangle.fill", tint: .orange)
                 }
+                if let problem = model.hostsProblem {
+                    Banner(text: problem, systemImage: "exclamationmark.triangle.fill", tint: .orange)
+                }
                 if model.indicator != .secure {
                     Banner(text: "Not connected — will send when connected",
                            systemImage: "antenna.radiowaves.left.and.right", tint: Color.secondary)
@@ -64,6 +67,7 @@ struct MainView: View {
         case .poweredOff: "Bluetooth is off"
         case .unauthorized: "Bluetooth access is off — enable it in Settings"
         case .unsupported: "Bluetooth LE is not available on this device"
+        case .advertisingFailed: "Bluetooth is not advertising yet — retrying"
         case .unknown, .ready: nil
         }
     }
@@ -141,8 +145,7 @@ struct LiveTranscript: View {
 private func styled(final: String, volatile: String) -> AttributedString {
     var head = AttributedString(final)
     head.foregroundColor = .primary
-    let joined = DictationEngine.join(final, volatile)
-    var tail = AttributedString(String(joined.dropFirst(final.count)))
+    var tail = AttributedString(DictationEngine.separator(final, volatile) + volatile)
     tail.foregroundColor = .secondary
     return head + tail
 }
@@ -182,7 +185,8 @@ struct RecordControls: View {
 
     private var isBusy: Bool {
         switch model.dictation.phase {
-        case .stopping, .preparingModel: true
+        case .stopping: true
+        case .preparingModel: !model.isRecording  // while starting, the button cancels
         default: false
         }
     }

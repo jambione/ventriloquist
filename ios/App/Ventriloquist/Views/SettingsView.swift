@@ -1,4 +1,5 @@
 import SwiftUI
+import VQPhoneCore
 
 /// SPEC §5.1 Settings: custom vocabulary, device name, partial streaming.
 struct SettingsView: View {
@@ -34,7 +35,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Device name")
                 } footer: {
-                    Text("Shown to your desktops when they connect.")
+                    Text("Shown to your desktops when they connect (up to \(PhoneNames.maxScalars) characters).")
                 }
 
                 Section {

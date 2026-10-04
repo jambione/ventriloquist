@@ -123,6 +123,8 @@ struct HelloAndSecureTableTests {
         h.net.pump()
         #expect(!h.net.isConnected(peer))
         #expect(h.net.disconnectedByPhone.contains(peer))
+        // README §7.1: the phone says why before it closes.
+        #expect(d.errorsReceived.map(\.code) == ["protocol"])
     }
 
     @Test func secondHelloBeforeSessionIsProtocolError() {
@@ -140,11 +142,22 @@ struct HelloAndSecureTableTests {
         let h = Harness()
         let d = h.pairedDesktop("Mac")
         let peer = h.net.connect(d)
+        let before = h.hostStore.hosts
+        let framesBefore = h.net.framesSent[peer]?.count ?? 0
+        let rowBefore = h.engine.hosts
         d.sendPlain(.pairChallenge(PairChallenge.generate()))
         d.sendPlain(.pairResult(.failure()))
+        d.sendSealed(.pairChallenge(PairChallenge.generate()))
         h.net.pump()
+        // Dropped: still connected and Secure, nothing sent back, no pairing
+        // state, store and host row unchanged (README §7.4).
         #expect(h.net.isConnected(peer))
         #expect(h.engine.indicator == .none)  // connected but not active
+        #expect(h.net.framesSent[peer]?.count ?? 0 == framesBefore)
+        #expect(h.engine.pairing == nil)
+        #expect(h.hostStore.hosts == before)
+        #expect(h.engine.hosts == rowBefore)
+        #expect(d.errorsReceived.isEmpty)
     }
 
     @Test func unsupportedVersionHelloGetsVersionErrorAndNotice() {
@@ -218,6 +231,11 @@ struct HelloAndSecureTableTests {
         let d2 = d  // same desktop, second link (the fake keeps one connection's state)
         let second = h.net.connect(d2)
         #expect(first != second)
+        // The old link is replaced once the new one proves itself (its first
+        // authenticated message: the answer to the phone's immediate ping),
+        // not on the unauthenticated hello (V1).
+        #expect(!h.net.disconnectedByPhone.contains(first))
+        h.advance(0.2)
         #expect(h.net.disconnectedByPhone.contains(first))
         #expect(h.net.isConnected(second))
         #expect(d.isSecure)
@@ -294,7 +312,11 @@ struct PairingTests {
         #expect(d.pairConfirms == 2)
     }
 
-    @Test func threeWrongCodesRestartWithNewRequest() {
+    /// M7: after the 3rd wrong code the desktop has invalidated the code and
+    /// started a global lockout. The phone must not send a new `pair_request`
+    /// by itself (it would be refused and count against the 5-per-10-minutes
+    /// budget); it shows a wait state and the button works after the wait.
+    @Test func threeWrongCodesWaitThenTryAgainWithoutAutoRequest() {
         let h = Harness()
         let d = h.desktop("Mac")
         h.net.connect(d)
@@ -304,9 +326,26 @@ struct PairingTests {
             h.engine.submitPairingCode(wrongCode(d.sessionCode ?? "123456"))
             h.net.pump()
         }
+        #expect(d.pairRequests == 1)  // no automatic request
+        guard case .failed(let message)? = h.engine.pairing?.phase else {
+            Issue.record("expected the wait state")
+            return
+        }
+        #expect(message.contains("Too many wrong codes"))
+        #expect((h.engine.pairing?.retryIn ?? 0) >= 29)  // the desktop's 30 s lockout
+        // "Try again" before the wait is over sends nothing and keeps counting down.
+        h.advance(5)
+        h.engine.startPairing(with: d.deviceId)
+        h.net.pump()
+        #expect(d.pairRequests == 1)
+        #expect((h.engine.pairing?.retryIn ?? 0) > 0)
+        // After the lockout the new request is accepted by the desktop.
+        h.advance(31)
+        #expect(h.engine.pairing.map { $0.retryIn } == 0 || h.engine.pairing == nil)
+        h.engine.startPairing(with: d.deviceId)
+        h.net.pump()
         #expect(d.pairRequests == 2)
-        #expect(h.engine.pairing?.phase == .enterCode(error: nil))
-        #expect(h.engine.pairing?.note?.contains("Too many wrong codes") == true)
+        #expect(d.rateLimitedAnswers == 0)
         h.engine.submitPairingCode(d.sessionCode!)
         h.net.pump()
         #expect(h.engine.pairing?.phase == .succeeded)
@@ -386,6 +425,7 @@ struct PairingTests {
         // Later, a new pair_request on the same connection succeeds.
         d.errorOnPairRequest = nil
         h.engine.cancelPairing()
+        h.advance(11)  // 10 s between requests (M7)
         h.pair(d)
         #expect(d.pairRequests == 2)
         #expect(h.engine.pairing?.phase == .succeeded)
@@ -409,16 +449,30 @@ struct PairingTests {
         #expect(msg.contains("Try again later"))
     }
 
-    @Test func rateLimitedHelloRefusalDisconnects() {
+    /// README §7.3: a refused device's `hello` gets `rate_limited` and the
+    /// *desktop* disconnects (`rate_limited` is non-fatal for the phone, which
+    /// does not close by itself). The notice is shown and no row is kept.
+    @Test func rateLimitedHelloRefusalIsShownAndDesktopCloses() {
         let h = Harness()
         let d = h.desktop("Mac")
         let peer = h.net.connect(d)
-        // The desktop refuses this device after its hello and disconnects.
         d.sendPlain(.error(ErrorMsg(code: "rate_limited", msg: "")))
         h.net.pump()
-        h.net.drop(peer)
         #expect(h.notices.contains { if case .peerError(_, "rate_limited", _) = $0 { true } else { false } })
+        #expect(!h.net.disconnectedByPhone.contains(peer))  // the phone did not close
+        h.net.drop(peer)  // the desktop closes
         #expect(h.engine.hosts.isEmpty)
+        // The device is refused for 10 minutes: the phone does not ask to pair meanwhile.
+        let again = h.net.connect(d)
+        h.engine.startPairing(with: d.deviceId)
+        h.net.pump()
+        #expect(d.pairRequests == 0)
+        guard case .failed? = h.engine.pairing?.phase else {
+            Issue.record("expected the wait state")
+            return
+        }
+        #expect((h.engine.pairing?.retryIn ?? 0) > 500)
+        _ = again
     }
 
     @Test func disconnectMidPairingFailsTheSheet() {

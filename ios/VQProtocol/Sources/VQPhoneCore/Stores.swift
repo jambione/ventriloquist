@@ -63,6 +63,14 @@ public struct PairedHost: Codable, Hashable, Sendable, Identifiable {
 public protocol PairedHostStore: AnyObject {
     func loadHosts() throws -> [PairedHost]
     func saveHosts(_ hosts: [PairedHost]) throws
+    /// Called once, before the first save that follows an unreadable
+    /// ``loadHosts()``: keep the old data somewhere (a renamed copy) so a save
+    /// never silently destroys it. Throwing cancels that save. Default: nothing.
+    func backUpUnreadableHosts() throws
+}
+
+public extension PairedHostStore {
+    func backUpUnreadableHosts() throws {}
 }
 
 /// Small persisted engine settings.
@@ -88,8 +96,21 @@ public final class InMemoryPairedHostStore: PairedHostStore {
     public var hosts: [PairedHost]
     /// Make `saveHosts` throw (tests).
     public var failSaves = false
+    /// Make `loadHosts` throw, as for a corrupt file (tests).
+    public var failLoads = false
+    /// Make `backUpUnreadableHosts` throw (tests).
+    public var failBackups = false
+    /// How often `backUpUnreadableHosts` ran (tests).
+    public private(set) var backups = 0
     public init(hosts: [PairedHost] = []) { self.hosts = hosts }
-    public func loadHosts() throws -> [PairedHost] { hosts }
+    public func loadHosts() throws -> [PairedHost] {
+        if failLoads { throw StoreError.unreadable }
+        return hosts
+    }
+    public func backUpUnreadableHosts() throws {
+        if failBackups { throw StoreError.unwritable }
+        backups += 1
+    }
     public func saveHosts(_ hosts: [PairedHost]) throws {
         if failSaves { throw StoreError.unwritable }
         self.hosts = hosts

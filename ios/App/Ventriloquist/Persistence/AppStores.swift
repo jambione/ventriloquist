@@ -16,6 +16,14 @@ final class FilePairedHostStore: PairedHostStore {
         return try JSONDecoder().decode([PairedHost].self, from: Data(contentsOf: url))
     }
 
+    /// Keep an unreadable file under a new name before it is replaced (M10).
+    func backUpUnreadableHosts() throws {
+        guard FileManager.default.fileExists(atPath: url.path()) else { return }
+        let stamp = Int(Date().timeIntervalSince1970)
+        let backup = url.deletingLastPathComponent().appending(path: "paired-hosts.unreadable-\(stamp).json")
+        try FileManager.default.moveItem(at: url, to: backup)
+    }
+
     func saveHosts(_ hosts: [PairedHost]) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
@@ -33,6 +41,7 @@ final class AppSettings: PhoneSettingsStore {
         static let deviceName = "deviceName"
         static let partials = "partialStreaming"
         static let vocabulary = "customVocabulary"
+        static let nameChosen = "deviceNameChosen"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -44,14 +53,21 @@ final class AppSettings: PhoneSettingsStore {
         set { defaults.set(newValue?.uuidString, forKey: Key.lastHost) }
     }
 
-    /// Name shown to desktops; defaults to the iPhone's name.
+    /// Name shown to desktops, at most 64 scalars. `UIDevice.name` is the
+    /// generic "iPhone" without a special entitlement (iOS 16+), so the first
+    /// run asks the user for a name, prefilled with it (M14).
     @MainActor var deviceName: String {
         get {
-            let stored = defaults.string(forKey: Key.deviceName)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let stored, !stored.isEmpty { return stored }
-            return UIDevice.current.name
+            let stored = defaults.string(forKey: Key.deviceName) ?? UIDevice.current.name
+            return PhoneNames.clean(stored, fallback: "iPhone")
         }
-        set { defaults.set(newValue, forKey: Key.deviceName) }
+        set { defaults.set(PhoneNames.clean(newValue, fallback: "iPhone"), forKey: Key.deviceName) }
+    }
+
+    /// Whether the user has confirmed a device name (first-run prompt).
+    var deviceNameChosen: Bool {
+        get { defaults.bool(forKey: Key.nameChosen) }
+        set { defaults.set(newValue, forKey: Key.nameChosen) }
     }
 
     var partialStreaming: Bool {

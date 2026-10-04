@@ -21,6 +21,13 @@ final class Connection {
     }
 
     let peer: PeerID
+    /// Creation order (strictly increasing per engine).
+    let seq: Int
+    /// Engine clock time of the connect, for reaping silent connections.
+    let connectedAt: Double
+    /// A message from this peer decrypted under this connection's `K_sess`.
+    /// Only then is the peer proven to hold the paired key (README §7.4).
+    var authenticated = false
     var splitter = FrameSplitter()
     var reassembler = Reassembler()
     var phase: Phase = .awaitingHello
@@ -37,7 +44,11 @@ final class Connection {
     var nextPingAt: Double = 0
     var unansweredPings = 0
 
-    init(peer: PeerID) { self.peer = peer }
+    init(peer: PeerID, seq: Int, connectedAt: Double) {
+        self.peer = peer
+        self.seq = seq
+        self.connectedAt = connectedAt
+    }
 
     var deviceId: UUID? { peerHello?.deviceId }
 

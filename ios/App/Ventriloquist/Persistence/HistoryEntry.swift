@@ -31,6 +31,9 @@ final class HistoryEntry {
 struct HistoryStore {
     static let cap = 1_000
     let context: ModelContext
+    /// Called with the utterance id of every entry removed (prune, clear), so
+    /// the engine can release its per-id state (V4).
+    var onRemove: ((UUID) -> Void)?
 
     func add(id: UUID, text: String, status: DeliveryStatus, hostName: String?) {
         context.insert(HistoryEntry(utteranceId: id, text: text, status: status, hostName: hostName))
@@ -57,7 +60,10 @@ struct HistoryStore {
         guard count > Self.cap else { return }
         var d = FetchDescriptor<HistoryEntry>(sortBy: [SortDescriptor(\.createdAt, order: .forward)])
         d.fetchLimit = count - Self.cap
-        for e in (try? context.fetch(d)) ?? [] { context.delete(e) }
+        for e in (try? context.fetch(d)) ?? [] {
+            onRemove?(e.utteranceId)
+            context.delete(e)
+        }
     }
 
     /// Deliveries do not survive a relaunch: anything still pending from a
@@ -70,7 +76,11 @@ struct HistoryStore {
     }
 
     func deleteAll() {
-        try? context.delete(model: HistoryEntry.self)
+        // Batch delete does not refresh `@Query` (M21): delete each, then save.
+        for e in (try? context.fetch(FetchDescriptor<HistoryEntry>())) ?? [] {
+            onRemove?(e.utteranceId)
+            context.delete(e)
+        }
         save()
     }
 

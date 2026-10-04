@@ -23,6 +23,16 @@ final class FakeDesktop {
     var closeAfterRefusal = false
     /// Send this raw JSON as the plaintext hello instead of a real one.
     var rawHelloJSON: String?
+    /// Enforce the desktop's real pairing limits (README §7.3, D10; mirrors
+    /// desktop/core/src/pairing_guard.rs): 10 s between accepted requests,
+    /// more than 5 in 10 minutes refuses the device for 10 minutes, and a
+    /// global lockout (30 s doubling, max 1 h) after each invalidated code.
+    var enforcePairingLimits = true
+    private var requestTimes: [Double] = []
+    private var lastAccepted: Double?
+    private var refusedUntil: Double = 0
+    private var invalidations = 0
+    private var lockedUntil: Double = 0
 
     // Per-connection state.
     private(set) var peer: PeerID?
@@ -42,6 +52,10 @@ final class FakeDesktop {
     private(set) var inbound: [Inbound] = []
     private(set) var utts: [Utt] = []
     private(set) var pairRequests = 0
+    /// `pair_request`s that were not refused by the limits.
+    private(set) var acceptedPairRequests = 0
+    /// How many requests the limits answered with `rate_limited`.
+    private(set) var rateLimitedAnswers = 0
     private(set) var pairConfirms = 0
     private(set) var pingsReceived = 0
     private(set) var pongsReceived = 0
@@ -117,6 +131,12 @@ final class FakeDesktop {
         case .hello(let h):
             phoneHello = h
             let knows = knownPhones[h.deviceId] == h.publicKey
+            if enforcePairingLimits, refusedUntil > clock.now, !(knows && h.paired) {
+                rateLimitedAnswers += 1
+                sendPlain(.error(ErrorMsg(code: "rate_limited", msg: "")))
+                closedByDesktop = true
+                return
+            }
             if knows && h.paired {
                 establish()
             } else if !knows && h.paired {
@@ -130,6 +150,14 @@ final class FakeDesktop {
                 closedByDesktop = closeAfterRefusal
                 return
             }
+            if enforcePairingLimits, let verdict = judgePairRequest() {
+                rateLimitedAnswers += 1
+                sendPlain(.error(ErrorMsg(code: "rate_limited", msg: "Try later")))
+                closedByDesktop = verdict
+                return
+            }
+            acceptedPairRequests += 1
+            lastAccepted = clock.now
             request = r
             let ch = PairChallenge.generate()
             challenge = ch
@@ -149,12 +177,18 @@ final class FakeDesktop {
             }
             if (try? key.verifyPhoneMac(c.mac)) != nil {
                 knownPhones[h.deviceId] = h.publicKey
+                invalidations = 0
+                lockedUntil = 0
                 let ok = corruptDesktopMac ? PairResult.success(Bytes32(repeating: 7)) : key.successMessage()
                 sendPlain(.pairResult(ok))
                 establish()
             } else {
                 failures += 1
-                if failures >= 3 { self.code = nil }
+                if failures >= 3 {
+                    self.code = nil
+                    invalidations += 1
+                    lockedUntil = clock.now + min(30 * pow(2, Double(min(invalidations - 1, 16))), 3_600)
+                }
                 sendPlain(.pairResult(.failure()))
             }
         case .error(let e):
@@ -163,6 +197,22 @@ final class FakeDesktop {
         default:
             break
         }
+    }
+
+    /// `nil` = allow; otherwise whether the desktop also disconnects.
+    private func judgePairRequest() -> Bool? {
+        let now = clock.now
+        if refusedUntil > now { return true }
+        requestTimes.append(now)
+        requestTimes.removeAll { now - $0 >= 600 }
+        if requestTimes.count > 5 {
+            requestTimes = []
+            refusedUntil = now + 600
+            return true
+        }
+        if let last = lastAccepted, now - last < 10 { return false }
+        if lockedUntil > now { return false }
+        return nil
     }
 
     private func establish() {
@@ -207,6 +257,12 @@ final class FakeNetwork: PhoneTransport {
     private(set) var disconnectedByPhone: [PeerID] = []
     private(set) var framesSent: [PeerID: [[UInt8]]] = [:]
     private var counter = 0
+    /// `true` (default): a close from the phone still delivers frames that
+    /// were already sent, like the transports' documented graceful close
+    /// (a socket close flushes written bytes; the BLE queue sends what it
+    /// holds, see `FrameSendQueue.closeAfterFlush`). `false` models an
+    /// abrupt close that discards queued frames.
+    var gracefulDisconnect = true
 
     func send(frame: [UInt8], to peer: PeerID) {
         guard desktops[peer] != nil else { return }
@@ -214,11 +270,11 @@ final class FakeNetwork: PhoneTransport {
         framesSent[peer, default: []].append(frame)
     }
 
-    /// Frames already queued still reach the desktop (a socket close flushes
-    /// written bytes), then the link closes.
+    /// Frames already queued still reach the desktop when `gracefulDisconnect`
+    /// is on, then the link closes.
     func disconnect(_ peer: PeerID) {
         disconnectedByPhone.append(peer)
-        if let d = desktops[peer] {
+        if gracefulDisconnect, let d = desktops[peer] {
             for f in toDesktop[peer] ?? [] { d.receive(frame: f) }
         }
         desktops[peer]?.connectionClosed(peer)

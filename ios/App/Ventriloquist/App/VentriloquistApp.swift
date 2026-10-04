@@ -18,6 +18,7 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.modelContext) private var context
     @Environment(\.scenePhase) private var scenePhase
+    @State private var nameDraft = ""
 
     var body: some View {
         @Bindable var model = model
@@ -41,6 +42,22 @@ struct RootView: View {
             Button("OK", role: .cancel) { model.alertMessage = nil }
         } message: {
             Text(model.alertMessage ?? "")
+        }
+        .alert("Name this iPhone", isPresented: $model.needsDeviceName) {
+            TextField("Device name", text: $nameDraft)
+            Button("Save") { model.confirmDeviceName(nameDraft) }
+        } message: {
+            Text("Your computers show this name when this iPhone connects. You can change it in Settings.")
+        }
+        .onChange(of: model.needsDeviceName) { _, needs in
+            if needs { nameDraft = model.deviceName }
+        }
+        .confirmationDialog("Discard unsent correction?", isPresented: $model.confirmDiscardCorrection,
+                            titleVisibility: .visible) {
+            Button("Discard and record", role: .destructive) { Task { await model.startRecording() } }
+            Button("Keep editing", role: .cancel) {}
+        } message: {
+            Text("Your edit has not been sent to the computer.")
         }
         .sheet(item: Binding(
             get: { model.permissionProblem.map(PermissionSheetItem.init) },

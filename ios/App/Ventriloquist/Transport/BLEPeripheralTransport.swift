@@ -21,6 +21,8 @@ import VQProtocol
 final class BLEPeripheralTransport: NSObject {
     enum RadioState: Equatable {
         case unknown, poweredOff, unauthorized, unsupported, ready
+        /// Adding the service or advertising failed; retrying with backoff.
+        case advertisingFailed
     }
 
     /// Engine to deliver events to (set by the app model).
@@ -31,7 +33,12 @@ final class BLEPeripheralTransport: NSObject {
 
     private var manager: CBPeripheralManager?
     private var txCharacteristic: CBMutableCharacteristic?
+    /// `add(service)` was called.
     private var serviceAdded = false
+    /// `didAdd` reported success: only then do we advertise.
+    private var serviceConfirmed = false
+    private var retryAttempt = 0
+    private var retryTask: Task<Void, Never>?
     private var wantsForeground = true
 
     private struct Link {
@@ -46,10 +53,13 @@ final class BLEPeripheralTransport: NSObject {
     private var peerToCentral: [PeerID: UUID] = [:]
     private var counter = 0
 
-    /// Frames waiting for `peripheralManagerIsReady`.
-    private var sendQueue: [(peer: PeerID, frame: Data)] = []
-    /// Per-link cap on queued frames (≈ 2 MiB at 185-byte frames).
-    private let maxQueuedPerPeer = 12_000
+    /// Frames waiting for `peripheralManagerIsReady` (pure logic, tested in
+    /// VQPhoneCore). Per-link cap ≈ 2 MiB at 185-byte frames.
+    private var sendQueue = FrameSendQueue(maxPerPeer: 12_000)
+
+    /// Frames still waiting to be handed to the Bluetooth stack. The app
+    /// waits for this to be false before leaving the foreground.
+    var hasQueuedFrames: Bool { !sendQueue.isEmpty }
 
     private let serviceUUID = CBUUID(nsuuid: VQ.serviceUUID)
     private let rxUUID = CBUUID(nsuuid: VQ.rxCharacteristicUUID)
@@ -67,10 +77,12 @@ final class BLEPeripheralTransport: NSObject {
     func enterBackground() {
         wantsForeground = false
         guard let manager else { return }
+        retryTask?.cancel()
         manager.stopAdvertising()
         if serviceAdded {
             manager.removeAllServices()
             serviceAdded = false
+            serviceConfirmed = false
         }
         closeAllLinks()
     }
@@ -93,9 +105,25 @@ final class BLEPeripheralTransport: NSObject {
             txCharacteristic = tx
             manager.add(service)
             serviceAdded = true
-            // Advertising starts in `didAdd`.
-        } else if !manager.isAdvertising {
+            // Advertising starts in `didAdd`, after it reports success.
+        } else if serviceConfirmed, !manager.isAdvertising {
             advertise()
+        }
+    }
+
+    /// Retry adding the service / advertising after a failure: 1 s, 2 s, 4 s … 30 s.
+    private func scheduleRetry() {
+        retryTask?.cancel()
+        let delay = min(30.0, pow(2, Double(retryAttempt)))
+        retryAttempt += 1
+        retryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self, wantsForeground else { return }
+            if !serviceConfirmed, serviceAdded {
+                manager?.removeAllServices()
+                serviceAdded = false
+            }
+            setUpIfReady()
         }
     }
 
@@ -111,7 +139,7 @@ final class BLEPeripheralTransport: NSObject {
         let peers = links.values.filter(\.open).map(\.peer)
         links.removeAll()
         peerToCentral.removeAll()
-        sendQueue.removeAll()
+        sendQueue.discardAll()
         for p in peers { engine?.peerDisconnected(p) }
     }
 
@@ -120,6 +148,7 @@ final class BLEPeripheralTransport: NSObject {
         let peer = PeerID("ble:\(central.identifier.uuidString.prefix(8))#\(counter)")
         if let old = links[central.identifier] {
             peerToCentral[old.peer] = nil
+            sendQueue.discard(old.peer)
             if old.open { engine?.peerDisconnected(old.peer) }
         }
         links[central.identifier] = Link(peer: peer, central: central, open: true)
@@ -130,16 +159,10 @@ final class BLEPeripheralTransport: NSObject {
 
     private func drainQueue() {
         guard let manager, let tx = txCharacteristic else { return }
-        while let next = sendQueue.first {
-            guard let id = peerToCentral[next.peer], let link = links[id], link.open else {
-                sendQueue.removeFirst()
-                continue
-            }
-            if manager.updateValue(next.frame, for: tx, onSubscribedCentrals: [link.central]) {
-                sendQueue.removeFirst()
-            } else {
-                return  // wait for peripheralManagerIsReady
-            }
+        // A closing link (the engine closed it) still gets its queued frames.
+        _ = sendQueue.drain { peer, frame in
+            guard let id = peerToCentral[peer], let link = links[id] else { return true }  // gone: drop
+            return manager.updateValue(Data(frame), for: tx, onSubscribedCentrals: [link.central])
         }
     }
 }
@@ -147,25 +170,28 @@ final class BLEPeripheralTransport: NSObject {
 extension BLEPeripheralTransport: @preconcurrency PhoneTransport {
     func send(frame: [UInt8], to peer: PeerID) {
         guard let id = peerToCentral[peer], links[id]?.open == true else { return }
-        let queued = sendQueue.reduce(0) { $0 + ($1.peer == peer ? 1 : 0) }
-        guard queued < maxQueuedPerPeer else {
+        switch sendQueue.enqueue(frame, for: peer) {
+        case .queued:
+            drainQueue()
+        case .closed:
+            break
+        case .overflow:
             // The desktop is not draining notifications; give up on it.
             // Report it after the engine's current call returns (no re-entry).
-            disconnect(peer)
+            sendQueue.discard(peer)
+            links[id]?.open = false
             Task { @MainActor [weak self] in self?.engine?.peerDisconnected(peer) }
-            return
         }
-        sendQueue.append((peer, Data(frame)))
-        if sendQueue.count == 1 { drainQueue() }
     }
 
     /// A peripheral cannot drop a central. The link is marked closed: its
-    /// frames are discarded and its writes ignored until it subscribes again
+    /// writes are ignored until it subscribes again, and frames already queued
+    /// (an `error` sent just before) still go out, then it takes no more
     /// (the desktop disconnects after our `error`, or on keepalive timeout).
     func disconnect(_ peer: PeerID) {
         guard let id = peerToCentral[peer] else { return }
         links[id]?.open = false
-        sendQueue.removeAll { $0.peer == peer }
+        sendQueue.closeAfterFlush(peer)
     }
 
     func mtu(for peer: PeerID) -> Int {
@@ -188,6 +214,8 @@ extension BLEPeripheralTransport: @preconcurrency CBPeripheralManagerDelegate {
             setUpIfReady()
         } else {
             serviceAdded = false
+            serviceConfirmed = false
+            retryTask?.cancel()
             closeAllLinks()
         }
         onStateChange?(state)
@@ -196,9 +224,26 @@ extension BLEPeripheralTransport: @preconcurrency CBPeripheralManagerDelegate {
     func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: (any Error)?) {
         if error != nil {
             serviceAdded = false
+            serviceConfirmed = false
+            radioState = .advertisingFailed
+            onStateChange?(.advertisingFailed)
+            scheduleRetry()
             return
         }
+        serviceConfirmed = true
+        retryAttempt = 0
         advertise()
+    }
+
+    func peripheralManagerDidStartAdvertising(_ peripheral: CBPeripheralManager, error: (any Error)?) {
+        if error != nil {
+            radioState = .advertisingFailed
+            onStateChange?(.advertisingFailed)
+            scheduleRetry()
+        } else if radioState == .advertisingFailed {
+            radioState = .ready
+            onStateChange?(.ready)
+        }
     }
 
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral,
@@ -211,7 +256,7 @@ extension BLEPeripheralTransport: @preconcurrency CBPeripheralManagerDelegate {
                            didUnsubscribeFrom characteristic: CBCharacteristic) {
         guard characteristic.uuid == txUUID, let link = links.removeValue(forKey: central.identifier) else { return }
         peerToCentral[link.peer] = nil
-        sendQueue.removeAll { $0.peer == link.peer }
+        sendQueue.discard(link.peer)
         if link.open { engine?.peerDisconnected(link.peer) }
     }
 

@@ -71,6 +71,10 @@ public struct PairingStatus: Equatable, Sendable {
     public var phase: Phase
     /// Extra information, e.g. "A new code is shown on <desktop>".
     public var note: String?
+    /// In the `.failed` phase: whole seconds before a new `pair_request` is
+    /// allowed (the phone keeps within the desktop's rate limits, README
+    /// §7.3); 0 when trying again is possible now.
+    public internal(set) var retryIn: Int = 0
 }
 
 /// Discrete things the UI should react to.

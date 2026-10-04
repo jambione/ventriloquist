@@ -56,6 +56,14 @@ struct HostPickerSheet: View {
                     Text("Desktops appear here when the Ventriloquist desktop app is running nearby.")
                 }
             }
+            .alert("Ventriloquist", isPresented: Binding(
+                get: { model.alertMessage != nil },
+                set: { if !$0 { model.alertMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { model.alertMessage = nil }
+            } message: {
+                Text(model.alertMessage ?? "")
+            }
             .navigationTitle("Desktops")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -172,11 +180,12 @@ struct PairingCodeSheet: View {
                     HStack {
                         Button("Close") { model.dismissPairing() }
                         if model.hosts.contains(where: { $0.id == p.hostId && $0.isOnline && !$0.isPaired }) {
-                            Button("Try again") {
+                            Button(p.retryIn > 0 ? "Try again in \(p.retryIn) s" : "Try again") {
                                 code = ""
                                 model.retryPairing()
                             }
                             .buttonStyle(.borderedProminent)
+                            .disabled(p.retryIn > 0)
                         }
                     }
                 }

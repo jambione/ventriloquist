@@ -59,7 +59,18 @@ final class AppModel {
     var alertMessage: String?
     var permissionProblem: PermissionProblem?
     private(set) var identityProblem: String?
+    /// The paired-desktop list could not be read at launch (M10).
+    private(set) var hostsProblem: String?
+    /// First run: ask for a device name (M14).
+    var needsDeviceName = false
+    /// Starting a recording would drop an unsent correction (M13).
+    var confirmDiscardCorrection = false
     private(set) var isRecording = false
+    /// Set synchronously when a start begins, so a double tap cannot start two
+    /// utterances (M24).
+    @ObservationIgnored private var isStarting = false
+    /// Bumped on every scene change; stale background work checks it (M3).
+    @ObservationIgnored private var sceneGeneration = 0
     /// The utterance shown in the editor after stopping.
     private(set) var currentId: UUID?
     /// What was last sent for `currentId` (final or correction).
@@ -69,7 +80,6 @@ final class AppModel {
 
     var canSendCorrection: Bool {
         currentId != nil && !isRecording && !editText.utf8.elementsEqual(sentText.utf8)
-            && !editText.isEmpty
     }
 
     // MARK: Settings mirrors
@@ -97,6 +107,7 @@ final class AppModel {
         self.settings = settings
         let identity: StoredIdentity
         var problem: String?
+        var temporary = false
         do {
             identity = try PhoneIdentity.loadOrCreate(from: KeychainIdentityStore())
         } catch {
@@ -104,13 +115,23 @@ final class AppModel {
             // pairing. Run with a temporary one and say so.
             identity = StoredIdentity(deviceId: newDeviceId(), keyPair: .generate())
             problem = "This iPhone's identity could not be read from the Keychain. Pairings made now will not be kept."
+            temporary = true
         }
         let ble = BLEPeripheralTransport()
         self.ble = ble
+        // With a temporary identity the real paired-host file must stay
+        // untouched: a pairing made under the wrong identity would otherwise
+        // replace or hide valid ones (M9).
+        let hostStore: PairedHostStore = temporary ? InMemoryPairedHostStore() : FilePairedHostStore()
+        let settingsStore: PhoneSettingsStore = temporary ? InMemorySettingsStore() : settings
         engine = PhoneEngine(identity: identity, deviceName: settings.deviceName,
                              partialStreamingEnabled: settings.partialStreaming,
-                             hostStore: FilePairedHostStore(), settings: settings,
+                             hostStore: hostStore, settings: settingsStore,
                              transport: ble, clock: SystemClock())
+        needsDeviceName = !settings.deviceNameChosen
+        if engine.pairedHostsUnreadable {
+            hostsProblem = "The list of paired computers could not be read. The old file was kept; pair again."
+        }
         deviceName = settings.deviceName
         partialStreaming = settings.partialStreaming
         vocabulary = settings.vocabulary
@@ -125,10 +146,17 @@ final class AppModel {
     /// Attach SwiftData and start Bluetooth and timers.
     func start(context: ModelContext) {
         guard history == nil else { return }
-        let store = HistoryStore(context: context)
+        var store = HistoryStore(context: context)
+        store.onRemove = { [engine] id in engine.forgetDelivery(id) }
         store.failStalePending()
         history = store
         ble.start()
+        // Fetch the speech model on first run, with the progress overlay (M11).
+        Task { [weak self] in try? await self?.dictation.prepareModel() }
+        dictation.onInterrupted = { [weak self] in
+            guard let self else { return }
+            Task { await self.stopRecording() }
+        }
         tickTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(100))
@@ -150,18 +178,37 @@ final class AppModel {
 
     // MARK: - Scene phase (SPEC §5.2: foreground only)
 
+    /// Stops the recording, gives the final a bounded moment to be acked and
+    /// flushed (BLE queue), then tears the connections down. A quick return to
+    /// the foreground cancels the teardown (M3, M4).
     func enterBackground() {
+        sceneGeneration += 1
+        let gen = sceneGeneration
         let bgTask = UIApplication.shared.beginBackgroundTask(withName: "finish-dictation")
         Task {
             await stopRecording()
-            engine.disconnectAll()
-            ble.enterBackground()
+            let deadline = ContinuousClock.now + .seconds(5)
+            while ContinuousClock.now < deadline, gen == sceneGeneration,
+                  ble.hasQueuedFrames || (engine.indicator == .secure && engine.inFlightDeliveryCount > 0) {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            if gen == sceneGeneration {
+                engine.disconnectAll()
+                ble.enterBackground()
+            }
             UIApplication.shared.endBackgroundTask(bgTask)
         }
     }
 
     func enterForeground() {
+        sceneGeneration += 1
         ble.enterForeground()
+    }
+
+    func confirmDeviceName(_ name: String) {
+        deviceName = name
+        settings.deviceNameChosen = true
+        needsDeviceName = false
     }
 
     // MARK: - Engine mirroring
@@ -188,8 +235,8 @@ final class AppModel {
         case .paired:
             break
         case .notice(let notice):
-            // Pairing problems are shown in the pairing sheet.
-            if pairing != nil, case .peerError = notice { return }
+            // Problems with the desktop being paired are shown in the pairing sheet.
+            if let p = pairing, case .peerError(let name, _, _) = notice, name == p.hostName { return }
             alertMessage = notice.text
         }
     }
@@ -219,12 +266,22 @@ final class AppModel {
 
     // MARK: - Recording (SPEC §5.1 Main)
 
+    var hasUnsentCorrection: Bool { canSendCorrection }
+
     func toggleRecording() async {
-        if isRecording { await stopRecording() } else { await startRecording() }
+        if isRecording || dictation.phase != .idle {
+            await stopRecording()
+        } else if hasUnsentCorrection {
+            confirmDiscardCorrection = true
+        } else {
+            await startRecording()
+        }
     }
 
     func startRecording() async {
-        guard !isRecording, dictation.phase == .idle else { return }
+        guard !isRecording, !isStarting, dictation.phase == .idle else { return }
+        isStarting = true
+        defer { isStarting = false }
         guard await ensurePermissions() else { return }
         // Starting a new recording commits the current entry (already in history).
         currentId = nil
@@ -238,10 +295,13 @@ final class AppModel {
         } catch {
             isRecording = false
             engine.cancelUtterance()
-            alertMessage = "Dictation is unavailable: \(error.localizedDescription)"
+            if !(error is CancellationError) {
+                alertMessage = "Dictation is unavailable: \(error.localizedDescription)"
+            }
         }
     }
 
+    /// Works in every phase: a stop during start cancels the start.
     func stopRecording() async {
         guard isRecording else { return }
         isRecording = false
@@ -304,15 +364,21 @@ final class AppModel {
         switch SFSpeechRecognizer.authorizationStatus() {
         case .authorized: return true
         case .notDetermined:
-            let status = await withCheckedContinuation { (c: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
-                SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0) }
-            }
+            let status = await Self.requestSpeechAuthorization()
             if status == .authorized { return true }
             permissionProblem = .speech
             return false
         default:
             permissionProblem = .speech
             return false
+        }
+    }
+
+    /// Nonisolated, so the completion closure is not `@MainActor`: Speech calls
+    /// it on a background queue, and a main-actor closure would trap (M1).
+    nonisolated private static func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
+        await withCheckedContinuation { (c: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
+            SFSpeechRecognizer.requestAuthorization { @Sendable status in c.resume(returning: status) }
         }
     }
 

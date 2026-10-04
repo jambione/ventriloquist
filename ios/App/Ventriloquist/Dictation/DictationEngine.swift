@@ -60,24 +60,60 @@ final class DictationEngine {
     @ObservationIgnored private var audioEngine: AVAudioEngine?
     @ObservationIgnored private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     @ObservationIgnored private var resultsTask: Task<Void, Never>?
+    /// Bumped by `stop()`; every `await` in the start pipeline checks it, so a
+    /// stop during start (model download, `.starting`) cancels the start (M2).
+    @ObservationIgnored private var generation = 0
+    /// Posted to when the audio route/engine changes under a recording (M5).
+    @ObservationIgnored var onInterrupted: (() -> Void)?
+    @ObservationIgnored private var observers: [any NSObjectProtocol] = []
 
     /// Start recording. Throws if dictation cannot run (e.g. in the Simulator).
     func start(vocabulary: [String]) async throws {
         guard phase == .idle else { return }
+        generation += 1
+        let gen = generation
         phase = .starting
         finalizedText = ""
         volatileText = ""
         do {
-            try await startPipeline(vocabulary: vocabulary)
+            try await startPipeline(vocabulary: vocabulary, generation: gen)
+            guard gen == generation else { throw CancellationError() }
             phase = .recording
+            observeAudio()
         } catch {
-            await tearDown()
-            phase = .idle
+            if gen == generation {
+                // A genuine failure: clean up. (After stop() the stopper does.)
+                await tearDown()
+                phase = .idle
+            }
             throw error
         }
     }
 
-    private func startPipeline(vocabulary: [String]) async throws {
+    /// Route changes, engine configuration changes and media-services resets
+    /// end the recording gracefully, like an interruption (M5).
+    private func observeAudio() {
+        removeObservers()
+        let center = NotificationCenter.default
+        let fire: @Sendable (Notification) -> Void = { [weak self] _ in
+            Task { @MainActor in self?.onInterrupted?() }
+        }
+        observers.append(center.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: .main, using: fire))
+        observers.append(center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: nil, queue: .main, using: fire))
+        observers.append(center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { note in
+            let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
+            let reason = AVAudioSession.RouteChangeReason(rawValue: raw)
+            if reason == .oldDeviceUnavailable || reason == .categoryChange { fire(note) }
+        })
+    }
+
+    private func removeObservers() {
+        for o in observers { NotificationCenter.default.removeObserver(o) }
+        observers = []
+    }
+
+    private func startPipeline(vocabulary: [String], generation gen: Int) async throws {
+        func check() throws { if gen != generation { throw CancellationError() } }
         guard let locale = await DictationTranscriber.supportedLocale(equivalentTo: Self.locale) else {
             throw DictationError.localeUnsupported
         }
@@ -86,6 +122,7 @@ final class DictationEngine {
                                                reportingOptions: [.volatileResults],
                                                attributeOptions: [])
         try await ensureModel(for: transcriber, locale: locale)
+        try check()
         phase = .starting
 
         let analyzer = SpeechAnalyzer(modules: [transcriber])
@@ -95,11 +132,13 @@ final class DictationEngine {
             let context = AnalysisContext()
             context.contextualStrings[.general] = Array(terms.prefix(Self.maxContextualStrings))
             try await analyzer.setContext(context)
+            try check()
         }
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber]) else {
             throw DictationError.noAudioFormat
         }
         try await analyzer.prepareToAnalyze(in: format)
+        try check()
 
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.record, mode: .measurement)
@@ -117,6 +156,7 @@ final class DictationEngine {
             }
         }
         try await analyzer.start(inputSequence: stream)
+        try check()
 
         let engine = AVAudioEngine()
         let input = engine.inputNode
@@ -129,6 +169,7 @@ final class DictationEngine {
         engine.prepare()
         audioEngine = engine
         try engine.start()
+        try check()
     }
 
     private func ensureModel(for transcriber: DictationTranscriber, locale: Locale) async throws {
@@ -151,13 +192,14 @@ final class DictationEngine {
     /// Download the model ahead of the first recording (Settings / first run).
     func prepareModel() async throws {
         guard phase == .idle else { return }
+        phase = .preparingModel(nil)  // blocks start() while we work
+        defer { if case .preparingModel = phase { phase = .idle } }
         guard let locale = await DictationTranscriber.supportedLocale(equivalentTo: Self.locale) else {
             throw DictationError.localeUnsupported
         }
         let transcriber = DictationTranscriber(locale: locale, contentHints: [],
                                                transcriptionOptions: [.punctuation],
                                                reportingOptions: [.volatileResults], attributeOptions: [])
-        defer { phase = .idle }
         try await ensureModel(for: transcriber, locale: locale)
     }
 
@@ -173,7 +215,12 @@ final class DictationEngine {
 
     /// Stop recording, finalize, and return the full text.
     func stop() async -> String {
-        guard phase == .recording || phase == .starting else { return fullText }
+        switch phase {
+        case .idle, .stopping: return fullText
+        case .preparingModel, .starting, .recording: break
+        }
+        generation += 1  // cancels a start that is still awaiting
+        removeObservers()
         phase = .stopping
         await tearDown()
         let text = fullText
@@ -193,7 +240,7 @@ final class DictationEngine {
             // Finalize what was heard; give up after a few seconds.
             let finish = Task { try? await analyzer.finalizeAndFinishThroughEndOfInput() }
             let watchdog = Task {
-                try? await Task.sleep(for: .seconds(4))
+                try? await Task.sleep(for: .seconds(1))
                 if !Task.isCancelled { await analyzer.cancelAndFinishNow() }
             }
             await finish.value
@@ -202,7 +249,7 @@ final class DictationEngine {
         analyzer = nil
         if let resultsTask {
             let guardTask = Task {
-                try? await Task.sleep(for: .seconds(2))
+                try? await Task.sleep(for: .milliseconds(500))
                 if !Task.isCancelled { resultsTask.cancel() }
             }
             await resultsTask.value
@@ -217,12 +264,16 @@ final class DictationEngine {
         }
     }
 
-    /// Join two transcript pieces with one space when neither side has one.
+    /// What goes between two transcript pieces: one space when neither side
+    /// has whitespace at the join, otherwise nothing.
+    nonisolated static func separator(_ a: String, _ b: String) -> String {
+        guard !a.isEmpty, !b.isEmpty else { return "" }
+        if a.last?.isWhitespace == true || b.first?.isWhitespace == true { return "" }
+        return " "
+    }
+
     nonisolated static func join(_ a: String, _ b: String) -> String {
-        guard !a.isEmpty else { return b }
-        guard !b.isEmpty else { return a }
-        if a.last?.isWhitespace == true || b.first?.isWhitespace == true { return a + b }
-        return a + " " + b
+        a + separator(a, b) + b
     }
 }
 
