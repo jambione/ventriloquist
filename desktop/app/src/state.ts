@@ -12,11 +12,15 @@
 
 import { clip, isolate, stripBidi } from "./bidi";
 import type {
+  AccessibilityStatus,
   AdapterState,
+  BindingNotice,
+  DeliveryEvent,
   Entry,
   HostEvent,
   PairedPeer,
   PeerState,
+  SlotsView,
 } from "./types";
 
 /** In-memory history cap (SPEC §6.1); the core enforces it too. */
@@ -31,6 +35,8 @@ export const MAX_NOTICE_TEXT = 200;
 export const MAX_TOMBSTONES = 10_000;
 /** Pairing codes kept at once (one per connection; the newest is shown). */
 export const MAX_CODES = 8;
+/** Delivery results remembered (per entry id). */
+export const MAX_DELIVERIES = 500;
 /** Longest accepted code lifetime; the core uses 120 s. */
 const MAX_CODE_SECS = 3600;
 const DEFAULT_CODE_SECS = 120;
@@ -67,7 +73,7 @@ export interface PairingModal {
   attemptsRemaining: number | null;
 }
 
-export type NoticeKind = "storage" | "peer" | "version";
+export type NoticeKind = "storage" | "peer" | "version" | "binding";
 
 export interface Notice {
   id: number;
@@ -110,6 +116,12 @@ export interface AppState {
   logWarning: string | null;
   notices: readonly Notice[];
   nextNoticeId: number;
+  /** Slot bar state; null until the first `slots` event or snapshot. */
+  slots: SlotsView | null;
+  /** Latest delivery result per entry id (insertion-ordered, bounded). */
+  deliveries: ReadonlyMap<string, DeliveryEvent>;
+  /** Accessibility permission; null until known. */
+  accessibility: AccessibilityStatus | null;
 }
 
 export type Action =
@@ -119,7 +131,14 @@ export type Action =
   | { type: "tick"; now: number }
   | { type: "dismiss_pairing" }
   | { type: "dismiss_notice"; id: number }
-  | { type: "fatal"; message: string };
+  | { type: "fatal"; message: string }
+  /** A `slots` event: the whole slot bar. */
+  | { type: "slots"; view: SlotsView }
+  /** The reply to `slots_snapshot` (also carries recent deliveries). */
+  | { type: "slots_snapshot"; view: SlotsView }
+  | { type: "delivery"; event: DeliveryEvent }
+  | { type: "binding_notice"; notice: BindingNotice }
+  | { type: "accessibility"; status: AccessibilityStatus };
 
 export function initialState(): AppState {
   return {
@@ -143,6 +162,9 @@ export function initialState(): AppState {
     logWarning: null,
     notices: [],
     nextNoticeId: 1,
+    slots: null,
+    deliveries: new Map(),
+    accessibility: null,
   };
 }
 
@@ -169,6 +191,90 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, notices: state.notices.filter((n) => n.id !== action.id) };
     case "fatal":
       return { ...state, phase: "fatal", fatal: action.message, buffered: [] };
+    case "slots":
+      return { ...state, slots: withoutDeliveries(action.view) };
+    case "slots_snapshot":
+      return onSlotsSnapshot(state, action.view);
+    case "delivery":
+      return onDelivery(state, action.event);
+    case "binding_notice":
+      return onBindingNotice(state, action.notice);
+    case "accessibility":
+      return state.accessibility?.supported === action.status.supported &&
+        state.accessibility?.trusted === action.status.trusted
+        ? state
+        : { ...state, accessibility: action.status };
+  }
+}
+
+// -------------------------------------------------------------- bindings
+
+function withoutDeliveries(v: SlotsView): SlotsView {
+  return { active: v.active, slots: v.slots, hotkeys: v.hotkeys };
+}
+
+function putDelivery(
+  map: ReadonlyMap<string, DeliveryEvent>,
+  ev: DeliveryEvent,
+): Map<string, DeliveryEvent> {
+  const m = new Map(map);
+  m.delete(ev.entry_id); // refresh the insertion order
+  m.set(ev.entry_id, ev);
+  while (m.size > MAX_DELIVERIES) {
+    const oldest = m.keys().next();
+    if (oldest.done === true) break;
+    m.delete(oldest.value);
+  }
+  return m;
+}
+
+function onDelivery(state: AppState, ev: DeliveryEvent): AppState {
+  let next: AppState = { ...state, deliveries: putDelivery(state.deliveries, ev) };
+  if (ev.status === "missing") {
+    const slot = ev.slot === null ? "" : `Slot ${ev.slot} `;
+    const app = ev.app_name === null ? "" : `(${isolate(clip(ev.app_name, MAX_LABEL_CHARS))}) `;
+    next = addBindingNotice(next, `${slot}${app}not found — not sent`);
+  }
+  return next;
+}
+
+function onSlotsSnapshot(state: AppState, view: SlotsView): AppState {
+  let deliveries = state.deliveries;
+  for (const d of view.deliveries ?? []) {
+    const have = deliveries.get(d.entry_id);
+    // A live event may be newer than the snapshot: never go back to
+    // "sending" from a result.
+    if (have !== undefined && have.status !== "sending" && d.status === "sending") continue;
+    deliveries = putDelivery(deliveries, d);
+  }
+  return { ...state, slots: withoutDeliveries(view), deliveries };
+}
+
+/** Add a binding notice unless it repeats the newest one. */
+function addBindingNotice(state: AppState, text: string): AppState {
+  const last = state.notices[state.notices.length - 1];
+  if (last !== undefined && last.kind === "binding" && last.text === text) return state;
+  return addNotice(state, "binding", text);
+}
+
+function onBindingNotice(state: AppState, n: BindingNotice): AppState {
+  const slot = n.slot === null ? "" : `Slot ${n.slot}: `;
+  const detail = n.detail === null ? "" : isolate(clip(n.detail, MAX_NOTICE_TEXT));
+  switch (n.code) {
+    case "accessibility_needed":
+      return addBindingNotice(
+        {
+          ...state,
+          accessibility: { supported: true, trusted: false },
+        },
+        `${slot}Accessibility permission needed — allow Ventriloquist in System Settings › Privacy & Security › Accessibility.`,
+      );
+    case "bind_failed":
+      return addBindingNotice(state, `${slot}not bound: ${detail}`);
+    case "save_failed":
+      return addBindingNotice(state, `Could not save the bindings: ${detail}`);
+    case "bindings_warning":
+      return addBindingNotice(state, detail);
   }
 }
 

@@ -99,7 +99,22 @@ gate5_frontend() {
   (cd desktop/app && npm run build)
 }
 
-GATES=(gate1_protocol gate2_desktop_core gate3_e2e gate4_desktop gate4_ios gate5_frontend)
+# Gate 6: vq-inject (pure planner/store tests, clippy) and the Windows
+# cross-check of the injector crate.
+gate6_inject() {
+  step "gate 6: cargo test -p vq-inject"
+  cargo test -p vq-inject
+  step "gate 6: cargo clippy -p vq-inject"
+  cargo clippy -p vq-inject --all-targets -- -D warnings
+  step "gate 6: cargo check -p vq-inject --target x86_64-pc-windows-msvc"
+  if rustup target list --installed 2>/dev/null | grep -q x86_64-pc-windows-msvc; then
+    cargo check -p vq-inject --target x86_64-pc-windows-msvc
+  else
+    echo "skipping Windows cross-check (target x86_64-pc-windows-msvc not installed)"
+  fi
+}
+
+GATES=(gate1_protocol gate2_desktop_core gate3_e2e gate4_desktop gate4_ios gate5_frontend gate6_inject)
 
 # Run all gates, or only those named on the command line.
 if [ "$#" -gt 0 ]; then

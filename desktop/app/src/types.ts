@@ -98,3 +98,65 @@ export type HostEvent =
   | { event: "storage_warning"; message: string }
   | { event: "adapter_state"; state: AdapterState }
   | { event: "config_changed"; log_dir: string; name: string; persisted: boolean };
+
+// ---- bindings (SPEC_V2; desktop/app/src-tauri/src/delivery.rs). Every app
+// name, window title and failure reason came from another app: untrusted.
+
+export type DeliveryStatus = "sending" | "sent" | "off" | "missing" | "blocked" | "failed";
+
+export interface DeliveryEvent {
+  entry_id: string;
+  slot: number | null;
+  app_name: string | null;
+  status: DeliveryStatus;
+  reason: string | null;
+  method: "ax_insert" | "type" | "paste" | null;
+  /** Started by "Send to active slot". */
+  manual: boolean;
+}
+
+/** live: bound/delivered this session; unverified: re-matched ("?");
+ * unbound: not found ("rebind"). */
+export type SlotStatus = "live" | "unverified" | "unbound";
+
+export type NewlineMode = "shift_enter" | "spaces";
+
+export interface SlotView {
+  slot: number;
+  app_name: string;
+  window_title: string;
+  element_role: string;
+  status: SlotStatus;
+  auto_submit: boolean;
+  /** null while the backend has no such setting. */
+  newline_mode: NewlineMode | null;
+}
+
+export type Modifier = "ctrl" | "alt" | "shift" | "super";
+
+export interface HotkeyView {
+  select: Modifier[];
+  bind: Modifier[];
+  select_taken: number[];
+  bind_taken: number[];
+}
+
+export interface SlotsView {
+  /** 0 = Off. */
+  active: number;
+  slots: SlotView[];
+  hotkeys: HotkeyView;
+  /** Only in the snapshot. */
+  deliveries?: DeliveryEvent[];
+}
+
+export interface BindingNotice {
+  code: "accessibility_needed" | "bind_failed" | "save_failed" | "bindings_warning";
+  slot: number | null;
+  detail: string | null;
+}
+
+export interface AccessibilityStatus {
+  supported: boolean;
+  trusted: boolean;
+}

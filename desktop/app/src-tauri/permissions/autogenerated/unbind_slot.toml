@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-unbind-slot"
+description = "Enables the unbind_slot command without any pre-configured scope."
+commands.allow = ["unbind_slot"]
+
+[[permission]]
+identifier = "deny-unbind-slot"
+description = "Denies the unbind_slot command without any pre-configured scope."
+commands.deny = ["unbind_slot"]

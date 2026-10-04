@@ -12,6 +12,14 @@ fn main() {
             "open_log_folder",
             "pick_log_dir",
             "copy_text",
+            "slots_snapshot",
+            "select_slot",
+            "unbind_slot",
+            "set_slot_settings",
+            "send_to_active",
+            "set_hotkey_modifiers",
+            "accessibility_status",
+            "open_accessibility_settings",
         ]),
     ))
     .expect("tauri build script failed");

@@ -11,11 +11,16 @@
 
 #![forbid(unsafe_code)]
 
+mod delivery;
+mod hotkeys;
+
+use std::panic::AssertUnwindSafe;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, UserAttentionType};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
@@ -23,6 +28,8 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::{oneshot, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use delivery::{DeliveryEvent, DeliveryManager, Notice, Sink, SlotsView};
+use hotkeys::{HotkeyConfig, HotkeyView};
 use vq_host_core::config::default_config_dir;
 use vq_host_core::transport::ble::BleCentralTransport;
 use vq_host_core::{spawn_host, CoreOptions, HostCommand, HostEvent, HostHandle, SystemClock};
@@ -38,6 +45,9 @@ const MAIN_WINDOW: &str = "main";
 /// itself waits at most 3 s for the transport, 2 s for queued log writes
 /// and 1 s to flush events.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How long to wait for a delivery in progress when the app quits.
+const DELIVERY_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Longest string accepted from the web view for a name or a peer id.
 const MAX_ARG_BYTES: usize = 4096;
@@ -270,6 +280,124 @@ fn copy_text(app: AppHandle, text: String) -> Result<(), String> {
     app.clipboard().write_text(text).map_err(|e| e.to_string())
 }
 
+// ------------------------------------------------------------- bindings
+
+/// Tauri events of the bindings feature (SPEC_V2 §3).
+pub const DELIVERY_EVENT: &str = "delivery";
+pub const SLOTS_EVENT: &str = "slots";
+pub const NOTICE_EVENT: &str = "binding-notice";
+
+/// Forwards the delivery thread's reports to the web view.
+struct TauriSink(AppHandle);
+
+impl Sink for TauriSink {
+    fn delivery(&self, ev: &DeliveryEvent) {
+        let _ = self.0.emit_to(MAIN_WINDOW, DELIVERY_EVENT, ev);
+    }
+    fn slots(&self, view: &SlotsView) {
+        let _ = self.0.emit_to(MAIN_WINDOW, SLOTS_EVENT, view);
+    }
+    fn notice(&self, n: &Notice) {
+        let _ = self.0.emit_to(MAIN_WINDOW, NOTICE_EVENT, n);
+    }
+}
+
+/// The saved hotkey modifier choice.
+struct Hotkeys {
+    cfg: Mutex<HotkeyConfig>,
+    dir: PathBuf,
+}
+
+#[tauri::command]
+fn slots_snapshot(m: State<'_, DeliveryManager>) -> SlotsView {
+    m.snapshot()
+}
+
+/// 0 = Off, 1..=9 = slot (same as the hotkey).
+#[tauri::command]
+fn select_slot(m: State<'_, DeliveryManager>, slot: u8) -> Result<(), String> {
+    m.select(slot)
+}
+
+#[tauri::command]
+fn unbind_slot(m: State<'_, DeliveryManager>, slot: u8) -> Result<(), String> {
+    m.unbind(slot)
+}
+
+/// Change a slot's auto-submit and/or newline mode (`shift_enter`/`spaces`).
+#[tauri::command]
+fn set_slot_settings(
+    m: State<'_, DeliveryManager>,
+    slot: u8,
+    auto_submit: Option<bool>,
+    newline_mode: Option<String>,
+) -> Result<(), String> {
+    if let Some(n) = &newline_mode {
+        if n != "shift_enter" && n != "spaces" {
+            return Err("newline mode must be shift_enter or spaces".into());
+        }
+    }
+    m.set_settings(slot, auto_submit, newline_mode)
+}
+
+/// Deliver the entry's current text to the active slot.
+#[tauri::command]
+fn send_to_active(m: State<'_, DeliveryManager>, entry_id: String) -> Result<(), String> {
+    check_len("the entry id", &entry_id)?;
+    m.send_to_active(&entry_id)
+}
+
+/// `kind` is `select` or `bind`; `modifiers` are ctrl/alt/shift/super.
+/// Registration failures come back in the view as "taken".
+#[tauri::command]
+fn set_hotkey_modifiers(
+    app: AppHandle,
+    m: State<'_, DeliveryManager>,
+    hk: State<'_, Hotkeys>,
+    kind: String,
+    modifiers: Vec<String>,
+) -> Result<HotkeyView, String> {
+    let mut cur = hk.cfg.lock().unwrap_or_else(|p| p.into_inner());
+    let next = cur.with(&kind, &modifiers)?;
+    let view = hotkeys::register_all(&app, &next);
+    if let Err(e) = next.save(&hk.dir) {
+        log::warn!("cannot save the hotkeys: {e}");
+    }
+    *cur = next;
+    m.set_hotkeys(view.clone());
+    Ok(view)
+}
+
+#[derive(Serialize)]
+struct AccessibilityStatus {
+    /// False on Windows (no permission needed; the UI hides it).
+    supported: bool,
+    trusted: bool,
+}
+
+#[tauri::command]
+fn accessibility_status(m: State<'_, DeliveryManager>) -> AccessibilityStatus {
+    let supported = cfg!(target_os = "macos");
+    let trusted = !supported || m.injector().is_trusted(false);
+    if supported && trusted {
+        m.rematch_unbound();
+    }
+    AccessibilityStatus { supported, trusted }
+}
+
+#[tauri::command]
+fn open_accessibility_settings(app: AppHandle) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("not needed on this platform".into());
+    }
+    app.opener()
+        .open_url(
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            None::<&str>,
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// Start the host and the task that forwards its events to the web view.
 fn start_host(app: &AppHandle) -> std::io::Result<()> {
     let opts = CoreOptions {
@@ -310,6 +438,8 @@ fn start_host(app: &AppHandle) -> std::io::Result<()> {
             {
                 app.state::<Host>().lock().log_dir = Some(log_dir.clone());
             }
+            // Entry texts and (on `FinalAccepted`) automatic delivery.
+            app.state::<DeliveryManager>().observe(&ev);
             if matches!(ev, HostEvent::PairingCodeShown { .. }) {
                 draw_attention(&app);
             }
@@ -338,22 +468,44 @@ fn draw_attention(app: &AppHandle) {
     }
 }
 
+/// Wait (bounded) for `task` from any thread, with or without a runtime
+/// context: the timer is created inside the future, where the runtime is
+/// running (building `timeout()` outside `block_on` panics). Returns whether
+/// the task finished in time.
+fn wait_for_task<F>(task: F, timeout: Duration) -> bool
+where
+    F: std::future::Future + Send + 'static,
+{
+    tauri::async_runtime::block_on(async move { tokio::time::timeout(timeout, task).await.is_ok() })
+}
+
 /// Stop the host and wait (bounded) for it to finish: pending log writes
-/// are flushed and BLE connections are closed.
+/// are flushed and BLE connections are closed. Runs inside the OS
+/// terminate callback, where a panic aborts the process, so nothing here
+/// may unwind.
 fn stop_host(app: &AppHandle) {
-    let (handle, task) = {
-        let host = app.state::<Host>();
-        let mut slot = host.lock();
-        (slot.handle.take(), slot.task.take())
-    };
-    if let Some(h) = handle {
-        h.send(HostCommand::Shutdown);
-    }
-    if let Some(task) = task {
-        let done = tauri::async_runtime::block_on(tokio::time::timeout(SHUTDOWN_TIMEOUT, task));
-        if done.is_err() {
-            log::warn!("the host did not stop within {SHUTDOWN_TIMEOUT:?}");
+    let r = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        if let Some(m) = app.try_state::<DeliveryManager>() {
+            if !m.shutdown(DELIVERY_STOP_TIMEOUT) {
+                log::warn!("the delivery thread did not stop within {DELIVERY_STOP_TIMEOUT:?}");
+            }
         }
+        let (handle, task) = {
+            let host = app.state::<Host>();
+            let mut slot = host.lock();
+            (slot.handle.take(), slot.task.take())
+        };
+        if let Some(h) = handle {
+            h.send(HostCommand::Shutdown);
+        }
+        if let Some(task) = task {
+            if !wait_for_task(task, SHUTDOWN_TIMEOUT) {
+                log::warn!("the host did not stop within {SHUTDOWN_TIMEOUT:?}");
+            }
+        }
+    }));
+    if r.is_err() {
+        log::error!("panic while stopping the host; quitting anyway");
     }
 }
 
@@ -396,6 +548,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        // Registered from Rust only (hotkeys.rs); no capability grants the
+        // web view any global-shortcut permission.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(Host::default())
         .manage(Flow::default())
         .invoke_handler(tauri::generate_handler![
@@ -407,8 +562,26 @@ pub fn run() {
             open_log_folder,
             pick_log_dir,
             copy_text,
+            slots_snapshot,
+            select_slot,
+            unbind_slot,
+            set_slot_settings,
+            send_to_active,
+            set_hotkey_modifiers,
+            accessibility_status,
+            open_accessibility_settings,
         ])
         .setup(|app| {
+            let dir = default_config_dir();
+            let cfg = HotkeyConfig::load(&dir);
+            let view = hotkeys::register_all(app.handle(), &cfg);
+            app.manage(Hotkeys { cfg: Mutex::new(cfg), dir: dir.clone() });
+            app.manage(DeliveryManager::start(
+                dir,
+                vq_inject::default_injector(),
+                Arc::new(TauriSink(app.handle().clone())),
+                view,
+            ));
             if let Err(e) = start_host(app.handle()) {
                 // Keep the window: the UI shows the reason (the `snapshot`
                 // command fails with it).
@@ -461,5 +634,19 @@ mod tests {
         f.in_flight.store(5, Ordering::SeqCst);
         f.reset();
         assert_eq!(f.in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn shutdown_wait_works_from_a_plain_thread_and_is_bounded() {
+        // No runtime context here: this used to panic in the OS terminate
+        // callback ("no reactor running").
+        let quick = tauri::async_runtime::spawn(async {});
+        assert!(wait_for_task(quick, Duration::from_secs(5)));
+        let slow = tauri::async_runtime::spawn(async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let t = std::time::Instant::now();
+        assert!(!wait_for_task(slow, Duration::from_millis(200)));
+        assert!(t.elapsed() < Duration::from_secs(5));
     }
 }

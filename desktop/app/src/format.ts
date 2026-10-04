@@ -2,6 +2,7 @@
 
 import { clip, isolate, stripBidi } from "./bidi";
 import type { AppState, PeerInfo } from "./state";
+import type { DeliveryEvent, HotkeyView, Modifier, SlotsView, SlotView } from "./types";
 
 export type Platform = "mac" | "windows" | "other";
 
@@ -106,4 +107,144 @@ export function formatDate(ms: number): string {
   if (d.getFullYear() < 1900 || d.getFullYear() > 9999) return "";
   const p = (n: number): string => n.toString().padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// ---------------------------------------------------------------- bindings
+
+const MAX_CHIP_CHARS = 28;
+const MAX_REASON_CHARS = 80;
+
+export interface ChipView {
+  /** 0 = Off. */
+  slot: number;
+  /** Plain text for textContent; app and title are bidi-isolated. */
+  label: string;
+  tooltip: string;
+  bound: boolean;
+  active: boolean;
+  /** Re-matched, no delivery yet: shows "?". */
+  unverified: boolean;
+  /** Saved but not found: dimmed, "rebind". */
+  unbound: boolean;
+  /** Shows the "⏎" marker. */
+  autoSubmit: boolean;
+}
+
+function chipText(s: SlotView, max: number): string {
+  const app = isolate(clip(s.app_name, max));
+  return s.window_title === ""
+    ? `${s.slot} · ${app}`
+    : `${s.slot} · ${app} — ${isolate(clip(s.window_title, max))}`;
+}
+
+/** The slot bar: Off, then 1…9 (unbound chips dimmed). */
+export function slotChips(view: SlotsView | null): ChipView[] {
+  const active = view?.active ?? 0;
+  const chips: ChipView[] = [
+    {
+      slot: 0,
+      label: "Off",
+      tooltip: "Off: nothing is sent to other apps",
+      bound: true,
+      active: active === 0,
+      unverified: false,
+      unbound: false,
+      autoSubmit: false,
+    },
+  ];
+  for (let n = 1; n <= 9; n++) {
+    const s = view?.slots.find((x) => x.slot === n);
+    if (s === undefined) {
+      chips.push({
+        slot: n,
+        label: String(n),
+        tooltip: `Slot ${n} is empty`,
+        bound: false,
+        active: false,
+        unverified: false,
+        unbound: false,
+        autoSubmit: false,
+      });
+    } else {
+      chips.push({
+        slot: n,
+        label: chipText(s, MAX_CHIP_CHARS),
+        tooltip:
+          chipText(s, 200) +
+          (s.status === "unbound" ? " (not found: rebind it)" : "") +
+          (s.status === "unverified" ? " (not verified yet)" : "") +
+          (s.auto_submit ? " (presses Enter after the text)" : ""),
+        bound: true,
+        active: active === n,
+        unverified: s.status === "unverified",
+        unbound: s.status === "unbound",
+        autoSubmit: s.auto_submit,
+      });
+    }
+  }
+  return chips;
+}
+
+export type BadgeTone = "ok" | "off" | "warn" | "busy";
+
+export interface DeliveryBadge {
+  tone: BadgeTone;
+  text: string;
+}
+
+/** The per-entry delivery badge (SPEC_V2 §4.5); null when nothing was tried. */
+export function deliveryBadge(d: DeliveryEvent | undefined): DeliveryBadge | null {
+  if (d === undefined) return null;
+  const slot = d.slot === null ? "" : String(d.slot);
+  const app = d.app_name === null ? "" : isolate(clip(d.app_name, 24));
+  const reason = d.reason === null ? "" : isolate(clip(d.reason, MAX_REASON_CHARS));
+  switch (d.status) {
+    case "sending":
+      return { tone: "busy", text: "sending…" };
+    case "sent":
+      return { tone: "ok", text: `→ ${slot} · ${app} ✓` };
+    case "off":
+      return { tone: "off", text: "not sent (Off)" };
+    case "missing":
+      return { tone: "warn", text: `✗ slot ${slot} missing` };
+    case "blocked":
+      return { tone: "warn", text: `⚠ blocked (${reason})` };
+    case "failed":
+      return { tone: "warn", text: `✗ failed: ${reason}` };
+  }
+}
+
+/** Whether "Send to active slot" is enabled: a slot is active and the entry
+ * is not a live or interrupted partial. */
+export function canSendToActive(view: SlotsView | null, state: string): boolean {
+  return (view?.active ?? 0) !== 0 && (state === "final" || state === "edit");
+}
+
+/** Modifier checkboxes in display order, labelled for the platform. */
+export function modifierChoices(platform: Platform): { mod: Modifier; label: string }[] {
+  const mac = platform === "mac";
+  return [
+    { mod: "ctrl", label: "Ctrl" },
+    { mod: "alt", label: mac ? "Option" : "Alt" },
+    { mod: "shift", label: "Shift" },
+    { mod: "super", label: mac ? "Cmd" : "Win" },
+  ];
+}
+
+/** "Ctrl+Shift+0–9" for a modifier set and digit range. */
+export function formatHotkey(mods: readonly Modifier[], range: string, platform: Platform): string {
+  const labels = modifierChoices(platform)
+    .filter((c) => mods.includes(c.mod))
+    .map((c) => c.label);
+  return [...labels, range].join("+");
+}
+
+/** "taken by another app: 0, 3" or "" when everything registered. */
+export function takenText(digits: readonly number[]): string {
+  return digits.length === 0 ? "" : `taken by another app: ${digits.join(", ")}`;
+}
+
+/** Whether the hotkey part of two views is the same (render skipping). */
+export function sameHotkeys(a: HotkeyView | undefined, b: HotkeyView | undefined): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }

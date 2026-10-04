@@ -28,6 +28,15 @@
       </div>
     </header>
 
+    <nav id="slotbar" class="slotbar" aria-label="Bindings: active slot">
+      <div id="chips" class="chips" role="group"></div>
+      <div id="ax-needed" class="ax-needed" hidden>
+        <span>Accessibility permission needed</span>
+        <button type="button" id="ax-open-bar">Open System Settings</button>
+      </div>
+    </nav>
+    <div id="slot-menu" class="slot-menu" role="menu" hidden></div>
+
     <div id="banners" class="banners"></div>
 
     <main id="list" class="list" aria-label="Transcripts">
@@ -58,6 +67,18 @@
           <h3>Paired phones</h3>
           <ul id="paired" class="paired"></ul>
           <p id="paired-empty" class="muted">No paired phones. Start pairing from the iPhone app.</p>
+        </section>
+
+        <section id="bindings-settings">
+          <h3>Bindings</h3>
+          <div id="ax-row" hidden>
+            <p>Accessibility permission: <strong id="ax-status"></strong></p>
+            <div class="row-buttons"><button type="button" id="ax-open">Open System Settings</button></div>
+          </div>
+          <fieldset class="mods" id="mods-select"></fieldset>
+          <fieldset class="mods" id="mods-bind"></fieldset>
+          <ul id="bound-slots" class="paired"></ul>
+          <p id="bound-empty" class="muted">No bound slots. Focus a text box in another app and press the bind hotkey.</p>
         </section>
 
         <section>

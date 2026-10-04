@@ -6,7 +6,13 @@ import "./styles.css";
 import { backend } from "./backend";
 import { stripBidi } from "./bidi";
 import {
+  canSendToActive,
   connectionStatus,
+  deliveryBadge,
+  formatHotkey,
+  modifierChoices,
+  slotChips,
+  takenText,
   detectPlatform,
   formatCode,
   formatCountdown,
@@ -23,7 +29,7 @@ import {
   type Action,
   type AppState,
 } from "./state";
-import type { Entry, HostEvent } from "./types";
+import type { Entry, HostEvent, Modifier, NewlineMode, SlotView } from "./types";
 
 const COPIED_MS = 1500;
 const SNAPSHOT_RETRY_MS = 3000;
@@ -63,6 +69,18 @@ const dom = {
   pairingCountdown: el("pairing-countdown"),
   pairingFailed: el("pairing-failed"),
   pairingCancel: el<HTMLButtonElement>("pairing-cancel"),
+  slotbar: el("slotbar"),
+  chips: el("chips"),
+  axNeeded: el("ax-needed"),
+  axOpenBar: el<HTMLButtonElement>("ax-open-bar"),
+  slotMenu: el("slot-menu"),
+  axRow: el("ax-row"),
+  axStatus: el("ax-status"),
+  axOpen: el<HTMLButtonElement>("ax-open"),
+  modsSelect: el<HTMLFieldSetElement>("mods-select"),
+  modsBind: el<HTMLFieldSetElement>("mods-bind"),
+  boundSlots: el<HTMLUListElement>("bound-slots"),
+  boundEmpty: el("bound-empty"),
 };
 
 const platform = detectPlatform(navigator.userAgent);
@@ -103,9 +121,13 @@ interface Row {
   speaking: HTMLElement;
   interrupted: HTMLElement;
   edited: HTMLElement;
+  delivery: HTMLElement;
+  send: HTMLButtonElement;
   copy: HTMLButtonElement;
   text: HTMLElement;
   shown: Entry | null;
+  shownDelivery: unknown;
+  shownActive: number;
   copyTimer: number | undefined;
 }
 
@@ -128,11 +150,17 @@ function makeRow(id: string): Row {
   const speaking = span("badge speaking", "speaking…");
   const interrupted = span("badge interrupted", "interrupted");
   const edited = span("badge edited", "edited");
+  const delivery = span("badge delivery");
+  delivery.hidden = true;
+  const send = document.createElement("button");
+  send.type = "button";
+  send.className = "send";
+  send.textContent = "Send to active slot";
   const copy = document.createElement("button");
   copy.type = "button";
   copy.className = "copy";
   copy.textContent = "Copy";
-  meta.append(time, device, speaking, interrupted, edited, copy);
+  meta.append(time, device, speaking, interrupted, edited, delivery, send, copy);
   const text = document.createElement("div");
   text.className = "text";
   root.append(meta, text);
@@ -143,11 +171,18 @@ function makeRow(id: string): Row {
     speaking,
     interrupted,
     edited,
+    delivery,
+    send,
     copy,
     text,
     shown: null,
+    shownDelivery: undefined,
+    shownActive: -1,
     copyTimer: undefined,
   };
+  send.addEventListener("click", () => {
+    backend.sendToActive(id).catch((err: unknown) => report("Could not send to the active slot", err));
+  });
   copy.addEventListener("click", () => {
     const e = state.entries.get(id);
     if (e === undefined) return;
@@ -174,6 +209,19 @@ function flashCopy(row: Row, label: string): void {
 
 function updateRow(row: Row, e: Entry): void {
   const old = row.shown;
+  const d = state.deliveries.get(e.id);
+  const active = state.slots?.active ?? 0;
+  if (row.shownDelivery !== d || row.shownActive !== active || old?.state !== e.state) {
+    const badge = deliveryBadge(d);
+    row.delivery.hidden = badge === null;
+    if (badge !== null) {
+      row.delivery.textContent = badge.text;
+      row.delivery.className = `badge delivery ${badge.tone}`;
+    }
+    row.send.disabled = !canSendToActive(state.slots, e.state);
+    row.shownDelivery = d;
+    row.shownActive = active;
+  }
   if (old === e) return;
   if (old?.time !== e.time) row.time.textContent = e.time;
   if (old?.device_name !== e.device_name) row.device.textContent = stripBidi(e.device_name);
@@ -291,7 +339,15 @@ const forgetArmed = new Map<string, number>();
 let settingsShown: readonly unknown[] = [];
 
 function renderSettings(force = false): void {
-  const key = [state.logDir, state.configPersisted, state.name, state.pairedPeers, state.peers];
+  const key = [
+    state.logDir,
+    state.configPersisted,
+    state.name,
+    state.pairedPeers,
+    state.peers,
+    state.slots,
+    state.accessibility,
+  ];
   if (!force && key.every((v, i) => v === settingsShown[i])) return;
   settingsShown = key;
   dom.logDir.textContent = state.logDir;
@@ -320,6 +376,7 @@ function renderSettings(force = false): void {
   }
   dom.paired.replaceChildren(...items);
   dom.pairedEmpty.hidden = state.pairedPeers.length > 0;
+  renderBindingsSettings();
 }
 
 function onForget(deviceId: string): void {
@@ -373,7 +430,218 @@ function renderPairing(): void {
   if (wasHidden) dom.pairingCancel.focus();
 }
 
+// ---------------------------------------------------------- slot bar
+
+let slotsRendered: unknown;
+let menuSlot: number | null = null;
+
+function renderSlotBar(): void {
+  const ax = state.accessibility;
+  const axNeeded = ax !== null && ax.supported && !ax.trusted;
+  dom.axNeeded.hidden = !axNeeded;
+  if (slotsRendered !== state.slots) {
+    slotsRendered = state.slots;
+    const items: HTMLElement[] = [];
+    for (const c of slotChips(state.slots)) {
+      const wrap = document.createElement("span");
+      wrap.className = "chip";
+      if (!c.bound) wrap.classList.add("empty");
+      if (c.unbound) wrap.classList.add("unbound");
+      if (c.active) wrap.classList.add("active");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = c.label; // app and title are other apps' strings
+      b.title = c.tooltip;
+      b.setAttribute("aria-pressed", c.active ? "true" : "false");
+      b.addEventListener("click", () => {
+        backend.selectSlot(c.slot).catch((e: unknown) => report("Could not select the slot", e));
+      });
+      wrap.append(b);
+      if (c.unbound) b.append(span("mark", " rebind"));
+      if (c.unverified) b.append(span("mark", " ?"));
+      if (c.autoSubmit) b.append(span("mark", " ⏎"));
+      if (c.slot > 0 && c.bound) {
+        const more = document.createElement("button");
+        more.type = "button";
+        more.className = "more";
+        more.textContent = "⋯";
+        more.setAttribute("aria-label", `Slot ${c.slot} options`);
+        more.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          if (menuSlot === c.slot) closeMenu();
+          else openMenu(c.slot, more);
+        });
+        wrap.append(more);
+      }
+      items.push(wrap);
+    }
+    dom.chips.replaceChildren(...items);
+    if (menuSlot !== null) renderMenu();
+  }
+}
+
+function slotView(n: number): SlotView | undefined {
+  return state.slots?.slots.find((s) => s.slot === n);
+}
+
+function openMenu(n: number, anchor: HTMLElement): void {
+  menuSlot = n;
+  const r = anchor.getBoundingClientRect();
+  dom.slotMenu.style.top = `${Math.round(r.bottom + 4)}px`;
+  dom.slotMenu.style.left = `${Math.max(4, Math.round(Math.min(r.left, window.innerWidth - 230)))}px`;
+  dom.slotMenu.hidden = false;
+  renderMenu();
+}
+
+function closeMenu(): void {
+  menuSlot = null;
+  dom.slotMenu.hidden = true;
+}
+
+function renderMenu(): void {
+  const s = menuSlot === null ? undefined : slotView(menuSlot);
+  if (s === undefined) {
+    closeMenu();
+    return;
+  }
+  const n = s.slot;
+  const auto = document.createElement("label");
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = s.auto_submit;
+  cb.addEventListener("change", () => {
+    backend
+      .setSlotSettings(n, { autoSubmit: cb.checked })
+      .catch((e: unknown) => report("Could not change auto-submit", e));
+  });
+  auto.append(cb, document.createTextNode("Auto-submit (Enter)"));
+  const items: HTMLElement[] = [auto];
+  if (s.newline_mode !== null) {
+    const lab = document.createElement("label");
+    const sel = document.createElement("select");
+    for (const [v, t] of [
+      ["shift_enter", "Shift+Enter"],
+      ["spaces", "Spaces"],
+    ] as const) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = t;
+      sel.append(o);
+    }
+    sel.value = s.newline_mode;
+    sel.addEventListener("change", () => {
+      backend
+        .setSlotSettings(n, { newlineMode: sel.value as NewlineMode })
+        .catch((e: unknown) => report("Could not change the newline mode", e));
+    });
+    lab.append(document.createTextNode("Newline mode "), sel);
+    items.push(lab);
+  }
+  const unbind = document.createElement("button");
+  unbind.type = "button";
+  unbind.className = "danger";
+  unbind.textContent = "Unbind";
+  unbind.addEventListener("click", () => {
+    closeMenu();
+    backend.unbindSlot(n).catch((e: unknown) => report("Could not unbind the slot", e));
+  });
+  items.push(unbind);
+  dom.slotMenu.replaceChildren(...items);
+}
+
+document.addEventListener("click", (e) => {
+  if (menuSlot !== null && !dom.slotMenu.contains(e.target as Node)) closeMenu();
+});
+
+dom.axOpenBar.addEventListener("click", openAccessibility);
+dom.axOpen.addEventListener("click", openAccessibility);
+function openAccessibility(): void {
+  backend
+    .openAccessibilitySettings()
+    .catch((e: unknown) => report("Could not open System Settings", e));
+}
+
+function refreshAccessibility(): void {
+  if (platform === "windows") return;
+  backend.accessibilityStatus().then(
+    (status) => dispatch({ type: "accessibility", status }),
+    (e: unknown) => console.error("accessibility status failed", e),
+  );
+}
+
+/** Settings → Bindings: permission, hotkey modifier pickers, slot list. */
+function renderBindingsSettings(): void {
+  const ax = state.accessibility;
+  const showAx = platform !== "windows" && ax !== null && ax.supported;
+  dom.axRow.hidden = !showAx;
+  if (showAx) dom.axStatus.textContent = ax.trusted ? "granted" : "not granted";
+
+  const hk = state.slots?.hotkeys;
+  if (hk !== undefined) {
+    renderMods(dom.modsSelect, "select", "Select slot", hk.select, "0–9", hk.select_taken);
+    renderMods(dom.modsBind, "bind", "Bind slot", hk.bind, "1–9", hk.bind_taken);
+  }
+
+  const items: HTMLElement[] = [];
+  for (const s of state.slots?.slots ?? []) {
+    const li = document.createElement("li");
+    const info = document.createElement("div");
+    info.className = "peer-info";
+    const name = span("peer-name isolate", `${s.slot} · ${stripBidi(s.app_name)}`);
+    info.append(name, span("muted isolate", stripBidi(s.window_title)));
+    const unbind = document.createElement("button");
+    unbind.type = "button";
+    unbind.className = "danger";
+    unbind.textContent = "Unbind";
+    unbind.addEventListener("click", () => {
+      backend.unbindSlot(s.slot).catch((e: unknown) => report("Could not unbind the slot", e));
+    });
+    li.append(info, unbind);
+    items.push(li);
+  }
+  dom.boundSlots.replaceChildren(...items);
+  dom.boundEmpty.hidden = items.length > 0;
+}
+
+function renderMods(
+  box: HTMLFieldSetElement,
+  kind: "select" | "bind",
+  title: string,
+  mods: readonly Modifier[],
+  range: string,
+  taken: readonly number[],
+): void {
+  const legend = document.createElement("legend");
+  legend.textContent = `${title}: ${formatHotkey(mods, range, platform)}`;
+  const items: HTMLElement[] = [legend];
+  for (const c of modifierChoices(platform)) {
+    const lab = document.createElement("label");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = mods.includes(c.mod);
+    cb.addEventListener("change", () => {
+      const next = modifierChoices(platform)
+        .filter((x) => (x.mod === c.mod ? cb.checked : mods.includes(x.mod)))
+        .map((x) => x.mod);
+      backend.setHotkeyModifiers(kind, next).then(
+        () => undefined,
+        (e: unknown) => {
+          report("Could not change the hotkey", e);
+          renderSettings(true); // put the checkboxes back
+        },
+      );
+    });
+    lab.append(cb, document.createTextNode(c.label));
+    items.push(lab);
+  }
+  const t = takenText(taken);
+  if (t !== "") items.push(span("taken warn-text", t));
+  box.replaceChildren(...items);
+}
+
+
 function render(): void {
+  renderSlotBar();
   renderStatus();
   renderBanners();
   renderList();
@@ -392,12 +660,13 @@ dom.clearView.addEventListener("click", () => dispatch({ type: "clear_view" }));
  * the dialog and Cmd/Ctrl+F cannot focus the hidden search field. */
 function updateInert(): void {
   const modal = !dom.settings.hidden || state.pairing !== null;
-  for (const e of [dom.header, dom.banners, dom.main]) e.inert = modal;
+  for (const e of [dom.header, dom.slotbar, dom.banners, dom.main]) e.inert = modal;
   dom.settings.inert = state.pairing !== null;
 }
 
 function openSettings(): void {
   dom.settings.hidden = false;
+  refreshAccessibility();
   updateInert();
   renderSettings(true);
   dom.closeSettings.focus();
@@ -443,7 +712,8 @@ dom.pairingCancel.addEventListener("click", cancelPairing);
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    if (state.pairing !== null) cancelPairing();
+    if (menuSlot !== null) closeMenu();
+    else if (state.pairing !== null) cancelPairing();
     else if (!dom.settings.hidden) closeSettings();
     else if (document.activeElement === dom.search && dom.search.value !== "") {
       dom.search.value = "";
@@ -490,6 +760,15 @@ async function start(): Promise<void> {
   // its reply are buffered by the reducer. A lost or undeliverable
   // snapshot is requested again until one arrives.
   await backend.onHostEvent(onHostEvent);
+  await backend.onSlots((view) => dispatch({ type: "slots", view }));
+  await backend.onDelivery((event) => dispatch({ type: "delivery", event }));
+  await backend.onBindingNotice((notice) => dispatch({ type: "binding_notice", notice }));
+  backend.slotsSnapshot().then(
+    (view) => dispatch({ type: "slots_snapshot", view }),
+    (e: unknown) => console.error("slots snapshot failed", e),
+  );
+  refreshAccessibility();
+  window.addEventListener("focus", refreshAccessibility);
   let tries = 0;
   const ask = (): void => {
     if (state.phase !== "loading") return;

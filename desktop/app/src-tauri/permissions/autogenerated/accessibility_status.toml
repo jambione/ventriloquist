@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-accessibility-status"
+description = "Enables the accessibility_status command without any pre-configured scope."
+commands.allow = ["accessibility_status"]
+
+[[permission]]
+identifier = "deny-accessibility-status"
+description = "Denies the accessibility_status command without any pre-configured scope."
+commands.deny = ["accessibility_status"]

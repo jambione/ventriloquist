@@ -444,3 +444,36 @@ None. PhoneSim (the real `PhoneEngine`) and `vq-host` agreed on every scenario o
   - MacInjector is compile-checked only; nothing was run against real apps. The TextEdit test is `mac-it` and `#[ignore]`.
   - Terminal.app "Secure Keyboard Entry" makes `IsSecureEventInputEnabled` true, so deliveries to Terminal are `blocked` whenever it is on. CGEvent typing would still work, but the spec says to refuse.
   - Rematched slots have no element until delivery, so the AX path is used only if the window's focused element matches the saved role.
+
+## v2 N1w (Windows injector)
+
+- **Crate:** `windows` 0.62 (already in the lockfile via Tauri), features limited to what `desktop/inject` uses. All `unsafe` is in `windows/sys.rs`; `windows/mod.rs` is safe logic plus pure helpers with unit tests (they run on the Windows CI job; this Mac can only cross-check).
+- **Planner changes.**
+  - `TargetCaps.clipboard_restorable` (macOS always true). When false, text over 200 chars is typed, including in the AX fallback plan. Unit-tested.
+  - `SlotSettings.newline_mode` (`ShiftEnter | Spaces`, serde snake_case, default `ShiftEnter`). `BindingsStore::bind` sets it from the app category (`SlotSettings::for_app`: Terminal gives `Spaces`). `set_newline_mode` added. Settings survive re-match and save/load; a file without the key reads as `ShiftEnter`.
+  - `Spaces` replaces each (normalised) line break with one space before planning, so the 200-char count uses the flattened text.
+  - `Action::CmdV` is kept as the action name and means Ctrl+V on Windows.
+- **Clipboard restorability** is decided from the format list: GDI-handle formats (metafiles, owner-display, `CF_GDIOBJ*`, and `CF_BITMAP`/`CF_PALETTE` without a DIB) are not restorable. Windows synthesises `CF_BITMAP` from a DIB, so a plain image copy stays restorable. Snapshots over 64 MB, or a format whose HGLOBAL can't be read, also count as not restorable. Delayed-rendered formats are rendered by `GetClipboardData` and copied. If the snapshot fails at execution (clipboard changed since `caps`), the delivery fails instead of overwriting.
+- **Clipboard writes** use a hidden message-only window as owner (`SetClipboardData` fails after `EmptyClipboard` with a NULL owner) and add `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory=0`, `CanUploadToCloudClipboard=0` so history and cloud sync skip our text.
+- **UIA re-focus** keeps the captured `IUIAutomationElement` plus its RuntimeId. `FocusElement` calls `SetFocus` only if `GetRuntimeId` still equals the saved one. Restored (`assign_saved`) and re-matched slots have no element and type into whatever the window focuses. No `FindFirst`-by-RuntimeId search (needs a SAFEARRAY VARIANT).
+- **Password check** happens at capture, in `caps` (saved element) and again after `FocusElement` (the element that actually has focus, when it belongs to the target pid, gives `Blocked("secure text field")`).
+- **Elevation** is checked at capture (refused with `Platform("target is elevated")`, since the trait has no Blocked error), in `caps`, and again at the start of `execute`, before activation. Own pid gives `Blocked`/`SelfFrontmost`.
+- **Window list** (`running_windows`/re-match): visible, titled, uncloaked (DWM) top-level windows. `standard` means no owner and not `WS_EX_TOOLWINDOW`. `WindowInfo.id` is the HWND.
+- **Notes and risks.**
+  - Held modifier keys are not released before `SendInput`.
+  - The foreground check is exact HWND equality, as the spec says; a popup stealing focus aborts with "focus changed".
+  - Nothing here has run on Windows. The `win-it` Notepad test (launches a unique temp file so it works with classic and Windows 11 Notepad, force-kills by pid) is CI-only and non-blocking; the Win11 Notepad edit control is a RichEdit that should expose TextPattern.
+  - Pre-existing and unrelated: `cargo clippy --workspace` currently fails in `desktop/app/src-tauri/src/delivery.rs:690` (identical `if` blocks, `get().is_none()`), which another agent is editing.
+
+## v2 N2 (desktop bindings)
+
+- **One FIFO queue for everything.** Finals, "Send to active slot", bind, select, unbind and settings changes all go through the delivery thread's queue. A hotkey pressed during a delivery therefore runs after it (and after deliveries queued earlier), and affects the next delivery that starts. Hotkey sounds can lag a long paste by its duration.
+- **Entry texts live in Rust.** `send_to_active(entry_id)` reads the entry's text when the delivery *starts* (so a correction made while it waits is sent). The forwarder feeds `entry_upserted`, `snapshot`, `entry_evicted` and `final_accepted` into the manager (bounded to 600 ids). Partial and interrupted entries are refused.
+- **Events.** Tauri events `delivery` (per entry state: sending, sent, off, missing, blocked, failed), `slots` (slot bar, no deliveries) and `binding-notice`. They bypass the host-event ack window. `slots_snapshot` also returns the last 500 delivery results for page reloads. "sending…" is emitted only when the active slot is not Off.
+- **Slot status.** `live` (bound this session or delivered to), `unverified` ("?": re-matched, no success yet), `unbound` (not found; dimmed, "rebind"). A delivery that resolves to `Missing` marks the slot unbound. An active slot that does not re-match at start becomes Off (§4.2). `accessibility_status` re-runs the re-match for unbound slots when permission is seen granted.
+- **Hotkeys.** Registered in Rust only (`on_shortcut` per digit); the web view's capability has no global-shortcut permission, and the plugin needs none for Rust use. Modifier sets are validated in Rust (need Ctrl, Alt/Option or Cmd/Win; select and bind must differ), stored in `<config dir>/hotkeys.json`, and a failed registration is reported per digit as "taken by another app". Defaults are the same set on both OSes (Ctrl+Shift select; Ctrl+Alt/Option+Shift bind).
+- **Newline mode** is wired to `SlotSettings.newline_mode` (`shift_enter`/`spaces`): shown in each chip's ⋯ menu and set through `set_slot_settings`.
+- **Accessibility UI** is shown only when the backend reports `supported` (macOS); `open_accessibility_settings` returns an error elsewhere. Windows shows no permission UI.
+- **Exit panic fix.** `tokio::time::timeout` was built outside the runtime inside `block_on`, which panicked in the OS terminate callback and aborted the app. `wait_for_task` now builds it inside the future, `stop_host` is wrapped in `catch_unwind`, and the delivery thread is stopped with a bounded wait (2 s). A unit test calls it from a plain thread.
+- **Windows cross-check of the Tauri crate** needs `llvm-rc` (tauri-winres) which is not installed on this Mac; `cargo check -p ventriloquist-desktop --target x86_64-pc-windows-msvc` fails in the build script with `NotAttempted("llvm-rc")`. With a stub `llvm-rc` on PATH (check does not link resources) it passes, so the Rust code compiles for Windows.
+- **verify.sh** gains `gate6_inject` (tests, clippy, Windows cross-check when the target is installed); it is not in the default requested gates here.
