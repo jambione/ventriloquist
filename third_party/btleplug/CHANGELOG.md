@@ -1,0 +1,605 @@
+# 0.13.3 (2026-09-27)
+
+## Bugfixes
+
+- Fix a race between waking and closing Android (`droidplug`) JNI adapter
+  closures that could free a closure while another thread was still calling
+  it. Concurrent wake and close were enough to trigger SIGSEGV/SIGBUS crashes
+  through `fn_adapter_call_internal`, which dominated the native crash rate of
+  Android apps using btleplug. Closures are now reference counted in the
+  adapter object's handle field, and wake/close access to that field is
+  serialized on the object monitor, so an in-flight call always holds its own
+  reference.
+- Fix CoreBluetooth `discover_services()` never resolving when service or
+  characteristic discovery reported an error, when the peripheral had no
+  services, or when the peripheral was no longer known to the adapter. Service
+  discovery errors are now returned, and a characteristic discovery error
+  completes that service without characteristics. (#486)
+- Fix CoreBluetooth panics on late or unexpected discovery callbacks, such as
+  characteristics for included services or descriptors arriving after discovery
+  finished. The panic killed the CoreBluetooth event thread, so every later
+  operation on the adapter hung. (#487)
+- Fix concurrent CoreBluetooth `connect()`, `disconnect()`, or
+  `discover_services()` calls on one peripheral leaving all but the last caller
+  waiting forever. Every concurrent caller now receives the result. (#488)
+- Fix CoreBluetooth reads, writes, subscriptions, and descriptor operations
+  never resolving when services were rediscovered, invalidated by the device, or
+  when peripherals were cleared. Rediscovery keeps in-flight operations on
+  attributes that still exist, operations on attributes that disappear fail with
+  an error, and a services-modified event only drops the invalidated services.
+  On CoreBluetooth, `Central::clear_peripherals()` now disconnects any
+  peripheral that is still connected. (#489)
+- Fix a Windows deadlock when GATT operations ran concurrently on
+  characteristics of the same service, for example two `subscribe()` calls
+  joined on one task. (#481)
+- Fix a Windows scanner crash when a nearby device advertised a truncated
+  service data section. (#482)
+- Fix 128-bit service data UUIDs being reported byte-reversed on Windows. (#483)
+- Fix every GATT operation failing on Windows after reconnecting a device whose
+  connection dropped, until `disconnect()` was called explicitly. `connect()` on
+  an already connected peripheral now returns immediately. (#484)
+- Fix BlueZ `mtu()` panicking on BlueZ versions that do not report the MTU
+  (older than 5.62). The panic also poisoned the peripheral's service cache,
+  breaking every later operation on it. (#485)
+- Fix a failed Android service discovery never resolving `discover_services()`
+  and permanently blocking the peripheral's command queue. (#491)
+- Fix an Android disconnect during a descriptor read or write, MTU request, or
+  RSSI read permanently blocking the peripheral's command queue and suppressing
+  `DeviceDisconnected`. Any operation interrupted by a disconnect now fails with
+  `Error::NotConnected`; previously writes could report success and reads or
+  discovery failed with an unrelated JNI error. (#490)
+- Fix failed Android GATT reads and writes being reported as success. Failures,
+  such as insufficient authentication, are now returned as errors that include
+  the GATT status code. (#492)
+- Fix CoreBluetooth discovery callbacks queued before `stop_scan()` re-adding
+  peripherals after `clear_peripherals()`, so `Central::peripherals()` could
+  still return a device (and `DeviceDiscovered` could fire) immediately after
+  stopping the scan and clearing. Advertisement callbacks that arrive after
+  `stop_scan()` are now ignored.
+- Fix BlueZ `unsubscribe()` failing with "No notify session started" when the
+  characteristic was not subscribed, for example on a repeated unsubscribe.
+  Unsubscribing a characteristic that is not subscribed now succeeds on every
+  backend.
+- Fix Windows `retrieve_peripherals()` with a service filter taking a minute or
+  more when the system listed a stale "connected" device whose GATT services
+  could not be read. Connected devices are now queried concurrently, and a
+  device that does not answer within 5 seconds is treated as having no
+  services.
+- Fix Android `connect()` failing with `Error::NotConnected` when a connection
+  failed to be established (HCI 0x3E, which Android reports as GATT status
+  133). Such attempts are now retried up to twice. After a failed connect, the
+  failed `BluetoothGatt` is closed instead of being reused by the next
+  `connect()`.
+
+# 0.13.2 (2026-09-20)
+
+## Bugfixes
+
+- Fix callback memory leak on windows when adapters are constantly allocated and freed. (#476)
+
+# 0.13.1 (2026-09-17)
+
+## Bugfixes
+
+- Only request Coded PHY scanning on Windows when the adapter supports it.
+  Adapters without Coded PHY support (e.g. Bluetooth 4.x dongles) accepted the
+  request and started scans, but those scans never delivered a single
+  advertisement. (#473)
+- Fix CoreBluetooth `subscribe()` never resolving when the remote device refuses
+  the notification request. Refused requests are now resolved with an error, and
+  overlapping subscribe and unsubscribe requests on one characteristic can no
+  longer be misrouted to each other. (#471)
+- Make `AdapterManager::add_peripheral()` idempotent, fixing a process abort when
+  two scan results for the same device raced on insertion. This was most likely
+  on Android, where rescans re-report devices already held by the shared adapter
+  manager. Duplicate insertions now keep the existing peripheral.
+- `AdapterManager::add_peripheral()` now returns the canonical stored instance,
+  so a caller that loses a race against an existing peripheral receives the live
+  one instead of a fresh wrapper without its connection state.
+
+# 0.13.0 (2026-08-29)
+
+## Features
+
+- Add `Central::retrieve_peripherals()` and `RetrievePeripheralsOptions` for
+  retrieving peripherals by identifier or advertised service without scanning.
+  This is supported on Linux, macOS/iOS, and Windows; Android returns
+  `Error::NotSupported`.
+- Add `Central::adapter_address()` for retrieving the local adapter address on
+  Linux and Windows. Apple platforms and ordinary Android applications return
+  `Ok(None)` because their public APIs do not expose this address.
+- Implement `Central::add_peripheral()` on Windows, allowing bonded or already
+  connected devices to be reached by address without waiting for an
+  advertisement.
+- Add `appearance` to `PeripheralProperties`, populated from GAP Appearance
+  advertising data on Windows, Linux, and Android. CoreBluetooth does not expose
+  this advertising field, so it remains `None` on Apple platforms.
+- Add support for receiving advertisements on the Bluetooth LE Coded PHY on
+  Windows where supported.
+
+## Bugfixes
+
+- Fix CoreBluetooth service discovery hanging when descriptor discovery fails.
+- Fix CoreBluetooth `clear_peripherals()` so cleared devices can be rediscovered
+  and emit fresh discovery events.
+- Report the negotiated CoreBluetooth MTU after service discovery instead of
+  always returning the default MTU.
+- Preserve complete local names over shortened names across split or repeated
+  advertisements on Android, macOS/iOS, and Windows.
+- Fix filtered Windows scans dropping scan-response packets that omit service
+  UUIDs, and prevent stale scan-response matches from leaking between scans.
+- Propagate Android JNI callback and initialization failures consistently while
+  preserving Java exception details.
+- Harden Windows characteristic subscription state so repeated subscriptions do
+  not install duplicate handlers and failed CCCD operations remain retryable.
+  (#326)
+- Clarify that `Peripheral::properties()` is a backend-dependent snapshot and
+  may be unavailable, incomplete, or stale. (#339)
+- Prevent CoreBluetooth descriptor discovery and GATT operation failures from
+  hanging pending futures or panicking on missing relationships. (#397, #422)
+- Run compatible CoreBluetooth operations through FIFO queues, preserve
+  write-without-response ordering under backpressure, and complete pending
+  operations safely on disconnect or late callbacks. (#464)
+- Remove stale CoreBluetooth peripheral event senders after dispatch failures so
+  peripherals can be rediscovered cleanly. (#469)
+- Expand Android JNI host-test coverage for futures, streams, and environment
+  setup across worker threads. (#427)
+- Update the event-driven discovery example to describe its async-task usage.
+  (#460)
+
+## Breaking Changes
+
+- **Android minimum SDK**: Android API 24 (Android 7.0) or newer is now required.
+- **`PeripheralProperties` struct literals**: The new `appearance` field must be
+  initialized by callers that construct this public struct directly.
+
+## Dependencies
+
+- Update `jni` from 0.19 to 0.22 and migrate the Android backend to its current
+  API.
+
+# 0.12.0 (2026-03-08)
+
+## Features
+
+- Add `mtu()` method to `Peripheral` trait (returns negotiated MTU)
+- Add `connect_with_timeout()` and `discover_services_with_timeout()` convenience methods
+- Add `read_rssi()` to `Peripheral` trait (supported on all platforms)
+- Add `connection_parameters()` and `request_connection_parameters()` to `Peripheral` trait (Windows/Android)
+- Add `ConnectionParameters` and `ConnectionParameterPreset` types
+- Add `clear_peripherals()` to `Central` trait
+  - Thanks danielstuart14!
+- Add `adapter_state()` to `Central` trait for querying Bluetooth on/off state
+- Add `add_peripheral()` to `Central` trait for adding a device by address without scanning (Android)
+- Add `advertisement_name` field to `PeripheralProperties`
+  - Thanks szymonlesisz!
+- Add `service_uuid` field to `ValueNotification`
+  - Thanks MnlPhlp!
+- Add `CentralEvent::RssiUpdate` for RSSI change events
+- Add `CentralEvent::DeviceServicesModified` (CoreBluetooth only)
+  - Thanks kragacles!
+- Add `Error::NoAdapterAvailable` variant
+- Add `DEFAULT_MTU_SIZE` constant
+- Add `From<BDAddr> for [u8; 6]` conversion
+  - Thanks gabevenberg!
+- Add `./scripts/build-java.sh` for building the Android Java components
+- Add integration test suite with Zephyr and Bumble test peripherals
+- Vendor jni-utils-rs Java classes directly into the btleplug source tree (no longer a separate Maven dependency)
+
+## Bugfixes
+
+- Fix CoreBluetooth peripheral name handling
+  - Thanks szymonlesisz!
+- Fix BlueZ device disconnection (#446)
+  - Thanks szymonlesisz!
+- Improve CoreBluetooth didModifyServices handling and comments
+  - Thanks kragacles!
+- Add NSError to CoreBluetooth trace logging
+  - Thanks tternes!
+
+## Breaking Changes
+
+- **`CentralEvent` enum**: New variants `DeviceServicesModified` and `RssiUpdate`. Exhaustive matches will need updating.
+- **`Error` enum**: New variant `NoAdapterAvailable`. Exhaustive matches will need updating.
+
+- Update dependencies
+
+# 0.11.8 (2025-04-20)
+
+## Features
+
+- Update dependencies
+  - Including to windows-rs 0.61, which required some small code changes
+
+# 0.11.7 (2024-12-21)
+
+## Features
+
+- Deserialize BDAddr from non-borrowed strings
+  - Thanks icewind1991, ekuinox!
+- Add support for Extended Advertising on Android
+  - Thanks Jakouf!
+
+## Bugfixes
+
+- Call GetDefaultAdapter() instead of GetAdapter() on Android
+- Use BluetoothCacheMode::Uncached for services fetching on windows
+  - This *may* cause issues with connection times, we'll see how it works out
+- Characteristics with duplicate UUIDs (but differing handles) no longer overwrite each other
+  - Thanks blackspherefollower!
+- CoreBluetooth now fulfills all open characteristic futures on disconnect
+  - Thanks szymonlesisz!
+
+# 0.11.6 (2024-10-06)
+
+## Features
+
+- Move from objc to objc2
+  - Now using an actually updated/maintained coreAPI library! Thanks madsmtm!
+- Implement CentralState for mac/linux/windows to tell when bluetooth is on/off
+  - Thanks szymonlesisz!
+  - Still needs Android impl.
+
+## Bugfixes
+
+- Make local_name on CoreBluetooth match that of Windows/Linux returns when possible.
+  - Thanks yuyoyuppe!
+- Fix descriptor reading on CoreBluetooth
+  - Thanks kovapatrik!
+- Fix one of the many, many NullPointerException issues in droidplug
+  - Thanks blackspherefollower!
+  - There are so many more though, esp when we don't have correct permissions on Android.
+
+# 0.11.5 (2024-01-10)
+
+## Bugfixes
+
+- Fix issue with Windows failing to read characteristic descriptors
+
+# 0.11.4 (2024-01-01)
+
+## Bugfixes
+
+- Fix issue with manufacturer data not being consistently found on windows
+- Fix UUID used for finding characteristics on windows
+- Peripheral connection failure now returns an error
+- Peripheral service discovery failure now returns an error
+
+# 0.11.3 (2023-11-18)
+
+## Bugfixes
+
+- CoreBluetooth: Fix missing include
+
+# 0.11.2 (2023-11-18)
+
+## Bugfixes
+
+- Android: Fix advertisements with invalid UTF-8 strings not appearing
+- All Platforms: Fix clippy warnings
+
+# 0.11.1 (2023-09-08)
+
+## Bugfixes
+
+- Windows/UWP: Internally held BTLE services now automatically disconnect when device disconnect is
+  called.
+
+# 0.11.0 (2023-07-04)
+
+## Features
+
+- Add scan filtering for android and windows
+- Implement serde Serialize/Deserliaze for PeripheralProperties, ScannFilter (#310, #314)
+- Add device class to properties (#319)
+- Add descriptor discovery and read/write across all platforms (#316)
+
+## Bugfixes
+
+- Update RSSI w/ advertisements on CoreBluetooth (#306)
+- Fix issues with various unhandled exceptions on Android (#311)
+
+# 0.10.5 (2023-04-13)
+
+## Features
+
+- Add RSSI readings for Android
+
+## Bugfixes
+
+- Link conditionally against macOS AppKit based on platform
+- Improve error propagation on Windows
+- Reset connected state to false on disconnect on windows
+- Set DuplicateData = true for bluez
+
+# 0.10.4 (2022-11-27)
+
+## Bugfixes
+
+- Change common CoreBluetooth log message from error to info level
+
+# 0.10.3 (2022-11-05)
+
+## Bugfixes
+
+- Add PeripheralId Display implementation for Android PeripheralId
+
+# 0.10.2 (2022-10-30)
+
+## Features
+
+- Implement Display on PeripheralId
+
+## Bugfixes
+
+- Fix issues with panics on device disconnect on macOS
+
+# 0.10.1 (2022-09-23)
+
+## Features
+
+- Add ability to disconnect devices on macOS/iOS
+
+# 0.10.0 (2022-07-30)
+
+## Features
+
+- Add Android Support
+
+## Breaking Changes
+
+- Update to Uuid v1, which is incompatible with Uuid v0.x. This may cause issues in upgrades.
+
+# 0.9.2 (2022-03-05)
+
+## Features
+
+- UWP (Windows) devices now disconnect on drop or calls to disconnect
+- Improve characteristic finding resilience on UWP (Windows)
+
+## Bugfixes
+
+- Update to windows-rs 0.33
+  - Should fix issues with COM casting panics in older versions of windows
+- Fix panic when multiple discovery calls are made on corebluetooth (macOS)
+- Update Dashmap version to resolve RUSTSEC-2022-0002
+
+# 0.9.1 (2022-01-12)
+
+## Features
+
+- `BDAddr` and `PeripheralId` are now guaranteed to implement `Hash`, `Ord` and `PartialOrd` on all
+  platforms.
+
+## Bugfixes
+
+- Linux implementation will now synthesise `DeviceConnected` events at the start of the event stream
+  for all peripherals which were already connected at the point that the event stream was requested.
+- `Central` methods on Linux will now correctly only affect the correct Bluetooth adapter, rather
+  than all adapters on the system.
+- Filters are now supported for macOS, allowing the library to work on macOS >= 12.
+
+# 0.9.0 (2021-10-20)
+
+## Features
+
+- Added Received Signal Strength Indicator (RSSI) peripheral property.
+- Peripheral `notifications()` streams can now be queried before any
+  connection and remain valid independent of any re-connections.
+- Characteristics are now grouped by service, and infomation about services is available. The old
+  API to access characteristics without specifying a service UUIDs is retained for backwards
+  compatibility.
+- Better logging and other minor improvements in examples.
+- Added method to get adapter information. For now it only works on Linux.
+
+## Breaking changes
+
+- Removed `CentralEvent::DeviceLost`. It wasn't emitted anywhere.
+- Changed tx_power_level type from i8 to i16.
+- Removed `PeripheralProperties::discovery_count`.
+- New `PeripheralId` type is used as an opaque ID for peripherals, as the MAC address is not
+  available on all platforms.
+- Added optional `ScanFilter` parameter to `Central::start_scan` to filter by service UUIDs.
+
+## Bugfixes
+
+- `Peripheral::is_connected` now works on Mac OS, and works better on Windows.
+- Fixed bug on Windows where RSSI was reported as TX power.
+- Report address type on Windows.
+- Report all advertised service UUIDs on Windows, rather than only those in the most recent
+  advertisement.
+- Fixed bug with service caching on Windows.
+- Fixed bug with concurrent streams not working on Linux.
+
+# 0.8.1 (2021-08-14)
+
+## Bugfixes
+
+- Errors now Sync/Send (usable with Anyhow)
+- Characteristic properties now properly reported on windows
+
+# 0.8.0 (2021-07-27)
+
+## Features
+
+- Overhaul API, moving to async based system
+
+## Breaking Changes
+
+- Pretty much everything? The whole API got rewritten. All hail the new flesh.
+
+# 0.7.3 (2021-07-25)
+
+## Bugfixes
+
+- Fix issue with characteristic array not updating on Win10
+- #172: Fix setting local_name in macOS
+
+# 0.7.2 (2021-04-04)
+
+## Bugfixes
+
+- Windows UWP characteristic methods now return errors instead of unwrapping everything.
+
+# 0.7.1 (2021-03-01)
+
+## Bugfixes
+
+- Fixed commit/merge issues with 0.7.0 that ended up with incorrect dependencies being brought in.
+
+# 0.7.0 (2021-02-28) (Yanked)
+
+## Breaking API Changes
+
+- Move to using Uuid crate instead of having an internal type.
+- Remove discover_characteristics_in_range (unused or duplicated elsewhere)
+- write() commands are now passed a WriteType for specifying WriteWith/WithoutResponse
+- Variants added to CentralEvent enum, may break exhaustive checks
+
+## Features
+
+- Add capabilities for service and manufacturer advertisements
+- Lots of CoreBluetooth cleanup
+- Update to using windows library (instead of winrt)
+- Replace usage of async_std for channels in macOS with futures crate
+
+## Bugfixes
+
+- De-escalate log message levels, so there are less message spams at the info level.
+
+# 0.6.0 (2021-02-04)
+
+## Breaking API Changes
+
+- Removed many _async methods that were unimplemented
+- Stopped returning write values when not needed.
+
+## Features
+
+- Complete rewrite of Bluez core
+  - Now uses DBus API instead of raw socket access
+- Windows support moved to WinRT library
+- Move from failure to thiserror for error handling
+  - failure was deprecated a while ago
+
+## Bugfixes
+
+- Windows UWP no longer panics on scan when radio not connected.
+
+# 0.5.5 (2021-01-18)
+
+## Bugfixes
+
+- Fix dependency issue with async-std channels
+
+# 0.5.4 (2020-10-06)
+
+## Bugfixes
+
+- Fix issue where library panics whenever a characteristic is read instead of
+  notified on macOS.
+
+# 0.5.3 (2020-10-05)
+
+## Bugfixes
+
+- Fix issue where library panics whenever a characteristic is written without
+  response on macOS.
+
+# 0.5.2 (2020-10-04)
+
+## Features
+
+- UUID now takes simplified inputs for from_str()
+- Read/Write added for CoreBluetooth
+- Example improvements
+
+## Bugfixes
+
+- Windows UWP characteristics now actually reads on read(), instead of just
+  returning []
+
+## Bugfixes
+
+# 0.5.1 (2020-08-03)
+
+## Bugfixes
+
+* Fixed issue with peripheral updates in adapter manager wiping out peripherals
+  completely (#64)
+* Ran rustfmt (misformatted code is a bug ok?)
+
+# 0.5.0 (2020-07-26)
+
+## Features
+
+* Moved events from callbacks to channels (currently using std::channel, will
+  change to future::Stream once we go async).
+* Moved from using Arc<Mutex<HashMap<K,V>>> to Arc<DashMap<K,V>>. Slightly
+  cleaner, less locking boilerplate.
+
+## Bugfixes
+
+* Centralized peripheral management into the AdapterManager class, which should
+  clean up a bunch of bugs both filed and not.
+
+# 0.4.4 (2020-07-22)
+
+## Bugfixes
+
+* Fix peripheral connect panic caused by uuid length on macOS (#43)
+* Windows/macOS devices now emit events on device disconnect (#54)
+
+# 0.4.3 (2020-06-05)
+
+## Features
+
+* Allow notification handlers to be FnMut
+* Added new examples
+* Update dependencies
+
+## Bugfixes
+
+* Fix local_name on macOS 10.15
+
+# 0.4.2 (2020-04-18)
+
+## Features
+
+* Some types now capable of serde de/serialization, using "serde" feature
+* Added new examples
+
+## Bugfixes
+
+* Adapters functions now return vectors of some kind of adapter on all
+  platforms.
+* Bluez notification handlers now live with the peripheral.
+* Bluez defaults to active scan.
+* Remove all println statements in library (mostly in the windows library),
+  replace with log macros.
+
+# 0.4.1 (2020-03-16)
+
+## Features
+
+* Get BDAddr and UUID from String
+* More examples
+* Update dependencies
+
+# 0.4.0 (2020-01-20)
+
+## Features
+
+* Added CoreBluetooth Support, using async-std with most of the async
+  parts wrapped in block_on calls for now. Library now supports
+  Win10/MacOS/Linux/Maybe iOS.
+* Brought code up to Rust 2018 standard
+* Added Characteristic UUID to ValueNotification struct, since
+  only linux deals with Start/End/Value handles
+
+# 0.3.1 (2020-01-11)
+
+## Features
+
+* Initial fork from rumble
+* Brought in winrt patch, as well as other PRs on that project.
