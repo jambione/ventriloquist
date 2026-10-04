@@ -18,7 +18,7 @@ Status: **APPROVED by owner 2026-10-04**, from the owner interview. This is a de
 |---|---|
 | Transport | **Cloud relay** for Mac and Windows. **Bluetooth is removed** from both apps (it stays in git history) |
 | Offline use | Not required; the phone and PC are online |
-| Relay hosting | **Cloudflare Worker + Durable Objects** on `relay.jbrasfield.com` (the zone is already on Cloudflare; this is a separate Worker from trading-helper) |
+| Relay hosting | **Self-hosted on the owner's Mac mini**, as a standalone `vq-relay` server (Rust) exposed at `relay.jbrasfield.com` through a **Cloudflare Tunnel** (`cloudflared`; no port-forwarding; the zone is already on Cloudflare). It runs as a launchd service at boot. Revised 2026-10-04: it was a Cloudflare Worker |
 | Corporate proxy | Strict and TLS-inspecting. The desktop must use the **OS proxy settings, including PAC**, and the **OS certificate store**, with an **HTTPS long-poll fallback** when WebSockets are blocked |
 | Pairing | **QR code** shown on the desktop and scanned by the iPhone camera |
 | Relay access | **Only the owner's devices.** Rooms can only be created with an owner secret; joining needs a per-room secret delivered by QR |
@@ -28,9 +28,8 @@ Status: **APPROVED by owner 2026-10-04**, from the owner interview. This is a de
 ## 3. Architecture
 
 ```
-iPhone app ──wss/https──►  relay.jbrasfield.com (Worker)  ◄──wss/https── Desktop app
-            (outbound 443)   └─ Durable Object per room     (outbound 443, OS proxy + cert store)
-                                  forwards opaque frames; stores only room auth metadata
+iPhone app ──wss/https──► relay.jbrasfield.com (Cloudflare edge) ──Tunnel──► Mac mini: vq-relay (127.0.0.1:8787) ◄── Desktop app (same path)
+            (outbound 443)                                                        forwards opaque frames; stores only room auth metadata
 ```
 
 - **Room.** Each desktop install owns exactly one room:
@@ -56,7 +55,7 @@ iPhone app ──wss/https──►  relay.jbrasfield.com (Worker)  ◄──wss
 | `DELETE /rooms/{room_id}` | desktop | Delete a room (room secret, plus the owner token) |
 | `GET /health` | anyone | `200 ok` |
 
-The owner token is set with `wrangler secret put OWNER_TOKEN`, and the owner pastes it once into the desktop app (Settings → Relay). **The phone never sees the owner token.**
+The owner token is set in the relay's config (owner-token file on the Mac mini), and the owner pastes it once into the desktop app (Settings → Relay). **The phone never sees the owner token.**
 
 ### 4.2 Messages on the channel (WebSocket binary/text, or long-poll JSON)
 - Client → relay: `{ "type": "frame", "to": "<conn_id>", "data": "<b64>" }`. A desktop must give `to`; a phone's `to` is ignored, because phones always send to the desktop.
@@ -117,16 +116,26 @@ The owner token is set with `wrangler secret put OWNER_TOKEN`, and the owner pas
 - **Remove:** the CoreBluetooth transports, the Bluetooth permission and usage string, and BLE-only UI (nearby list, radio banners).
 - PhoneSim gains a relay client (it replaces TCP for E2E), so `tests/e2e` runs against a local relay (`wrangler dev`).
 
-## 8. Relay implementation (`/relay`)
-- TypeScript Cloudflare Worker plus one Durable Object class (`Room`). Uses `wrangler`, with tests in **vitest + `@cloudflare/vitest-pool-workers`** (miniflare).
-- `wrangler.toml`:
-  - Worker name `ventriloquist-relay`;
-  - route / custom domain `relay.jbrasfield.com`;
-  - Durable Object binding `ROOMS`, with a migration;
-  - no KV or D1 needed. Room auth metadata lives in the DO's storage.
-- Uses WebSocket Hibernation API (`acceptWebSocket`) so idle rooms cost nothing.
-- Deploy: `cd relay && npm ci && npx wrangler login` (the owner, once) → `npx wrangler secret put OWNER_TOKEN` → `npm run deploy`. Document it in relay/README.md.
-- No payload logging. Error logs carry room_id prefixes only.
+## 8. Relay implementation (`/relay`, revised: self-hosted)
+- A Rust binary crate **`vq-relay`** in the workspace (axum + tokio, WebSockets via axum's ws support). It listens on **127.0.0.1:8787** by default; only `cloudflared` reaches it.
+- Room auth metadata (`room_id → secret_hash, created_at`) is persisted in a small JSON file, written atomically to the relay's data dir (`~/Library/Application Support/vq-relay/` on macOS, overridable with `--data-dir`). Nothing else is persisted.
+- Config:
+  - env/flags `VQ_RELAY_OWNER_TOKEN`, or `--owner-token-file` (a 0600 file);
+  - `--listen`, `--data-dir`.
+- Cloudflare's tunnel sets `CF-Connecting-IP`; use it for per-IP limits when present.
+- **Deployment on the Mac mini** (`relay/deploy/`, documented in `relay/README.md`):
+  1. `cargo build --release -p vq-relay`; install the binary to `/usr/local/bin/vq-relay`, or use it in place.
+  2. A launchd plist `com.jbrasfield.vq-relay.plist` (RunAtLoad, KeepAlive, logs to `~/Library/Logs/vq-relay.log`), with `scripts/install-relay-macos.sh` to install and load it.
+  3. Cloudflare Tunnel:
+     - `brew install cloudflared`;
+     - `cloudflared tunnel login` (the owner);
+     - `cloudflared tunnel create ventriloquist`;
+     - `cloudflared tunnel route dns ventriloquist relay.jbrasfield.com`;
+     - config.yml with ingress `relay.jbrasfield.com → http://127.0.0.1:8787` (WebSockets are supported by default);
+     - `sudo cloudflared service install`.
+  4. Keep the mini awake: `sudo pmset -a sleep 0 disksleep 0`, or the Energy settings ("Prevent automatic sleeping when the display is off").
+  5. Check from anywhere with `curl https://relay.jbrasfield.com/v1/health`.
+- Tests: Rust integration tests that start the server on an ephemeral port, covering SPEC_V3 §10 gate 1. `tests/e2e` runs `vq-relay` locally (R4).
 
 ## 9. Security
 - The room secret authorizes joining. The owner token authorizes creating rooms. **Frames are E2E-encrypted by the existing session keys**, so the relay can't read or forge utterances.
@@ -139,9 +148,9 @@ The owner token is set with `wrangler secret put OWNER_TOKEN`, and the owner pas
 - Anyone who photographs the QR during its 120 s window can pair. The desktop shows "Phone '<name>' paired", and the phone list makes extra phones visible.
 
 ## 10. Verification (gates)
-1. `cd relay && npm test`: auth (owner token, room secret, hash mismatch), routing (desktop↔phone, `to`), presence events, limits, replacement of the second desktop, long-poll send/poll with cursors and the 25 s hold, WebSocket↔long-poll interop in the same room, idle close.
+1. `cargo test -p vq-relay`: auth (owner token, room secret, hash mismatch), routing (desktop↔phone, `to`), presence events, limits, replacement of the second desktop, long-poll send/poll with cursors and the 25 s hold, WebSocket↔long-poll interop in the same room, idle close.
 2. vq-host-core RelayTransport unit tests against a mock relay. Proxy resolution logic is pure and tested (PAC evaluation is delegated to the OS API; just test the decision layer).
-3. **E2E:** `tests/e2e/run.sh` starts `wrangler dev` (local), the desktop core (`vq-host` with relay transport) and PhoneSim (relay client), and runs all existing scenarios plus QR-style pairing and long-poll-only mode.
+3. **E2E:** `tests/e2e/run.sh` starts `vq-relay` (local), the desktop core (`vq-host` with relay transport) and PhoneSim (relay client), and runs all existing scenarios plus QR-style pairing and long-poll-only mode.
 4. Existing gates stay green: protocol, inject, frontend, desktop build, iOS tests and build.
 5. The manual checklist gets a Relay section:
    - Windows on the corporate network, WebSocket and fallback;
@@ -154,12 +163,12 @@ The owner token is set with `wrangler secret put OWNER_TOKEN`, and the owner pas
 
 | # | Milestone | Done when |
 |---|---|---|
-| R1 | `/relay` Worker + DO + tests + deploy docs | gate 1 |
+| R1 | `vq-relay` server + tests + Mac mini deploy (launchd + Cloudflare Tunnel) docs/scripts | gate 1 |
 | R2 | Desktop RelayTransport (WS + long-poll, OS proxy/PAC, OS certs), Relay & Phones settings, QR display, BLE removal | gates 2, 4 |
 | R3 | iPhone relay transport + QR scanner + BLE removal; PhoneSim relay client | iOS gates |
 | R4 | E2E via local relay | gate 3 |
 | R5 | Reviewer + adversary (relay auth, pairing/QR, proxy handling), fixer | all gates |
-| R6 | Owner deploys relay (`wrangler login`, secret, deploy), installs, runs the checklist | owner |
+| R6 | Owner sets up the Mac mini (relay service + cloudflared tunnel), installs the apps, runs the checklist | owner |
 
 ## 12. Open questions
-- None blocking. The owner token is generated with `openssl rand -base64 32`, or by the desktop app ("Generate"), which shows it once for `wrangler secret put`.
+- None blocking. The owner token is generated with `openssl rand -base64 32`, or by the desktop app ("Generate"), which shows it once to put in the relay's owner-token file.
