@@ -1,6 +1,6 @@
 # Ventriloquist — Specification v3: Cloud relay transport
 
-Status: **DRAFT 2026-10-04**, from the owner interview. This is a delta on [SPEC.md](SPEC.md) (v1) and [SPEC_V2.md](SPEC_V2.md) (bindings).
+Status: **APPROVED by owner 2026-10-04**, from the owner interview. This is a delta on [SPEC.md](SPEC.md) (v1) and [SPEC_V2.md](SPEC_V2.md) (bindings).
 
 **Summary.** Bluetooth is replaced, on every platform, by a small **cloud relay** at `relay.jbrasfield.com`, running as a Cloudflare Worker with Durable Objects.
 - The phone and the desktop each make an **outbound HTTPS/WebSocket** connection to the relay, which forwards **end-to-end encrypted** frames between them.
