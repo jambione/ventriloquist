@@ -1,0 +1,56 @@
+# XcodeGen spec for the Ventriloquist iOS app (SPEC §5, §8).
+# Generate with `xcodegen` in this directory; the .xcodeproj is gitignored.
+name: Ventriloquist
+options:
+  bundleIdPrefix: com.ventriloquist
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: D5K4MV7298
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  VQProtocol:
+    path: ../VQProtocol
+targets:
+  Ventriloquist:
+    type: application
+    platform: iOS
+    sources:
+      - path: Ventriloquist
+    dependencies:
+      - package: VQProtocol
+        product: VQProtocol
+      - package: VQProtocol
+        product: VQPhoneCore
+      - sdk: CoreBluetooth.framework
+      - sdk: Speech.framework
+      - sdk: AVFAudio.framework
+    info:
+      path: Ventriloquist/Info.plist
+      properties:
+        CFBundleDisplayName: Ventriloquist
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSMicrophoneUsageDescription: Ventriloquist listens to your voice while you hold a recording so it can transcribe it on this iPhone. Audio never leaves the device.
+        NSSpeechRecognitionUsageDescription: Ventriloquist turns your speech into text on this iPhone and sends only the text to your paired computer.
+        NSBluetoothAlwaysUsageDescription: Ventriloquist uses Bluetooth to send your dictated text to your paired computer.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.ventriloquist.app
+        PRODUCT_NAME: Ventriloquist
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_KEY_CFBundleDisplayName: Ventriloquist
+    scheme:
+      testTargets: []

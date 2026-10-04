@@ -1,0 +1,107 @@
+import Foundation
+import VQProtocol
+
+// Persistence seams. The app supplies Keychain / file / UserDefaults
+// implementations; tests and simulators use the in-memory ones below.
+
+/// This install's long-term identity (README §6.1).
+public struct StoredIdentity: Sendable {
+    /// Random install id (UUID v4), sent as `hello.device_id`.
+    public let deviceId: UUID
+    /// Long-term X25519 key pair.
+    public let keyPair: IdentityKeyPair
+
+    public init(deviceId: UUID, keyPair: IdentityKeyPair) {
+        self.deviceId = deviceId
+        self.keyPair = keyPair
+    }
+}
+
+/// Where the identity lives (the app: Keychain, `ThisDeviceOnly`).
+public protocol IdentityKeyStore: AnyObject {
+    /// The stored identity, `nil` if none was ever saved. Throws if one exists
+    /// but cannot be read; callers must then **not** silently create a new one,
+    /// because that would break every pairing.
+    func loadIdentity() throws -> StoredIdentity?
+    func saveIdentity(_ identity: StoredIdentity) throws
+}
+
+public enum PhoneIdentity {
+    /// Load the identity, or create and save a new one on first run.
+    public static func loadOrCreate(from store: IdentityKeyStore) throws -> StoredIdentity {
+        if let existing = try store.loadIdentity() { return existing }
+        let fresh = StoredIdentity(deviceId: newDeviceId(), keyPair: .generate())
+        try store.saveIdentity(fresh)
+        return fresh
+    }
+}
+
+/// A desktop this phone has paired with (README §7.1: known iff `device_id`
+/// **and** `pub` match).
+public struct PairedHost: Codable, Hashable, Sendable, Identifiable {
+    public var deviceId: UUID
+    /// Display name from the desktop's `hello` at pairing time.
+    public var name: String
+    /// The desktop's 32-byte X25519 public key.
+    public var publicKey: Data
+    public var pairedAt: Date
+
+    public var id: UUID { deviceId }
+
+    public init(deviceId: UUID, name: String, publicKey: Bytes32, pairedAt: Date) {
+        self.deviceId = deviceId
+        self.name = name
+        self.publicKey = Data(publicKey.bytes)
+        self.pairedAt = pairedAt
+    }
+
+    /// The public key as `Bytes32`; `nil` if the stored value is corrupt.
+    public var publicBytes: Bytes32? { Bytes32(publicKey) }
+}
+
+/// Persisted list of paired desktops.
+public protocol PairedHostStore: AnyObject {
+    func loadHosts() throws -> [PairedHost]
+    func saveHosts(_ hosts: [PairedHost]) throws
+}
+
+/// Small persisted engine settings.
+public protocol PhoneSettingsStore: AnyObject {
+    /// The desktop last made active (SPEC §5.1: selected again when it connects).
+    var lastHostId: UUID? { get set }
+}
+
+// MARK: - In-memory implementations
+
+public final class InMemoryIdentityStore: IdentityKeyStore {
+    public var identity: StoredIdentity?
+    public var failLoad = false
+    public init(identity: StoredIdentity? = nil) { self.identity = identity }
+    public func loadIdentity() throws -> StoredIdentity? {
+        if failLoad { throw StoreError.unreadable }
+        return identity
+    }
+    public func saveIdentity(_ identity: StoredIdentity) throws { self.identity = identity }
+}
+
+public final class InMemoryPairedHostStore: PairedHostStore {
+    public var hosts: [PairedHost]
+    /// Make `saveHosts` throw (tests).
+    public var failSaves = false
+    public init(hosts: [PairedHost] = []) { self.hosts = hosts }
+    public func loadHosts() throws -> [PairedHost] { hosts }
+    public func saveHosts(_ hosts: [PairedHost]) throws {
+        if failSaves { throw StoreError.unwritable }
+        self.hosts = hosts
+    }
+}
+
+public final class InMemorySettingsStore: PhoneSettingsStore {
+    public var lastHostId: UUID?
+    public init(lastHostId: UUID? = nil) { self.lastHostId = lastHostId }
+}
+
+public enum StoreError: Error, Sendable {
+    case unreadable
+    case unwritable
+}

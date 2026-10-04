@@ -272,3 +272,38 @@ Without limits a phone could request a new code as often as it liked (each reque
 
 ### D14. `dev-tcp` never in release builds (K5)
 **Decision.** `vq-host-core` has `compile_error!` under `all(feature = "dev-tcp", not(debug_assertions))`. The TCP dev transport is unauthenticated, so it can never be unified into a release build of the app. Tests, the E2E harness and `vq-host` run in debug builds (`cargo test`, `cargo run`). `--all-features` works in debug builds (clippy, tests) and fails in release builds by design.
+
+## M6 (iOS app)
+
+Numbered P1… so they cannot collide with entries written by other milestones at the same time.
+
+### P1. Custom vocabulary API: `DictationTranscriber`, not `SpeechTranscriber` (settles SPEC §5.2 / §11)
+Checked against the installed SDK (Xcode 27, `iPhoneOS27.0.sdk`, `Speech.framework/Modules/Speech.swiftmodule/arm64e-apple-ios.swiftinterface` and `.swiftdoc`). `AnalysisContext.contextualStrings: [ContextualStringsTag: [String]]` exists and is set on the analyzer (`SpeechAnalyzer.setContext(_:)`), not on a module, so the type system does not say which module honours it. The SDK's documentation comment on `contextualStrings` does: "With the `DictationTranscriber` module, you can use this property to specify short custom phrases… Limit the total number of phrases across all tags to no more than 100." Nothing equivalent is documented for `SpeechTranscriber`. **Decision.** Per the SPEC fallback, the app uses `DictationTranscriber(locale: en-US, contentHints: [], transcriptionOptions: [.punctuation], reportingOptions: [.volatileResults], attributeOptions: [])` (the `progressiveLongDictation` preset's settings) with the vocabulary in `contextualStrings[.general]`, capped at 100 terms in Settings. `SpeechAnalyzer`, `AssetInventory` (status, `reserve`, `assetInstallationRequest` + `downloadAndInstall` with `progress`) and `bestAvailableAudioFormat` are used as specified. `AnalyzerInputConverter` is iOS 27 only, so audio is converted with `AVAudioConverter` (deployment target 26.0).
+
+### P2. Speech-recognition permission
+The SDK documentation for `SpeechAnalyzer`/`DictationTranscriber` does not say whether `SFSpeechRecognizer` authorization is required. `DictationTranscriber` is the dictation engine historically gated by that authorization, so the app requests it (with `NSSpeechRecognitionUsageDescription`) together with the microphone on the first recording, and shows the Open Settings screen if either is denied. If on-device testing shows it is unnecessary, the request can be removed.
+
+### P3. Phone-side pairing behaviour not fixed by the README
+- **Wrong code** (`pair_result{ok:false}`): the sheet says "Wrong code" and lets the user retry with the same nonces. After the 3rd `ok:false` on one challenge (the desktop has then invalidated the code) the phone sends a new `pair_request` itself and asks for the new code. A "Get a new code" button does the same at any time.
+- **Expired code**: if the user submits 120 s or more after the `pair_challenge` arrived, the phone sends a new `pair_request` instead of a `pair_confirm` that would certainly fail.
+- **`rate_limited` / `busy`** (README §7.3): non-fatal. The pairing sheet shows "…Try again later" with a Try again button, the connection is kept and goes back to the unpaired state. If the desktop does close the link, the transport reports it as usual.
+- **Other `error`s** (any provenance): shown, and the phone closes the connection. None of them changes the paired-host store; `unknown_peer` only marks the host "not recognised" in memory.
+- A desktop `hello` with `v ≠ 1` shows "Update Ventriloquist on <desktop name>" (README §5.2 wording); a received `error{version}` shows "Update Ventriloquist on this iPhone" (mirrors D6).
+- A second connection from the same `device_id` (after `hello`) replaces the older one.
+- If the paired-host store cannot be written after a successful pairing, the session is used and a notice says the pairing will not be kept.
+
+### P4. Utterance pipeline details
+- `rev` counts every revision actually sent for an `id`, starting at 0 (partials, then the final, then each edit). Retries resend the same `rev`.
+- Partials are sent at most every 200 ms (latest text wins; an identical text is not resent). Partials that could not be sent because no host was Secure are not queued, except that the latest one goes out once the host is Secure and the utterance is still open.
+- Only the newest `final`/`edit` per `id` is kept for delivery; an `ack` with `rev` ≥ the pending one completes it.
+- Retries: every 2 s, up to 5 per connection; then the status is **failed**. A failed or pending delivery is sent again, with a fresh retry budget, whenever the active host (re)becomes Secure or a different paired host is made active. Pending deliveries follow the active host.
+- Pending deliveries are kept in memory only. History entries still "pending" at the next launch are shown as failed so the user can Re-send them.
+- An utterance that stops with empty text and never sent a partial is dropped. Deleting a history entry stops its retries.
+- `ts` of an `edit` is the original utterance's `ts`. Re-send uses the current time.
+
+### P5. Background and BLE peripheral lifecycle
+A peripheral cannot disconnect a central. "Disconnect" on the phone marks the link closed: its queued frames are discarded and its writes ignored until it subscribes again. On backgrounding, the app stops the recording (the `final` is queued), drops every engine connection, stops advertising and removes the GATT service so desktops see the service disappear. On returning to the foreground it re-adds the service and advertises again. A write from a central that has not subscribed yet is treated as its connect. Each link queues at most 12,000 frames for `peripheralManagerIsReady`; beyond that the link is closed.
+
+### P6. Persistence
+- Identity: one Keychain generic-password item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, not synchronizable); `kSecValueData` is the 32-byte private key written through `IdentityKeyPair.withSecretBytes`; `kSecAttrGeneric` is the 16-byte `device_id`. If the item exists but cannot be read, the app runs with a temporary identity and shows a warning. It never overwrites the stored item.
+- Paired hosts: `Application Support/paired-hosts.json` (atomic, protected until first unlock). Settings and the last host: `UserDefaults`. History: SwiftData, 1,000 entries, oldest pruned first.
