@@ -2,7 +2,7 @@
 
 Status: **APPROVED by owner 2026-10-04**, from the owner interview. This is a delta on [SPEC.md](SPEC.md) (v1) and [SPEC_V2.md](SPEC_V2.md) (bindings).
 
-**Summary.** Bluetooth is replaced, on every platform, by a small **cloud relay** at `relay.jbrasfield.com`, running as a Cloudflare Worker with Durable Objects.
+**Summary.** Bluetooth is replaced, on every platform, by a small **cloud relay** at `relay.jbrasfield.com`, running as a self-hosted `vq-relay` server on the owner's Mac mini, exposed through a Cloudflare Tunnel.
 - The phone and the desktop each make an **outbound HTTPS/WebSocket** connection to the relay, which forwards **end-to-end encrypted** frames between them.
 - Pairing is done by **scanning a QR code** shown on the desktop.
 - Everything above the transport is unchanged: the vq-protocol envelope, the session, delivery, the desktop UI and bindings.
@@ -114,7 +114,7 @@ The owner token is set in the relay's config (owner-token file on the Mac mini),
 - The phone connects to **every paired desktop's room** while in the foreground. The host list is the paired desktops: online if `desktop_present`, otherwise offline.
 - **QR scanner** in the Host picker: "Add desktop" → camera → parse → pair.
 - **Remove:** the CoreBluetooth transports, the Bluetooth permission and usage string, and BLE-only UI (nearby list, radio banners).
-- PhoneSim gains a relay client (it replaces TCP for E2E), so `tests/e2e` runs against a local relay (`wrangler dev`).
+- PhoneSim gains a relay client (it replaces TCP for E2E), so `tests/e2e` runs against a local `vq-relay`.
 
 ## 8. Relay implementation (`/relay`, revised: self-hosted)
 - A Rust binary crate **`vq-relay`** in the workspace (axum + tokio, WebSockets via axum's ws support). It listens on **127.0.0.1:8787** by default; only `cloudflared` reaches it.
