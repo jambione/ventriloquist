@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Ventriloquist</title>
+  </head>
+  <body>
+    <header class="toolbar">
+      <div class="status" id="status" role="status" aria-live="polite">
+        <span class="dot" id="status-dot" aria-hidden="true">●</span>
+        <span class="status-text" id="status-text">Starting…</span>
+      </div>
+      <div class="tools">
+        <input
+          type="search"
+          id="search"
+          placeholder="Search"
+          aria-label="Search transcripts"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button type="button" id="clear-view" title="Clear the on-screen list (the log is not touched)">
+          Clear view
+        </button>
+        <button type="button" id="open-settings" class="icon" title="Settings" aria-label="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div id="banners" class="banners"></div>
+
+    <main id="list" class="list" aria-label="Transcripts">
+      <div id="rows"></div>
+      <p id="empty" class="empty">Dictate on your iPhone — the text appears here.</p>
+    </main>
+
+    <div id="settings" class="sheet-backdrop" hidden>
+      <aside class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <header class="sheet-header">
+          <h2 id="settings-title">Settings</h2>
+          <button type="button" id="close-settings" class="icon" aria-label="Close settings">✕</button>
+        </header>
+
+        <section>
+          <h3>Log folder</h3>
+          <p class="path" id="log-dir"></p>
+          <p class="warn-text" id="config-not-saved" hidden>
+            This change could not be saved and will be lost when the app restarts.
+          </p>
+          <div class="row-buttons">
+            <button type="button" id="pick-log-dir">Choose…</button>
+            <button type="button" id="open-log-folder">Open log folder</button>
+          </div>
+        </section>
+
+        <section>
+          <h3>Paired phones</h3>
+          <ul id="paired" class="paired"></ul>
+          <p id="paired-empty" class="muted">No paired phones. Start pairing from the iPhone app.</p>
+        </section>
+
+        <section>
+          <h3><label for="name-input">This desktop's name</label></h3>
+          <form id="name-form" class="name-form">
+            <input id="name-input" type="text" maxlength="64" autocomplete="off" spellcheck="false" />
+            <button type="submit">Save</button>
+          </form>
+          <p class="muted">Shown on the phone. Leave empty to use the computer's name.</p>
+        </section>
+      </aside>
+    </div>
+
+    <div id="pairing" class="modal-backdrop" hidden>
+      <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="pairing-title">
+        <h2 id="pairing-title">Pairing request from <span id="pairing-phone" class="isolate"></span></h2>
+        <p>Enter this code on your phone:</p>
+        <p class="code" id="pairing-code"></p>
+        <p class="countdown">Expires in <span id="pairing-countdown"></span></p>
+        <p class="warn-text" id="pairing-failed" hidden></p>
+        <button type="button" id="pairing-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

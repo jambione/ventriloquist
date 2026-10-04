@@ -39,7 +39,41 @@ gate2_desktop_core() {
   fi
 }
 
-GATES=(gate1_protocol gate2_desktop_core)
+# Gate 4 (desktop half): the Tauri app. Clippy over the whole workspace
+# (default features: the app must never get dev-tcp), then the bundle.
+gate4_desktop() {
+  step "gate 4: cargo clippy --workspace (default features)"
+  cargo clippy --workspace --all-targets -- -D warnings
+  step "gate 4: app must not depend on vq-host-core/dev-tcp"
+  local tree
+  tree="$(cargo tree -p ventriloquist-desktop -e features -i vq-host-core)"
+  if grep -q 'dev-tcp' <<<"$tree"; then
+    echo "error: the app enables vq-host-core/dev-tcp" >&2
+    return 1
+  fi
+  step "gate 4: frontend dependencies (npm ci)"
+  (cd desktop/app && npm ci --no-audit --no-fund)
+  if [ "$(uname)" = "Darwin" ]; then
+    step "gate 4: cargo tauri build (desktop/app)"
+    (cd desktop/app && cargo tauri build)
+  else
+    echo "skipping cargo tauri build (macOS only for agents; Windows is built by the owner)"
+  fi
+}
+
+# Gate 5: frontend type check (strict), unit tests and production build.
+gate5_frontend() {
+  step "gate 5: npm ci (desktop/app)"
+  (cd desktop/app && npm ci --no-audit --no-fund)
+  step "gate 5: tsc --noEmit (strict)"
+  (cd desktop/app && npx tsc --noEmit)
+  step "gate 5: npm test (vitest)"
+  (cd desktop/app && npm test)
+  step "gate 5: npm run build"
+  (cd desktop/app && npm run build)
+}
+
+GATES=(gate1_protocol gate2_desktop_core gate4_desktop gate5_frontend)
 
 # Run all gates, or only those named on the command line.
 if [ "$#" -gt 0 ]; then

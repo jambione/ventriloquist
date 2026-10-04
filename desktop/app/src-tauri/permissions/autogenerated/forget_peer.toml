@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-forget-peer"
+description = "Enables the forget_peer command without any pre-configured scope."
+commands.allow = ["forget_peer"]
+
+[[permission]]
+identifier = "deny-forget-peer"
+description = "Denies the forget_peer command without any pre-configured scope."
+commands.deny = ["forget_peer"]

@@ -1,0 +1,18 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "The main window: host events and the app's own commands only. Clipboard, dialog and opener are used from Rust, so the webview gets no plugin permissions.",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-snapshot",
+    "allow-forget-peer",
+    "allow-set-log-dir",
+    "allow-set-name",
+    "allow-cancel-pairing",
+    "allow-open-log-folder",
+    "allow-pick-log-dir",
+    "allow-copy-text"
+  ]
+}

@@ -307,3 +307,54 @@ A peripheral cannot disconnect a central. "Disconnect" on the phone marks the li
 ### P6. Persistence
 - Identity: one Keychain generic-password item (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, not synchronizable); `kSecValueData` is the 32-byte private key written through `IdentityKeyPair.withSecretBytes`; `kSecAttrGeneric` is the 16-byte `device_id`. If the item exists but cannot be read, the app runs with a temporary identity and shows a warning. It never overwrites the stored item.
 - Paired hosts: `Application Support/paired-hosts.json` (atomic, protected until first unlock). Settings and the last host: `UserDefaults`. History: SwiftData, 1,000 entries, oldest pruned first.
+
+## M5 (desktop app)
+
+Numbered W1… so they cannot collide with entries written by other milestones at the same time.
+
+### W1. One event channel, snapshot reply as an event
+All `HostEvent`s go to the main window as one Tauri event, `host-event`, whose payload is the event's JSON exactly as `vq-host` prints it (tagged by `"event"`). The `snapshot` command only queues `HostCommand::Snapshot`; the reply arrives on the same channel as a `snapshot` event, so it is ordered with every other event. It fails (and the UI shows a fatal banner) only when the host could not start, for example because `identity.json` is corrupt; the window still opens.
+
+### W2. Loading and reloading the page
+The page subscribes first and then asks for a snapshot, retrying every 3 s until one arrives. Events received before the snapshot are buffered. The snapshot replaces all state, then the buffer is merged: entry upserts and evictions are replayed under the highest-`rev` rule, warnings and notices are replayed, and other state events are dropped because the snapshot supersedes them. Two cases need the merge because the host's outbox coalesces in place (D11), so a newer event can be delivered ahead of an older snapshot:
+- A newer partial is kept because of its higher `rev`.
+- If a `pairing_code_shown` for the peer that still has a code in the snapshot was delivered before the snapshot, and no `pairing_code_ended` came after it, its code wins.
+
+The UI accepts an entry revision when its `rev` is higher, or when the `rev` is equal and a `partial` becomes `interrupted` (D8).
+
+### W3. Clear view
+Clear view records each visible entry's id and current `rev`. An entry stays hidden until a higher revision arrives, which shows it again. That covers an edit to a cleared entry and a partial that was still live when the view was cleared. New ids always show. The record lives only in memory, so a page reload brings everything back from the snapshot. The log and the core are never touched. Search is a case-insensitive substring match on the entry text only, not the device name, and it applies to the entries that Clear view has not hidden.
+
+### W4. Pairing modal
+The modal opens on `pairing_code_shown`. A newer code replaces any open one, so only one modal shows at a time. The countdown runs from the local receipt time plus `expires_in_secs`, or the snapshot's remaining seconds. The modal closes on `pairing_code_ended`, on `pairing_result{ok:true}`, on `pairing_result{ok:false, attempts_remaining:0}`, when its connection closes, at local expiry, and on Cancel or Esc. Cancel closes the modal immediately and sends `cancel_pairing`. A wrong code (`ok:false` with attempts left) keeps the modal open, because the code is still valid, and shows "Wrong code entered on the phone — N attempts left". This reading of "closes on result" is the only one that lets the user retry.
+
+### W5. Toolbar status text
+The status line is chosen in this priority order:
+1. Adapter problem: "Bluetooth off", "Bluetooth not authorized — enable in System Settings" (Windows: "…enable it in Settings › Privacy & security"), or "No Bluetooth adapter".
+2. "Connected to <names> (secure)".
+3. "Pairing with <name>…".
+4. "Connecting to <name>…", for a peer that is connecting, or one that is paired and has exchanged hellos.
+5. "<name> found — pair from the phone", for an unpaired phone that has exchanged hellos.
+6. "Scanning…".
+7. "Starting Bluetooth…", while the adapter state is `unknown`.
+
+### W6. Warnings and notices
+- **Log warning.** `log_warning` sets a persistent, non-blocking banner with the latest message, and `log_recovered` clears it.
+- **Dismissible notices.** `storage_warning`, `peer_error` and `version_mismatch` ("Update Ventriloquist on <device>") become dismissible notices. At most 5 are kept, and peer messages are truncated to 200 characters.
+- **Persisted flag.** `config_changed{persisted:false}` shows a "could not be saved" line under the log folder in Settings.
+- **Ignored.** `message_rejected` is not shown.
+
+### W7. Commands and permissions
+- **App commands.** The app's commands are declared in an app manifest (`build.rs`), so each one needs an explicit `allow-<command>` permission.
+- **Webview capability.** The only capability, `main`, grants exactly those 8 commands plus `core:event:allow-listen` and `core:event:allow-unlisten`.
+- **Plugins.** The clipboard, dialog and opener plugins are called from Rust, so the webview gets none of their permissions:
+  - `copy_text` writes the given string unchanged.
+  - `pick_log_dir` only returns the chosen folder, and the UI then calls `set_log_dir`.
+  - `open_log_folder` opens the host's current log directory, which Rust tracks from `started`, `snapshot` and `config_changed`. It takes no path argument.
+- **Argument limits.** String arguments are capped at 4 KiB, and `forget_peer` checks that the device id is a UUID.
+- **CSP.** The CSP allows only `'self'` and the IPC origins.
+
+### W8. Shutdown and BLE permission on macOS
+- **Shutdown.** On `RunEvent::Exit`, after the last window closes or on Quit, the app sends `Shutdown` and waits up to 8 s for the host task. The host itself waits at most 3 + 2 + 1 s. A SIGTERM or SIGKILL skips this.
+- **Info.plist.** `NSBluetoothAlwaysUsageDescription` comes from `src-tauri/Info.plist`, which the bundler merges into the app's plist.
+- **Launching the binary.** macOS kills a process that uses Bluetooth when the *responsible* process has no usage description. Running `Contents/MacOS/Ventriloquist` directly from a terminal therefore crashes with a TCC violation, because the terminal is the responsible process. Launch the bundle with `open Ventriloquist.app`, or from Finder.
