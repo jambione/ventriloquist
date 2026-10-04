@@ -419,3 +419,28 @@ SPEC §3.3 lists `/ios/PhoneSim/`. SwiftPM does not allow a target path outside 
 
 ### E4. Interop findings
 None. PhoneSim (the real `PhoneEngine`) and `vq-host` agreed on every scenario on the first attempt. `pairing_result.attempts_remaining` is `0` on success. That is harmless but slightly odd. It is informational and was not changed.
+
+## v2 N1 (vq-inject)
+
+- **`app_id` instead of `bundle_id`** (owner scope change: Windows is primary). `BindingTarget.app_id` and `WindowInfo.app_id` hold the bundle id on macOS and the executable name on Windows. `bindings.json` still reads the old `bundle_id` key (serde alias). App ids compare case-insensitively (planner list and re-match).
+- **Windows executables** are in the keystroke-preferred list. **`TargetCaps.elevated`** gives `Blocked("target is elevated")` (UIPI) through `secure_refusal`. The `Injector` trait exposes no macOS types.
+- **Planner decisions.**
+  - 200 counts Unicode scalar values of the sanitised text, with line breaks counting as 1.
+  - Empty text after sanitising gives a no-op plan, even with auto-submit.
+  - A blocked caps gives an empty plan with `blocked` set.
+  - A lone `\r` is a control character and is dropped. CRLF is one break.
+- **Step order.** Keystroke path is Activate, WaitFrontmost, FocusElement (spec lists focus before wait). Focusing an element of a frontmost app is more reliable.
+- **AX path + auto-submit.** A Return keystroke needs the target focused, so the AX plan then also runs Activate, WaitFrontmost, FocusElement, Return, ReactivatePrevious after the insertion.
+- **AX fallback.** `Plan.fallback` carries the keystroke plan. Read-back confirms only if `AXValue` was readable before and after and changed. An unreadable value counts as unconfirmed, as the spec says, which could in theory double-insert if the app inserted but hides `AXValue`.
+- **Rebinding** resets auto-submit to off. An ambiguous exact-title match (two windows with the same title) is unbound, never a guess. A corrupt `bindings.json` is moved to `bindings.json.corrupt`.
+- **Injector trait** additions beyond the brief: `assign`, `assign_saved` and `release` (live refs per slot, restore after restart). `capture_focused` returns `CapturedBinding` with an opaque live handle.
+- **MacInjector.**
+  - Frontmost app is read via AX `AXFocusedApplication` (NSWorkspace as fallback).
+  - Activation uses `activateWithOptions` plus `AXFrontmost`, because macOS 14 limits cross-app activation.
+  - Key events use a Private CGEventSource with explicit flags, so held hotkey modifiers don't leak in.
+  - Pasteboard text is marked `org.nspasteboard.TransientType`.
+  - Crates: core-foundation 0.10, core-graphics 0.25, objc2 0.6, objc2-app-kit/foundation 0.3. AX and `IsSecureEventInputEnabled` are hand-written FFI.
+- **Gaps and risks.**
+  - MacInjector is compile-checked only; nothing was run against real apps. The TextEdit test is `mac-it` and `#[ignore]`.
+  - Terminal.app "Secure Keyboard Entry" makes `IsSecureEventInputEnabled` true, so deliveries to Terminal are `blocked` whenever it is on. CGEvent typing would still work, but the spec says to refuse.
+  - Rematched slots have no element until delivery, so the AX path is used only if the window's focused element matches the saved role.
