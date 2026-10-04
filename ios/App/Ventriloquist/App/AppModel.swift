@@ -2,7 +2,6 @@ import AVFAudio
 import Foundation
 import Observation
 import Speech
-import SwiftData
 import UIKit
 import VQPhoneCore
 import VQProtocol
@@ -42,7 +41,7 @@ final class AppModel {
     @ObservationIgnored let engine: PhoneEngine
     @ObservationIgnored let ble: BLEPeripheralTransport
     let dictation = DictationEngine()
-    @ObservationIgnored private var history: HistoryStore?
+    @ObservationIgnored private var started = false
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var interruptionObserver: (any NSObjectProtocol)?
 
@@ -143,13 +142,10 @@ final class AppModel {
         syncFromEngine()
     }
 
-    /// Attach SwiftData and start Bluetooth and timers.
-    func start(context: ModelContext) {
-        guard history == nil else { return }
-        var store = HistoryStore(context: context)
-        store.onRemove = { [engine] id in engine.forgetDelivery(id) }
-        store.failStalePending()
-        history = store
+    /// Start Bluetooth and timers.
+    func start() {
+        guard !started else { return }
+        started = true
         ble.start()
         // Fetch the speech model on first run, with the progress overlay (M11).
         Task { [weak self] in try? await self?.dictation.prepareModel() }
@@ -226,8 +222,8 @@ final class AppModel {
 
     private func handle(_ event: PhoneEvent) {
         switch event {
-        case .deliveryChanged(let id, let status):
-            history?.update(id, status: status)
+        case .deliveryChanged:
+            break
         case .utteranceLimitReached(let id, let text):
             record(id: id, text: text)
             alertMessage = "The utterance reached the maximum length, so recording stopped."
@@ -283,7 +279,12 @@ final class AppModel {
         isStarting = true
         defer { isStarting = false }
         guard await ensurePermissions() else { return }
-        // Starting a new recording commits the current entry (already in history).
+        // Starting a new recording supersedes the current entry: release its
+        // engine state once it is settled (a pending one keeps retrying and is
+        // released by the engine's own cap on settled ids).
+        if let old = currentId, let status = engine.deliveryStatus(of: old), status != .pending {
+            engine.forgetDelivery(old)
+        }
         currentId = nil
         sentText = ""
         editText = ""
@@ -315,8 +316,6 @@ final class AppModel {
         currentId = id
         sentText = text
         editText = text
-        history?.add(id: id, text: text, status: engine.deliveryStatus(of: id) ?? .pending,
-                     hostName: activeHostName)
     }
 
     /// "Send correction": an `edit` replacing the desktop entry.
@@ -325,26 +324,6 @@ final class AppModel {
               let sent = engine.sendEdit(id: id, text: editText) else { return }
         sentText = sent
         editText = sent
-        history?.update(id, text: sent, status: engine.deliveryStatus(of: id))
-    }
-
-    // MARK: - History
-
-    func resend(_ entry: HistoryEntry) {
-        let f = engine.resend(text: entry.text)
-        history?.add(id: f.id, text: f.text, status: engine.deliveryStatus(of: f.id) ?? .pending,
-                     hostName: activeHostName)
-    }
-
-    func delete(_ entry: HistoryEntry, context: ModelContext) {
-        engine.forgetDelivery(entry.utteranceId)
-        context.delete(entry)
-        try? context.save()
-    }
-
-    func clearHistory(_ entries: [HistoryEntry]) {
-        for e in entries { engine.forgetDelivery(e.utteranceId) }
-        history?.deleteAll()
     }
 
     // MARK: - Permissions (SPEC §5.2)

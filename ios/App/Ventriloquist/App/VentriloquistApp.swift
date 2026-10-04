@@ -1,4 +1,3 @@
-import SwiftData
 import SwiftUI
 
 @main
@@ -10,13 +9,11 @@ struct VentriloquistApp: App {
             RootView()
                 .environment(model)
         }
-        .modelContainer(for: HistoryEntry.self)
     }
 }
 
 struct RootView: View {
     @Environment(AppModel.self) private var model
-    @Environment(\.modelContext) private var context
     @Environment(\.scenePhase) private var scenePhase
     @State private var nameDraft = ""
 
@@ -24,10 +21,9 @@ struct RootView: View {
         @Bindable var model = model
         TabView {
             Tab("Dictate", systemImage: "mic.fill") { MainView() }
-            Tab("History", systemImage: "clock") { HistoryView() }
             Tab("Settings", systemImage: "gearshape") { SettingsView() }
         }
-        .task { model.start(context: context) }
+        .task { model.start() }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .background: model.enterBackground()

@@ -39,7 +39,7 @@ Revised 2026-10-04 to reflect decisions recorded in docs/SPEC_QUESTIONS.md durin
 | Phone trigger | Tap to start, tap to stop |
 | Pairing/security | One-time 6-digit code plus app-level encryption; both sides remember each other |
 | Multiple desktops | Phone chooses one from a list and remembers the last one |
-| Phone UI | Live transcript, edit after stopping (sends a correction), history with re-send |
+| Phone UI | Live transcript, edit after stopping (sends a correction) |
 | Edit vs. live | Stream live; an edit after stopping replaces the desktop entry |
 | Desktop UI | Scrolling list (newest at bottom), Copy button per entry, search, clear view |
 | Log | Daily Markdown files in a configurable directory |
@@ -159,7 +159,7 @@ Rules:
 - Partials are throttled to at most **5 per second**, always sending the latest text. The final is sent immediately on stop.
 - The phone retries an unacked `final`/`edit` every 2 s, up to 5 times while connected. If the desktop reconnects, pending unacked messages are re-sent. Delivery is at-least-once, and the receiver is idempotent by (`id`, `rev`).
 - `edit` replaces the text of an existing entry (same `id`, higher `rev`). If the desktop has never seen that `id`, it creates the entry.
-- **Re-send from history** creates a **new** `id` with a single `final`.
+- ~~Re-send from history~~ removed with History (owner decision, 2026-10-04); `PhoneEngine.resend` remains in the library for PhoneSim.
 
 ---
 
@@ -170,7 +170,7 @@ Rules:
 - **Header:** active desktop name with a status dot (green = connected and secure, amber = connecting or reconnecting, grey = none). Tapping it opens the Host picker.
 - **Live transcript area:** volatile (partial) text in secondary color, finalized text in primary color. It auto-scrolls.
 - **Large circular record button** at the bottom. Tap to start; it pulses red while recording. Tap again to stop.
-- **After stopping:** the transcript becomes an editable `TextEditor`. A **"Send correction"** button is enabled only when the text differs from what was sent. Sending it sends `edit`. Starting a new recording commits the current entry to history.
+- **After stopping:** the transcript becomes an editable `TextEditor`. A **"Send correction"** button is enabled only when the text differs from what was sent. Sending it sends `edit`. Starting a new recording supersedes the current entry; the phone keeps no history.
 - **Disabled states:** recording is allowed with no host connected. Text queues and sends when a host becomes active. The header says "Not connected — will send when connected".
 
 **Host picker (sheet)**
@@ -180,10 +180,7 @@ Rules:
 - On launch, the remembered last host is selected automatically when it connects.
 - The code-entry sheet enforces the desktop's pairing limits on the phone side (≥ 10 s between requests, ≤ 5 per 10 minutes per desktop; after 3 wrong codes, wait for the desktop's lockout) and shows a countdown instead of sending. `rate_limited`/`busy` are non-fatal ("Try again later"). Details: SPEC_QUESTIONS P3.
 
-**History**
-- A list of past utterances (newest first): text, time, and delivery status (✓ acked, ⏳ pending, ✗ failed).
-- Tap to view or copy. A **Re-send** action sends the entry to the active host as a new utterance. Swipe to delete. **Clear all** asks for confirmation.
-- History is stored locally with SwiftData, capped at 1,000 entries (oldest pruned first).
+**History** — removed (owner decision, 2026-10-04: "I don't need a history"). The iPhone app has two tabs, Dictate and Settings; there is no SwiftData store, no re-send and no 1,000-entry cap. The desktop's own history/log is unaffected.
 
 **Settings**
 - Custom vocabulary: an editable list of terms (e.g. `kubectl`, `PostgreSQL`), passed to SpeechAnalyzer as contextual strings. At most 100 terms.
