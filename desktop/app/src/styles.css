@@ -297,6 +297,31 @@ input[type="text"] {
   color: var(--muted);
 }
 
+/* Current-dictation view (default): one large entry. */
+.list.current-view {
+  padding: 16px 20px;
+}
+.list.current-view .entry {
+  border-bottom: none;
+  padding: 0;
+}
+.list.current-view .meta {
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.list.current-view .text {
+  font-size: clamp(20px, 3.2vw, 34px);
+  line-height: 1.45;
+}
+.list.current-view .copy {
+  font-size: 13px;
+  padding: 4px 12px;
+}
+button[aria-pressed="true"] {
+  background: var(--badge-bg);
+  border-color: var(--accent);
+}
+
 /* ------------------------------------------------------------ settings */
 
 .sheet-backdrop,

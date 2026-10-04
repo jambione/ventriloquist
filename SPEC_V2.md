@@ -127,6 +127,7 @@ On `FinalAccepted`, when the active slot ≠ Off:
 - Slot hotkeys pressed during a delivery take effect for the next delivery.
 
 ### 4.5 Desktop UI additions (Ventriloquist window)
+- **Current-dictation view (owner decision 2026-10-04):** by default the main area shows only the newest utterance (SPEC §6.1) in large monospace text, with live partials, the device name and time, the delivery badge, **Copy** and **Send to active slot**. A toolbar **History** toggle (persisted in `localStorage`) switches to the full list. Everything below (badge, Send to active slot) applies to the entry in either view.
 - **Slot bar** under the toolbar:
   - chips **Off · 1 … 9**. Each bound chip shows `N · App — window title` (truncated, full text in a tooltip).
   - Unbound chips are dimmed; the active chip is highlighted. Click a chip to select it, the same as the hotkey.

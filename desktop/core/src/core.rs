@@ -55,6 +55,7 @@ pub struct Core {
     log_dir: PathBuf,
     adapter_state: AdapterState,
     devices_seen: u64,
+    phone_app_not_open: bool,
     startup_warnings: Vec<String>,
     /// Latest log-write warning while the logger is failing (R2).
     log_warning: Option<String>,
@@ -114,6 +115,7 @@ impl Core {
             log_dir,
             adapter_state: AdapterState::Unknown,
             devices_seen: 0,
+            phone_app_not_open: false,
             startup_warnings: config_warning.into_iter().collect(),
             log_warning: None,
             _lock: lock,
@@ -163,6 +165,7 @@ impl Core {
             peers: self.sessions.statuses(&self.store, self.clock.as_ref()),
             entries: self.transcript.entries().cloned().collect(),
             log_warning: self.log_warning.clone(),
+            phone_app_not_open: self.phone_app_not_open,
         }
     }
 
@@ -196,7 +199,12 @@ impl Core {
         match ev {
             TransportEvent::Connected { peer, mtu } => {
                 let o = self.sessions.on_connected(peer, mtu, self.clock.as_ref());
-                self.apply(o)
+                let mut out = Vec::new();
+                if std::mem::take(&mut self.phone_app_not_open) {
+                    out.push(CoreOutput::Event(HostEvent::PhoneAppNotOpen { active: false }));
+                }
+                out.extend(self.apply(o));
+                out
             }
             TransportEvent::Frame { peer, frame } => {
                 let o = self
@@ -217,6 +225,13 @@ impl Core {
             TransportEvent::Adapter(state) => {
                 self.adapter_state = state;
                 vec![CoreOutput::Event(HostEvent::AdapterState { state })]
+            }
+            TransportEvent::PhoneAppNotOpen => {
+                if std::mem::replace(&mut self.phone_app_not_open, true) {
+                    Vec::new()
+                } else {
+                    vec![CoreOutput::Event(HostEvent::PhoneAppNotOpen { active: true })]
+                }
             }
             TransportEvent::DevicesSeen(count) => {
                 self.devices_seen = count;
@@ -420,6 +435,35 @@ mod tests {
         assert!(err.to_string().contains("already running"), "{err}");
         drop(first);
         Core::open(opts(dir.path())).expect("the lock is released on drop");
+    }
+
+    #[test]
+    fn phone_app_not_open_hint_is_emitted_on_change_and_cleared_by_a_connect() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = Core::open(opts(dir.path())).unwrap();
+        let hints = |out: &[CoreOutput]| -> Vec<bool> {
+            out.iter()
+                .filter_map(|o| match o {
+                    CoreOutput::Event(HostEvent::PhoneAppNotOpen { active }) => Some(*active),
+                    _ => None,
+                })
+                .collect()
+        };
+        let flag = |c: &Core| match c.snapshot() {
+            HostEvent::Snapshot { phone_app_not_open, .. } => phone_app_not_open,
+            e => panic!("{e:?}"),
+        };
+        assert!(!flag(&core));
+        let out = core.handle_transport(TransportEvent::PhoneAppNotOpen);
+        assert_eq!(hints(&out), vec![true]);
+        assert!(flag(&core));
+        // Repeats (the 5-minute block expiring and failing again) are silent.
+        assert!(hints(&core.handle_transport(TransportEvent::PhoneAppNotOpen)).is_empty());
+        let out = core.handle_transport(TransportEvent::Connected { peer: "p".into(), mtu: 100 });
+        assert_eq!(hints(&out), vec![false]);
+        assert!(!flag(&core));
+        let out = core.handle_transport(TransportEvent::Connected { peer: "q".into(), mtu: 100 });
+        assert!(hints(&out).is_empty());
     }
 
     #[test]

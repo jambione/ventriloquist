@@ -51,6 +51,10 @@ pub enum TransportEvent {
     Adapter(AdapterState),
     /// Advertisements seen since the current scan started (diagnostics).
     DevicesSeen(u64),
+    /// A phone advertising our name was found, but it has no Ventriloquist
+    /// GATT service (the iPhone app is not in the foreground). The host
+    /// clears the hint on the next `Connected`.
+    PhoneAppNotOpen,
 }
 
 /// Something the host wants the transport to do.

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_ENTRIES,
   copyText,
+  currentEntry,
   entriesInView,
   initialState,
   reduce,
@@ -426,5 +427,110 @@ describe("devices seen", () => {
     expect(s.devicesSeen).toBe(7);
     const fresh = reduce(initialState(), host(snapshot({ devices_seen: 9 })));
     expect(fresh.devicesSeen).toBe(9);
+  });
+});
+
+describe("current dictation (regression: new dictations stopped appearing)", () => {
+  const A = "aaaaaaaa-0000-4000-8000-000000000001";
+  const B = "bbbbbbbb-0000-4000-8000-000000000002";
+  const upsert = (e: Entry): HostEvent => ({ event: "entry_upserted", entry: e });
+  const accepted = (e: Entry): HostEvent => ({ event: "final_accepted", entry: e });
+  const noise: HostEvent[] = [
+    { event: "log_warning", message: "disk full" },
+    { event: "log_warning", message: "disk full" },
+    { event: "log_recovered" },
+    { event: "log_warning", message: "again" },
+    { event: "log_recovered" },
+  ];
+  const dictateA = (): HostEvent[] => [
+    upsert(entry(A, 0, "partial", "hel")),
+    upsert(entry(A, 1, "partial", "hello wor")),
+    upsert(entry(A, 2, "final", "hello world")),
+    accepted(entry(A, 2, "final", "hello world")),
+  ];
+  const dictateB = (): HostEvent[] => [
+    upsert(entry(B, 0, "partial", "se")),
+    upsert(entry(B, 1, "final", "second")),
+    accepted(entry(B, 1, "final", "second")),
+  ];
+
+  it("final_accepted does not break the reducer", () => {
+    const s = ready(...dictateA());
+    expect(s).toBeDefined();
+    expect(currentEntry(s)?.text).toBe("hello world");
+    // the state stays usable afterwards
+    expect(reduce(s, host({ event: "log_recovered" }))).toBeDefined();
+  });
+
+  it("B replaces A as the current entry after warnings and recoveries", () => {
+    const s = ready(...dictateA(), ...noise, ...dictateB());
+    expect(currentEntry(s)?.id).toBe(B);
+    expect(currentEntry(s)?.text).toBe("second");
+    expect(texts(s)).toEqual(["hello world", "second"]);
+  });
+
+  it("B shows live partials as they arrive", () => {
+    const s = ready(...dictateA(), ...noise, upsert(entry(B, 0, "partial", "se")));
+    expect(currentEntry(s)?.id).toBe(B);
+    expect(currentEntry(s)?.partial).toBe(true);
+  });
+
+  it("B is visible after Clear view between A and B", () => {
+    let s = ready(...dictateA(), ...noise);
+    s = reduce(s, { type: "clear_view" });
+    expect(currentEntry(s)).toBeNull();
+    s = run(dictateB().map((e) => host(e)), s);
+    expect(currentEntry(s)?.id).toBe(B);
+    expect(currentEntry(s)?.text).toBe("second");
+  });
+
+  it("Clear view during B's partials hides B only until its next revision", () => {
+    let s = ready(...dictateA(), upsert(entry(B, 0, "partial", "se")));
+    s = reduce(s, { type: "clear_view" });
+    expect(currentEntry(s)).toBeNull();
+    s = run(dictateB().map((e) => host(e)).slice(1), s);
+    expect(currentEntry(s)?.text).toBe("second");
+  });
+
+  it("a NEWER utterance is never hidden by Clear view or by tombstones", () => {
+    let s = ready(...dictateA());
+    s = reduce(s, { type: "clear_view" });
+    // a late, same-rev re-delivery of A stays hidden
+    s = reduce(s, host(upsert(entry(A, 2, "final", "hello world"))));
+    expect(currentEntry(s)).toBeNull();
+    // an evicted A (tombstoned) then B arrives
+    s = reduce(s, host({ event: "entry_evicted", id: A }));
+    s = run(dictateB().map((e) => host(e)), s);
+    expect(currentEntry(s)?.id).toBe(B);
+  });
+
+  it("survives a snapshot taken before B and events buffered across it", () => {
+    let s = run([
+      host(upsert(entry(B, 0, "partial", "se"))), // buffered, pre-snapshot
+      host({ event: "log_warning", message: "x" }),
+      host(snapshot({ entries: [entry(A, 2, "final", "hello world")] })),
+    ]);
+    expect(currentEntry(s)?.id).toBe(B);
+    // a late duplicate snapshot does not change that
+    s = reduce(s, host(snapshot({ entries: [entry(A, 2, "final", "hello world")] })));
+    expect(currentEntry(s)?.id).toBe(B);
+  });
+
+  it("an unknown future event is ignored, never turns the state undefined", () => {
+    const s = ready(...dictateA());
+    const odd = { event: "something_new" } as unknown as HostEvent;
+    expect(reduce(s, host(odd))).toBe(s);
+  });
+});
+
+describe("phone app not open", () => {
+  it("follows phone_app_not_open events and the snapshot", () => {
+    let s = ready();
+    expect(s.phoneAppNotOpen).toBe(false);
+    s = reduce(s, host({ event: "phone_app_not_open", active: true }));
+    expect(s.phoneAppNotOpen).toBe(true);
+    s = reduce(s, host({ event: "phone_app_not_open", active: false }));
+    expect(s.phoneAppNotOpen).toBe(false);
+    expect(reduce(initialState(), host(snapshot({ phone_app_not_open: true }))).phoneAppNotOpen).toBe(true);
   });
 });

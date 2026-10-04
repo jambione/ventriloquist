@@ -200,15 +200,17 @@ Rules:
 ## 6. Desktop app (Tauri v2, macOS + Windows)
 
 ### 6.1 Window
-- **Toolbar:** connection status (e.g. "● Connected to Jon's iPhone (secure)", "Scanning… (N devices seen)", "Bluetooth off"), a **Clear view** button, and a **Settings** gear.
-- **Transcript list:**
+- **Toolbar:** connection status (e.g. "● Connected to Jon's iPhone (secure)", "Scanning… (N devices seen)", "Bluetooth off"), a small **History** toggle, a **Clear view** button, and a **Settings** gear. When the BLE transport has found the phone by name but its Ventriloquist service is missing, the status reads "iPhone found — open Ventriloquist on it".
+- **Current dictation (default view; owner decision 2026-10-04):** the main area shows exactly one entry, the most recent utterance by first-seen order (the newest id), in large monospace text. It updates live with partials and replaces itself the moment a new utterance starts. It keeps the time, device name, state styling (partial, interrupted, edited), the delivery badge and the **Copy** and **Send to active slot** buttons. Empty state: "Dictate on your iPhone — the text appears here."
+- **History toggle:** switches the main area to the transcript list below. The choice is stored in `localStorage` (failures ignored).
+- **Transcript list (History view):**
   - Chat-like, with the newest entry at the bottom. The list auto-scrolls to the bottom only if the user is already at the bottom.
   - Each entry shows its time (HH:MM:SS), device name, and text in a **monospace** font. Text is selectable.
   - A **Copy** button per entry copies the exact text, with no trailing newline, and shows "Copied ✓" for 1.5 s.
   - A live partial entry is shown dimmed and italic with a "speaking…" indicator. It becomes normal when it turns `final`.
   - An entry replaced by an `edit` shows an "edited" badge.
 - **No search field.** (Removed by owner decision, 2026-10-04; docs/SPEC_QUESTIONS.md O2.)
-- **Clear view:** empties the on-screen list only. It never touches the log. A hidden entry reappears when a higher revision of it arrives (SPEC_QUESTIONS W3).
+- **Clear view:** empties the current view (the current entry, or the list in History) only. It never hides an utterance that arrives later, and it applies to both views. It never touches the log. A hidden entry reappears when a higher revision of it arrives (SPEC_QUESTIONS W3).
 - **Pairing modal:** shows the 6-digit code in large type, the requesting phone's name, a countdown, and a Cancel button. A wrong code keeps the modal open with the attempts left; it closes on success, on invalidation, on expiry, on disconnect or on Cancel (W4). When a code is shown, the window is unminimized and requests attention (W13).
 - **Single instance:** a second launch focuses the existing window (`tauri-plugin-single-instance`), and an exclusive lock on `<config dir>/.lock` stops a second core, including `vq-host` (SPEC_QUESTIONS W9).
 - **Settings:** log directory (folder picker; default `~/Documents/Ventriloquist/`), paired phones with a Forget button, this desktop's display name (default: hostname), and an "Open log folder" button.

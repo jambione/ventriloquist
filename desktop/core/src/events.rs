@@ -104,6 +104,8 @@ pub enum HostEvent {
         /// Latest log-write warning while the log is failing, else `None`
         /// (`log_warning` is only emitted on the transition).
         log_warning: Option<String>,
+        /// See [`HostEvent::PhoneAppNotOpen`].
+        phone_app_not_open: bool,
     },
     /// An entry was created or changed (a newer revision was accepted).
     EntryUpserted {
@@ -231,6 +233,14 @@ pub enum HostEvent {
     DevicesSeen {
         /// The count.
         count: u64,
+    },
+    /// Connection hint: `active` is true when the BLE transport found the
+    /// phone by name but the Ventriloquist GATT service is missing (the app
+    /// is not open on the iPhone). Emitted on change only; cleared
+    /// (`active: false`) when any connection is next established.
+    PhoneAppNotOpen {
+        /// Whether the hint is on.
+        active: bool,
     },
     /// Log directory or display name changed (in effect for this run).
     ConfigChanged {

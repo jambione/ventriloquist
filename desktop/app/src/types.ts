@@ -61,8 +61,12 @@ export type HostEvent =
       entries: Entry[];
       /** Latest log-write warning while the log is failing, else null. */
       log_warning?: string | null;
+      /** The phone was found by name but its app is not open. */
+      phone_app_not_open?: boolean;
     }
   | { event: "entry_upserted"; entry: Entry }
+  /** The first final of an id (emitted right after its entry_upserted). */
+  | { event: "final_accepted"; entry: Entry }
   | { event: "entry_evicted"; id: string }
   | {
       event: "connection_status";
@@ -99,6 +103,7 @@ export type HostEvent =
   | { event: "storage_warning"; message: string }
   | { event: "adapter_state"; state: AdapterState }
   | { event: "devices_seen"; count: number }
+  | { event: "phone_app_not_open"; active: boolean }
   | { event: "config_changed"; log_dir: string; name: string; persisted: boolean };
 
 // ---- bindings (SPEC_V2; desktop/app/src-tauri/src/delivery.rs). Every app

@@ -22,6 +22,7 @@ import {
 } from "./format";
 import {
   copyText,
+  currentEntry,
   entriesInView,
   initialState,
   onlineDeviceIds,
@@ -48,6 +49,7 @@ const dom = {
   statusDot: el("status-dot"),
   statusText: el("status-text"),
   clearView: el<HTMLButtonElement>("clear-view"),
+  historyToggle: el<HTMLButtonElement>("history-toggle"),
   openSettings: el<HTMLButtonElement>("open-settings"),
   banners: el("banners"),
   list: el("list"),
@@ -88,6 +90,27 @@ const dom = {
   boundSlots: el<HTMLUListElement>("bound-slots"),
   boundEmpty: el("bound-empty"),
 };
+
+const HISTORY_KEY = "vq.historyView";
+
+function loadHistoryMode(): boolean {
+  try {
+    return window.localStorage.getItem(HISTORY_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveHistoryMode(on: boolean): void {
+  try {
+    window.localStorage.setItem(HISTORY_KEY, on ? "1" : "0");
+  } catch {
+    /* storage unavailable: the choice lasts until the window closes */
+  }
+}
+
+/** false: only the current dictation (default); true: the whole list. */
+let historyMode = loadHistoryMode();
 
 const platform = detectPlatform(navigator.userAgent);
 let state: AppState = initialState();
@@ -249,7 +272,14 @@ function renderList(): void {
     dom.list.scrollHeight,
     dom.list.clientHeight,
   );
-  const visible = visibleEntries(state);
+  let visible: Entry[];
+  if (historyMode) {
+    visible = visibleEntries(state);
+  } else {
+    const cur = currentEntry(state);
+    visible = cur === null ? [] : [cur];
+  }
+  dom.list.classList.toggle("current-view", !historyMode);
   const keep = new Set<string>();
   let cursor: ChildNode | null = dom.rows.firstChild;
   for (const e of visible) {
@@ -279,7 +309,11 @@ function renderList(): void {
   } else {
     dom.empty.hidden = true;
   }
-  if (atBottom) dom.list.scrollTop = dom.list.scrollHeight;
+  if (historyMode) {
+    if (atBottom) dom.list.scrollTop = dom.list.scrollHeight;
+  } else {
+    dom.list.scrollTop = 0;
+  }
 }
 
 function renderStatus(): void {
@@ -706,13 +740,19 @@ function render(): void {
   renderList();
   renderSettings();
   renderPairing();
-  dom.clearView.disabled = entriesInView(state) === 0;
+  dom.historyToggle.setAttribute("aria-pressed", historyMode ? "true" : "false");
+  dom.clearView.disabled = historyMode ? entriesInView(state) === 0 : currentEntry(state) === null;
   updateInert();
 }
 
 // ---------------------------------------------------------------- inputs
 
 dom.clearView.addEventListener("click", () => dispatch({ type: "clear_view" }));
+dom.historyToggle.addEventListener("click", () => {
+  historyMode = !historyMode;
+  saveHistoryMode(historyMode);
+  render();
+});
 
 /** While a dialog is open the page behind it is inert: Tab cannot leave
  * the dialog. */
@@ -793,12 +833,16 @@ function flushAcks(): void {
 }
 
 function onHostEvent(event: HostEvent): void {
-  dispatch({ type: "host", event, now: now() });
-  // Acknowledge from a timer, not the render loop: rAF is paused while the
-  // window is hidden.
-  unacked++;
-  if (unacked >= ACK_EVERY) flushAcks();
-  else ackTimer ??= window.setTimeout(flushAcks, ACK_DELAY_MS);
+  try {
+    dispatch({ type: "host", event, now: now() });
+  } finally {
+    // Always acknowledge, even if handling threw: a missing ack would fill
+    // the host's flow-control window. Acknowledge from a timer, not the
+    // render loop: rAF is paused while the window is hidden.
+    unacked++;
+    if (unacked >= ACK_EVERY) flushAcks();
+    else ackTimer ??= window.setTimeout(flushAcks, ACK_DELAY_MS);
+  }
 }
 
 /** Unanswered snapshot requests after which the user is told. */

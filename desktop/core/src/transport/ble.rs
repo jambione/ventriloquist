@@ -693,12 +693,18 @@ impl Ble {
         });
         let central = self.central.clone();
         let events = self.events.clone();
+        let hint_events = self.events.clone();
         let ended = self.ended_tx.clone();
         let pid = id.clone();
         let name_only = slot.name_only;
         tokio::spawn(async move {
             let (was_connected, not_ours) =
                 connection(central, pid.clone(), peer, rx, abort, events, name_only).await;
+            if not_ours {
+                // Tell the host before the slot is blocked: the UI says
+                // "iPhone found — open Ventriloquist on it".
+                let _ = hint_events.send(TransportEvent::PhoneAppNotOpen).await;
+            }
             let _ = ended.send(Ended { pid, was_connected, not_ours });
         });
     }

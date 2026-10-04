@@ -64,6 +64,9 @@ describe("connectionStatus", () => {
     expect(connectionStatus(initialState(), "mac").text).toBe("Starting…");
     expect(connectionStatus(snap("scanning", []), "mac")).toEqual({ tone: "idle", text: "Scanning… (0 devices seen)" });
     expect(connectionStatus(snap("powered_off", []), "mac").text).toBe("Bluetooth off");
+    expect(
+      connectionStatus({ ...snap("scanning", []), phoneAppNotOpen: true }, "mac").text,
+    ).toBe("iPhone found — open Ventriloquist on it");
     expect(connectionStatus(snap("unauthorized", []), "mac").text).toBe(
       "Bluetooth not authorized — enable in System Settings",
     );

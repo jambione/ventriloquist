@@ -99,6 +99,8 @@ export interface AppState {
   adapter: AdapterState;
   /** Advertisements seen since the current scan started (diagnostics). */
   devicesSeen: number;
+  /** The phone was found by name but the app is not open on it. */
+  phoneAppNotOpen: boolean;
   /** Live connections (closed ones are removed). */
   peers: ReadonlyMap<string, PeerInfo>;
   entries: ReadonlyMap<string, Entry>;
@@ -152,6 +154,7 @@ export function initialState(): AppState {
     pairedPeers: [],
     adapter: "unknown",
     devicesSeen: 0,
+    phoneAppNotOpen: false,
     peers: new Map(),
     entries: new Map(),
     order: [],
@@ -387,6 +390,12 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
       };
     case "entry_upserted":
       return upsertEntry(state, ev.entry);
+    case "final_accepted":
+      // Always follows the entry_upserted of the same revision (a no-op
+      // then); the reducer must still return a state for it.
+      return upsertEntry(state, ev.entry);
+    case "phone_app_not_open":
+      return state.phoneAppNotOpen === ev.active ? state : { ...state, phoneAppNotOpen: ev.active };
     case "entry_evicted":
       return evictEntry(state, ev.id);
     case "connection_status": {
@@ -465,6 +474,10 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
       return state.adapter === ev.state ? state : { ...state, adapter: ev.state };
     case "config_changed":
       return { ...state, logDir: ev.log_dir, name: ev.name, configPersisted: ev.persisted };
+    default:
+      // An event this build does not know (a newer core): ignore it. The
+      // reducer must never return undefined, or every later event crashes.
+      return state;
   }
 }
 
@@ -541,6 +554,7 @@ function applySnapshot(
     pairedPeers: snap.paired_peers,
     adapter: snap.adapter_state,
     devicesSeen: snap.devices_seen ?? 0,
+    phoneAppNotOpen: snap.phone_app_not_open ?? false,
     peers,
     entries,
     order: order.length > MAX_ENTRIES ? order.slice(-MAX_ENTRIES) : order,
@@ -559,6 +573,7 @@ function applySnapshot(
   for (const { event: ev, at } of state.buffered) {
     switch (ev.event) {
       case "entry_upserted":
+      case "final_accepted":
       case "entry_evicted":
       case "log_warning":
       case "log_recovered":
@@ -620,6 +635,16 @@ export function visibleEntries(state: AppState): Entry[] {
     if (e !== undefined && !isCleared(state, e)) out.push(e);
   }
   return out;
+}
+
+/** The current dictation: the entry first seen last (the newest id), unless
+ * Clear view hid exactly that revision. A newer utterance is never hidden:
+ * Clear view only records the ids and revisions that existed. */
+export function currentEntry(state: AppState): Entry | null {
+  const id = state.order[state.order.length - 1];
+  if (id === undefined) return null;
+  const e = state.entries.get(id);
+  return e === undefined || isCleared(state, e) ? null : e;
 }
 
 /** Entries not hidden by Clear view. */
