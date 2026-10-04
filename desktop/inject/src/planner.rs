@@ -1,7 +1,7 @@
 //! Pure delivery planner (SPEC_V2 §4.3). No OS calls: the executor
 //! (`Injector::execute`) interprets the [`Action`]s.
 
-use crate::model::{DeliveryMethod, SlotSettings};
+use crate::model::{DeliveryMethod, NewlineMode, SlotSettings};
 
 /// Text of at most this many characters (Unicode scalar values, after
 /// sanitising, line breaks included) is typed; longer text is pasted.
@@ -145,6 +145,10 @@ pub struct TargetCaps {
     pub secure_input: bool,
     /// The target process is elevated and we are not (Windows UIPI).
     pub elevated: bool,
+    /// The current clipboard can be snapshotted and restored losslessly. When
+    /// false, long text is typed instead of pasted so the user's clipboard is
+    /// never lost (SPEC_V2 §4.8). Always true on macOS.
+    pub clipboard_restorable: bool,
 }
 
 impl TargetCaps {
@@ -155,6 +159,7 @@ impl TargetCaps {
             secure_field: false,
             secure_input: false,
             elevated: false,
+            clipboard_restorable: true,
         }
     }
 }
@@ -259,14 +264,14 @@ fn chunks(line: &str) -> Vec<String> {
     out
 }
 
-fn keystroke_plan(clean: &str, auto_submit: bool, dropped: usize) -> Plan {
+fn keystroke_plan(clean: &str, auto_submit: bool, can_paste: bool, dropped: usize) -> Plan {
     let mut actions = vec![
         Action::Activate,
         Action::WaitFrontmost { timeout_ms: FRONTMOST_TIMEOUT_MS },
         Action::FocusElement,
     ];
     let method;
-    if clean.chars().count() <= MAX_TYPED_CHARS {
+    if !can_paste || clean.chars().count() <= MAX_TYPED_CHARS {
         method = DeliveryMethod::Type;
         for (i, line) in clean.split('\n').enumerate() {
             if i > 0 {
@@ -315,9 +320,15 @@ fn keystroke_plan(clean: &str, auto_submit: bool, dropped: usize) -> Plan {
 ///   `fallback`. With auto-submit the target must also be activated and
 ///   focused to receive Return (AX insertion needs no activation, but a
 ///   keystroke does).
-/// - Keystroke path otherwise: type (<= 200 chars) or paste (> 200).
+/// - Keystroke path otherwise: type (<= 200 chars) or paste (> 200); text is
+///   always typed when `caps.clipboard_restorable` is false.
+/// - `NewlineMode::Spaces` turns each line break into a space first.
 pub fn plan_delivery(caps: &TargetCaps, text: &str, settings: &SlotSettings) -> Plan {
-    let (clean, dropped) = sanitize(text);
+    let (mut clean, dropped) = sanitize(text);
+    if settings.newline_mode == NewlineMode::Spaces {
+        // Flatten: every line break (already normalised to `\n`) becomes one space.
+        clean = clean.replace('\n', " ");
+    }
     let mut plan = if let Some(reason) = secure_refusal(caps) {
         Plan {
             method: DeliveryMethod::Type,
@@ -348,12 +359,12 @@ pub fn plan_delivery(caps: &TargetCaps, text: &str, settings: &SlotSettings) -> 
         Plan {
             method: DeliveryMethod::AxInsert,
             actions,
-            fallback: Some(Box::new(keystroke_plan(&clean, settings.auto_submit, dropped))),
+            fallback: Some(Box::new(keystroke_plan(&clean, settings.auto_submit, caps.clipboard_restorable, dropped))),
             dropped_controls: dropped,
             blocked: None,
         }
     } else {
-        keystroke_plan(&clean, settings.auto_submit, dropped)
+        keystroke_plan(&clean, settings.auto_submit, caps.clipboard_restorable, dropped)
     };
     plan.dropped_controls = dropped;
     plan
@@ -364,16 +375,16 @@ mod tests {
     use super::*;
 
     fn native(ax: bool) -> TargetCaps {
-        TargetCaps { category: AppCategory::Native, ax_insertable: ax, secure_field: false, secure_input: false, elevated: false }
+        TargetCaps { category: AppCategory::Native, ax_insertable: ax, secure_field: false, secure_input: false, elevated: false, clipboard_restorable: true }
     }
     fn cat(c: AppCategory, ax: bool) -> TargetCaps {
         TargetCaps { category: c, ..native(ax) }
     }
     fn off() -> SlotSettings {
-        SlotSettings { auto_submit: false }
+        SlotSettings { auto_submit: false, newline_mode: NewlineMode::ShiftEnter }
     }
     fn on() -> SlotSettings {
-        SlotSettings { auto_submit: true }
+        SlotSettings { auto_submit: true, newline_mode: NewlineMode::ShiftEnter }
     }
     fn typed(a: &[Action]) -> String {
         a.iter()
@@ -761,5 +772,54 @@ mod tests {
         let t = "héllo 日本語 😀 العربية";
         let p = plan_delivery(&native(false), t, &off());
         assert_eq!(typed(&p.actions), t);
+    }
+
+    #[test]
+    fn unrestorable_clipboard_types_long_text() {
+        let text = "y".repeat(500);
+        let caps = TargetCaps { clipboard_restorable: false, ..native(false) };
+        let p = plan_delivery(&caps, &text, &off());
+        assert_eq!(p.method, DeliveryMethod::Type);
+        assert_eq!(typed(&p.actions), text);
+        assert!(!p.actions.iter().any(|a| matches!(a, Action::SetClipboard(_) | Action::CmdV | Action::SnapshotClipboard)));
+        // Multi-line long text keeps its Shift+Enter breaks.
+        let multi = format!("{}\n{}", "a".repeat(150), "b".repeat(150));
+        let p = plan_delivery(&caps, &multi, &off());
+        assert_eq!(p.method, DeliveryMethod::Type);
+        assert_eq!(typed(&p.actions), multi);
+        // The AX fallback also types.
+        let caps = TargetCaps { clipboard_restorable: false, ..native(true) };
+        let p = plan_delivery(&caps, &text, &off());
+        assert_eq!(p.fallback.unwrap().method, DeliveryMethod::Type);
+        // Restorable clipboard still pastes.
+        let p = plan_delivery(&native(false), &text, &off());
+        assert_eq!(p.method, DeliveryMethod::Paste);
+    }
+
+    #[test]
+    fn newline_mode_spaces_flattens() {
+        let sp = SlotSettings { auto_submit: false, newline_mode: NewlineMode::Spaces };
+        let p = plan_delivery(&native(false), "a\r\nb\nc", &sp);
+        assert_eq!(typed(&p.actions), "a b c");
+        assert!(!p.actions.contains(&Action::ShiftReturn));
+        let p = plan_delivery(&native(true), "a\nb", &sp);
+        assert_eq!(p.actions, vec![Action::AxInsertSelectedText("a b".into())]);
+        // Flattened text is what counts toward the 200 threshold, and paste has no breaks.
+        let long = format!("{}\n{}", "a".repeat(150), "b".repeat(150));
+        let p = plan_delivery(&native(false), &long, &sp);
+        assert_eq!(p.method, DeliveryMethod::Paste);
+        assert!(!p.actions.contains(&Action::ShiftReturn));
+        // Shift+Enter mode keeps breaks.
+        let p = plan_delivery(&native(false), "a\nb", &off());
+        assert!(p.actions.contains(&Action::ShiftReturn));
+    }
+
+    #[test]
+    fn newline_mode_default_by_category() {
+        assert_eq!(SlotSettings::for_app("WindowsTerminal.exe").newline_mode, NewlineMode::Spaces);
+        assert_eq!(SlotSettings::for_app("com.apple.Terminal").newline_mode, NewlineMode::Spaces);
+        assert_eq!(SlotSettings::for_app("ms-teams.exe").newline_mode, NewlineMode::ShiftEnter);
+        assert_eq!(SlotSettings::for_app("notepad.exe").newline_mode, NewlineMode::ShiftEnter);
+        assert_eq!(SlotSettings::default().newline_mode, NewlineMode::ShiftEnter);
     }
 }

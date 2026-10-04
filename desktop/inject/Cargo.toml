@@ -10,6 +10,9 @@ publish = false
 # Local macOS integration test (TextEdit). Needs Accessibility for the test
 # runner; run with `cargo test -p vq-inject --features mac-it -- --ignored`.
 mac-it = []
+# Windows integration test (Notepad). Needs an interactive desktop session; run
+# with `cargo test -p vq-inject --features win-it -- --ignored --nocapture`.
+win-it = []
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -23,6 +26,23 @@ core-graphics = "0.25"
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3.23"

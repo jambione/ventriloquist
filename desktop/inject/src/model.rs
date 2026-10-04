@@ -93,12 +93,39 @@ pub struct BindingTarget {
     pub ax_insertable: bool,
 }
 
+/// How line breaks are delivered (SPEC_V2 §2, §4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewlineMode {
+    /// Shift+Return (soft newline).
+    #[default]
+    ShiftEnter,
+    /// Flatten to one line: each line break becomes a single space.
+    Spaces,
+}
+
 /// Per-slot settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct SlotSettings {
     /// Press Return after the text (default off, §5).
     #[serde(default)]
     pub auto_submit: bool,
+    /// Line-break handling. The default for a new binding depends on the app
+    /// (see [`SlotSettings::for_app`]).
+    #[serde(default)]
+    pub newline_mode: NewlineMode,
+}
+
+impl SlotSettings {
+    /// Defaults for a freshly bound app: terminals get `Spaces` (Shift+Enter
+    /// can arrive as Enter and submit), everything else `ShiftEnter`.
+    pub fn for_app(app_id: &str) -> Self {
+        let newline_mode = match crate::planner::AppCategory::from_app_id(app_id) {
+            crate::planner::AppCategory::Terminal => NewlineMode::Spaces,
+            _ => NewlineMode::ShiftEnter,
+        };
+        SlotSettings { auto_submit: false, newline_mode }
+    }
 }
 
 /// How a delivery reached the target.
@@ -154,6 +181,15 @@ impl Sound {
             Sound::Selected => "Tink",
             Sound::Empty | Sound::Error => "Basso",
             Sound::Off => "Pop",
+        }
+    }
+
+    /// Windows system sound alias for `PlaySoundW` (SPEC_V2 §4.8).
+    pub fn windows_alias(self) -> &'static str {
+        match self {
+            Sound::Selected => "SystemAsterisk",
+            Sound::Empty | Sound::Error => "SystemHand",
+            Sound::Off => "SystemExclamation",
         }
     }
 }

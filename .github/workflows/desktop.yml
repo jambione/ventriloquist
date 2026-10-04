@@ -35,6 +35,8 @@ jobs:
           cache-dependency-path: desktop/app/package-lock.json
       - name: Protocol tests
         run: cargo test -p vq-protocol
+      - name: Injector tests (vq-inject)
+        run: cargo test -p vq-inject
       - name: Desktop core tests (debug, dev-tcp)
         run: cargo test -p vq-host-core --features dev-tcp
       - name: Clippy
@@ -46,9 +48,40 @@ jobs:
           npx tsc --noEmit
           npm test
 
+  windows-test:
+    name: Windows injector tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-inject
+      - name: Tests
+        run: cargo test -p vq-inject
+      - name: Clippy
+        run: cargo clippy -p vq-inject --all-targets -- -D warnings
+
+  # Drives real Notepad through SendInput/UIA. Needs an interactive desktop, which
+  # hosted runners may not give reliably, so a failure here does not block.
+  windows-integration:
+    name: Windows integration (Notepad, non-blocking)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-inject
+      - name: Notepad integration test
+        run: cargo test -p vq-inject --features win-it -- --ignored --nocapture --test-threads=1
+
   build:
     name: Build (${{ matrix.name }})
-    needs: test
+    needs: [test, windows-test]
     strategy:
       fail-fast: false
       matrix:

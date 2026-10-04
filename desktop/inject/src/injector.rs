@@ -87,7 +87,7 @@ pub trait Injector: Send + Sync {
     fn play_sound(&self, sound: Sound);
 }
 
-/// Injector for platforms without an implementation (everything but macOS).
+/// Injector for platforms without an implementation (everything but macOS and Windows).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnsupportedInjector;
 
@@ -125,7 +125,11 @@ pub fn default_injector() -> Box<dyn Injector> {
     {
         Box::new(crate::mac::MacInjector::new())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(crate::windows::WindowsInjector::new())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         Box::new(UnsupportedInjector)
     }
@@ -160,7 +164,7 @@ mod tests {
             title_changed: false,
         };
         assert_eq!(i.caps(&rt).unwrap_err(), InjectError::Unsupported);
-        let caps = TargetCaps { category: AppCategory::Native, ax_insertable: false, secure_field: false, secure_input: false, elevated: false };
+        let caps = TargetCaps { category: AppCategory::Native, ax_insertable: false, secure_field: false, secure_input: false, elevated: false, clipboard_restorable: true };
         let plan = plan_delivery(&caps, "hi", &Default::default());
         assert!(matches!(i.execute(&plan, &rt), DeliveryResult::Failed { .. }));
         i.play_sound(Sound::Selected);

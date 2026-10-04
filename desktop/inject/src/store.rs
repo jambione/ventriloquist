@@ -62,10 +62,11 @@ impl BindingsStore {
         self.slots.values()
     }
 
-    /// Bind `slot` (replacing whatever it held, settings reset to defaults),
+    /// Bind `slot` (replacing whatever it held, settings reset to the app's defaults),
     /// make it active (O1).
     pub fn bind(&mut self, slot: SlotId, target: BindingTarget) {
-        self.slots.insert(slot, SlotRecord { slot, target, settings: SlotSettings::default() });
+        let settings = SlotSettings::for_app(&target.app_id);
+        self.slots.insert(slot, SlotRecord { slot, target, settings });
         self.active = ActiveSlot::Slot(slot);
     }
 
@@ -98,6 +99,16 @@ impl BindingsStore {
         match self.slots.get_mut(&slot) {
             Some(r) => {
                 r.settings.auto_submit = on;
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_newline_mode(&mut self, slot: SlotId, mode: crate::model::NewlineMode) -> bool {
+        match self.slots.get_mut(&slot) {
+            Some(r) => {
+                r.settings.newline_mode = mode;
                 true
             }
             None => false,
@@ -533,5 +544,30 @@ mod tests {
         let r = s.get(slot(1)).unwrap();
         assert_eq!(r.target.element_subrole, "");
         assert!(!r.settings.auto_submit, "auto-submit defaults off");
+    }
+
+    #[test]
+    fn newline_mode_defaults_by_app_and_persists() {
+        use crate::model::NewlineMode;
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = BindingsStore::default();
+        let mut t = target("WindowsTerminal.exe", "pwsh");
+        t.app_id = "WindowsTerminal.exe".into();
+        s.bind(slot(1), t);
+        s.bind(slot(2), target("notepad.exe", "a.txt"));
+        assert_eq!(s.get(slot(1)).unwrap().settings.newline_mode, NewlineMode::Spaces);
+        assert_eq!(s.get(slot(2)).unwrap().settings.newline_mode, NewlineMode::ShiftEnter);
+        assert!(s.set_newline_mode(slot(2), NewlineMode::Spaces));
+        assert!(!s.set_newline_mode(slot(3), NewlineMode::Spaces));
+        s.save(dir.path()).unwrap();
+        let (l, w) = BindingsStore::load(dir.path());
+        assert!(w.is_none());
+        assert_eq!(l.get(slot(1)).unwrap().settings.newline_mode, NewlineMode::Spaces);
+        assert_eq!(l.get(slot(2)).unwrap().settings.newline_mode, NewlineMode::Spaces);
+        // A file without the key (older) reads as the default.
+        let old = br#"{"version":1,"active":1,"slots":[{"slot":1,"target":{"app_id":"a","app_name":"A","window_title":"t","element_role":"r","ax_insertable":false},"settings":{"auto_submit":true}}]}"#;
+        let st = BindingsStore::parse(old).unwrap();
+        assert_eq!(st.get(slot(1)).unwrap().settings.newline_mode, NewlineMode::ShiftEnter);
+        assert!(st.get(slot(1)).unwrap().settings.auto_submit);
     }
 }

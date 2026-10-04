@@ -343,6 +343,7 @@ impl Injector for MacInjector {
             secure_field: el.as_ref().map(is_secure).unwrap_or(false),
             secure_input: sys::secure_input_enabled(),
             elevated: false,
+            clipboard_restorable: true,
         })
     }
 
