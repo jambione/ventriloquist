@@ -22,9 +22,9 @@ if [ "$(uname)" != "Darwin" ]; then echo "macOS only" >&2; exit 1; fi
 
 # shellcheck disable=SC1091
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-if [ ! -x "$ROOT/target/release/vq-relay" ]; then
-  (cd "$ROOT" && cargo build --release -p vq-relay)
-fi
+# Always build: after a `git pull` the existing binary may be stale (cargo is a
+# no-op when nothing changed).
+(cd "$ROOT" && cargo build --release -p vq-relay)
 
 sudo install -m 755 "$ROOT/target/release/vq-relay" "$BIN"
 
