@@ -65,9 +65,12 @@ gate4_desktop() {
   if [ "$(uname)" = "Darwin" ]; then
     step "gate 4: cargo tauri build (desktop/app)"
     (cd desktop/app && cargo tauri build)
-    step "gate 4: bundle Info.plist has NSBluetoothAlwaysUsageDescription"
-    plutil -extract NSBluetoothAlwaysUsageDescription raw \
-      target/release/bundle/macos/Ventriloquist.app/Contents/Info.plist >/dev/null
+    step "gate 4: bundle Info.plist has no Bluetooth usage description (v3: the relay replaced Bluetooth)"
+    if plutil -extract NSBluetoothAlwaysUsageDescription raw \
+      target/release/bundle/macos/Ventriloquist.app/Contents/Info.plist >/dev/null 2>&1; then
+      echo "error: the bundle still declares NSBluetoothAlwaysUsageDescription" >&2
+      return 1
+    fi
   else
     echo "skipping cargo tauri build (macOS only for agents; Windows is built by the owner)"
   fi
