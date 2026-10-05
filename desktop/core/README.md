@@ -33,7 +33,7 @@ cargo run   -p vq-host-core --features dev-tcp --bin vq-host -- --connect 127.0.
 
 **`dev-tcp` is refused in release builds** (`compile_error!`; D14): run the tests, the E2E harness and `vq-host` in debug builds only, and never enable `dev-tcp` for the app.
 
-`vq-host --relay <url> --owner-token <t>` runs the relay transport instead (the room is kept in `--config-dir`; `http://` URLs are accepted; `start_phone_pairing` on stdin emits `phone_pairing_qr`). `VQ_RELAY_FORCE_LONGPOLL=1` makes the relay transport skip the WebSocket and use only the long-poll fallback (tests). Without `--relay`, `vq-host` is the desktop side of the TCP dev transport, so it is the **client**. Its default config directory is `<OS local config dir>/com.ventriloquist.desktop.dev`, which is separate from the app's. It reconnects with backoff (1, 2, 4, 8, max 15 s) until the phone simulator's server is up. Set `VQ_LOG=1` to get diagnostics on stderr. It stops on SIGINT or SIGTERM.
+`vq-host --relay <url> [--owner-token-file <file>]` (or env `VQ_RELAY_OWNER_TOKEN`; `--owner-token <t>` also works but is visible in `ps`) runs the relay transport instead (the room is kept in `--config-dir`; `http://` is accepted only for loopback hosts; `start_phone_pairing` on stdin emits `phone_pairing_qr`). `VQ_RELAY_FORCE_LONGPOLL=1` makes the relay transport skip the WebSocket and use only the long-poll fallback (tests). Without `--relay`, `vq-host` is the desktop side of the TCP dev transport, so it is the **client**. Its default config directory is `<OS local config dir>/com.ventriloquist.desktop.dev`, which is separate from the app's. It reconnects with backoff (1, 2, 4, 8, max 15 s) until the phone simulator's server is up. Set `VQ_LOG=1` to get diagnostics on stderr. It stops on SIGINT or SIGTERM.
 
 ## `vq-host` stdout format (stable; the M4 E2E test parses it)
 
@@ -64,7 +64,7 @@ Events:
 | `message_rejected` | `peer`, `code` (vq-protocol error code, e.g. `plaintext_not_allowed`, `text_too_long`) |
 | `log_warning` / `storage_warning` | `message` |
 | `log_recovered` | (none): every entry that failed to log has now been written |
-| `relay_status` | `status`: `{link, reason, detail}`. `link` is `idle` (no relay: the TCP dev transport), `connecting`, `websocket`, `fallback` (HTTPS long-poll) or `unreachable`; then `reason` is one of `dns`, `proxy_auth_required`, `proxy_blocked`, `tls_untrusted`, `owner_token_rejected`, `room_conflict`, `other`. `detail` is a short technical text without secrets. Emitted on change only. |
+| `relay_status` | `status`: `{link, reason, detail}`. `link` is `idle` (no relay: the TCP dev transport), `connecting`, `websocket`, `fallback` (HTTPS long-poll) or `unreachable`; then `reason` is one of `dns`, `proxy_auth_required`, `proxy_auth_unsupported` (the proxy offers only NTLM/Kerberos sign-in), `proxy_blocked`, `tls_untrusted`, `owner_token_rejected`, `room_conflict`, `other`. `detail` is a short technical text without secrets. Emitted on change only. |
 | `phone_pairing_qr` | `uri` (the `vq://pair?…` payload, **contains the room secret: render it, never log it**), `expires_in_secs` (120). Emitted for `start_phone_pairing`, then again every 120 s while the dialog is open (and at once if the code was used up by wrong confirmations). The `c` field of the URI is the active v1 pairing code. |
 | `phone_pairing_ended` | `reason` (`paired`: a phone paired with the QR's code; `closed`: `stop_phone_pairing`) |
 | `config_changed` | `log_dir`, `name`, `persisted` (bool) |

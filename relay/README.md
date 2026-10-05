@@ -123,7 +123,7 @@ Tests: `cargo test -p vq-relay` (starts the server on ephemeral ports; one test 
    ```
    scripts/install-relay-macos.sh
    ```
-   This builds the release binary if needed, installs it to `/usr/local/bin/vq-relay` (uses `sudo`), creates `~/Library/Application Support/vq-relay/owner-token` (mode 0600, generated with `openssl rand -base64 32` unless it exists; `--token-file FILE` uses yours), installs `relay/deploy/com.jbrasfield.vq-relay.plist` into `~/Library/LaunchAgents`, and loads it with `launchctl bootstrap gui/$(id -u)`. The service runs at load, restarts if it exits, and logs to `~/Library/Logs/vq-relay.log`. The script prints the owner token; paste it into the desktop app (Settings > Relay).
+   This builds the release binary, installs it to `~/.local/bin/vq-relay` (no `sudo`, so updates work over SSH), creates `~/Library/Application Support/vq-relay/owner-token` (mode 0600, generated with `openssl rand -base64 32` unless it exists; `--token-file FILE` uses yours), installs `relay/deploy/com.jbrasfield.vq-relay.plist` into `~/Library/LaunchAgents`, and loads it with `launchctl bootstrap gui/$(id -u)`. The service runs at load, restarts if it exits, and logs to `~/Library/Logs/vq-relay.log`. The script prints the owner token; paste it into the desktop app (Settings > Relay).
    Because it is a user agent, the Mac mini must be logged in (enable automatic login), or convert the plist to a LaunchDaemon.
 2. **Cloudflare Tunnel** (no port-forwarding; the zone is already on Cloudflare):
    ```

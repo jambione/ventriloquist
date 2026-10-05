@@ -157,7 +157,9 @@ extension PhoneEngine: RelayPeerEvents {}
         sendChain = Task { [weak self] in
             await prev?.value
             guard !Task.isCancelled, let net = self?.owner.net else { return }
-            _ = try? await net.longPollSend(url: u, headers: h, body: body)
+            let result = try? await net.longPollSend(url: u, headers: h, body: body)
+            guard !Task.isCancelled, let self else { return }
+            if result?.status != 200 { self.feed(.sendFailed(session: session, status: result?.status)) }
         }
     }
 }
@@ -226,13 +228,20 @@ public final class RelayPhoneTransport: PhoneTransport, @unchecked Sendable {  /
         MainActor.assumeIsolated { room(for: peer)?.feed(.send(Data(frame))) }
     }
 
-    /// The engine dropped the connection: cycle the room so the desktop sees a fresh phone.
+    /// The engine dropped the connection: close the room's link and
+    /// reconnect after a hold-off (5 s, doubling to 5 min, reset when a
+    /// session becomes Secure), so a drop that repeats on every reconnect
+    /// (unknown_peer, key pin mismatch) cannot become a hot loop. Never
+    /// reconnects while the app is paused.
     public func disconnect(_ peer: PeerID) {
         MainActor.assumeIsolated {
             guard let r = room(for: peer), !r.stopped else { return }
-            r.feed(.disconnectRequested)
-            r.feed(.connectRequested)
+            r.feed(.engineDropped)
         }
+    }
+
+    public func sessionBecameSecure(_ peer: PeerID) {
+        MainActor.assumeIsolated { room(for: peer)?.feed(.sessionSecure) }
     }
 
     public func mtu(for peer: PeerID) -> Int { Self.mtu }
@@ -348,8 +357,16 @@ extension RelayPhoneTransport: RelayRoomControl {
         }
     }
 
+    /// The close code (4003 = room deleted) must win over `didCompleteWithError`.
+    nonisolated func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
+                                didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        let code = closeCode.rawValue
+        Task { @MainActor [weak self] in self?.finish(code > 0 ? .closed(code: code) : .failed("closed")) }
+    }
+
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         let why = error?.localizedDescription ?? "closed"
-        Task { @MainActor [weak self] in self?.finish(.failed(why)) }
+        let code = (task as? URLSessionWebSocketTask)?.closeCode.rawValue ?? 0
+        Task { @MainActor [weak self] in self?.finish(code > 0 ? .closed(code: code) : .failed(why)) }
     }
 }

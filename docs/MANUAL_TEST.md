@@ -148,6 +148,14 @@ MAC verification, replay protection, encryption and plaintext rejection are cove
 
 ---
 
+## Relay device checks (v3 R5)
+
+- [ ] **Windows, corporate network, integrated proxy auth.** If the proxy answers 407 with only NTLM/Negotiate, Settings → Relay shows "proxy requires Windows sign-in (NTLM/Kerberos) — not supported yet" (`proxy_auth_unsupported`). Record whether the work PC's proxy needs it (then WinHTTP or SSPI support is needed).
+- [ ] **Windows WPAD/PAC.** A PAC result `PROXY a:80; DIRECT` falls back to DIRECT; WPAD auto-detect does not stall each reconnect.
+- [ ] **iOS close codes.** Press "Reset relay room" on the desktop while the phone is connected over a WebSocket: the phone stops that room (4003) instead of retrying every 30 s. Repeat with the phone offline, then reopen: it gets 401/404 on its poll and stops the room.
+- [ ] **Forget a phone on the desktop.** The phone retries with a growing hold-off (5 s, 10 s, ... up to 5 min), not in a loop.
+- [ ] **Desktop secret.** After upgrading an existing desktop, the first connection with the owner token adds the desktop secret to the room; without an owner token a pre-upgrade room refuses the desktop (401) until the owner token is set.
+
 ## Notes
 
 - All checkboxes must pass before release. If any fail, file findings with file/line references and halt.

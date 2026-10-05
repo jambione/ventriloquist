@@ -1002,6 +1002,7 @@ public final class PhoneEngine {
         let rival = connections.values.contains { $0 !== c && $0.deviceId == h.deviceId && $0.isSecure }
         c.nextPingAt = rival ? clock.now : clock.now + Self.pingInterval
         log?("secure \(c.peer)")
+        transport.sessionBecameSecure(c.peer)
         if h.deviceId == activeHostId { refreshActive() }
         return true
     }

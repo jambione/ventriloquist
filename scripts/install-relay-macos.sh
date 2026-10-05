@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Install vq-relay on macOS as a launchd user agent (run as the owner, no sudo
-# needed except for writing /usr/local/bin).
+# Install vq-relay on macOS as a launchd user agent (run as the owner; no sudo:
+# the binary goes to ~/.local/bin, so updates also work over a plain SSH session).
 #
 #   scripts/install-relay-macos.sh [--token-file FILE]
 #
-# Builds the release binary if needed, installs it to /usr/local/bin/vq-relay,
+# Builds the release binary, installs it to ~/.local/bin/vq-relay,
 # creates the owner-token file (0600; generated unless one exists or is given),
 # installs the launchd plist and loads it with `launchctl bootstrap`.
 set -euo pipefail
@@ -14,7 +14,7 @@ LABEL=com.jbrasfield.vq-relay
 DATA_DIR="$HOME/Library/Application Support/vq-relay"
 TOKEN_FILE="$DATA_DIR/owner-token"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-BIN=/usr/local/bin/vq-relay
+BIN="$HOME/.local/bin/vq-relay"
 
 if [ "${1:-}" = "--token-file" ]; then SRC_TOKEN="${2:?--token-file needs a path}"; fi
 
@@ -26,7 +26,8 @@ if [ "$(uname)" != "Darwin" ]; then echo "macOS only" >&2; exit 1; fi
 # no-op when nothing changed).
 (cd "$ROOT" && cargo build --release -p vq-relay)
 
-sudo install -m 755 "$ROOT/target/release/vq-relay" "$BIN"
+mkdir -p "$(dirname "$BIN")"
+install -m 755 "$ROOT/target/release/vq-relay" "$BIN"
 
 mkdir -p "$DATA_DIR" "$HOME/Library/Logs" "$HOME/Library/LaunchAgents"
 chmod 700 "$DATA_DIR"

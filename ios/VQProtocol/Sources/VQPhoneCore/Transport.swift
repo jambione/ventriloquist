@@ -32,6 +32,13 @@ public protocol PhoneTransport: AnyObject {
     /// Usable frame size for `peer` (README §2): `maximumUpdateValueLength` on
     /// BLE, 512 on TCP. Values below 20 are raised to 20 by the engine.
     func mtu(for peer: PeerID) -> Int
+    /// A session with `peer` just became Secure (the transport may reset its
+    /// reconnect hold-off). Optional: the default does nothing.
+    func sessionBecameSecure(_ peer: PeerID)
+}
+
+public extension PhoneTransport {
+    func sessionBecameSecure(_ peer: PeerID) {}
 }
 
 /// What the engine needs from a relay transport: start and stop a room.

@@ -5283,6 +5283,8 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "rand 0.8.8",
  "reqwest 0.12.28",
  "serde",
@@ -5292,6 +5294,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.29.0",
+ "tower",
 ]
 
 [[package]]

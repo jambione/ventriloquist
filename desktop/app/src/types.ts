@@ -28,6 +28,7 @@ export type RelayLink = "idle" | "connecting" | "websocket" | "fallback" | "unre
 export type RelayReason =
   | "dns"
   | "proxy_auth_required"
+  | "proxy_auth_unsupported"
   | "proxy_blocked"
   | "tls_untrusted"
   | "owner_token_rejected"

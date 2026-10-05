@@ -295,8 +295,9 @@ host_start() {
     # Commands (start_phone_pairing) go to stdin through a FIFO on fd 6.
     local fifo="$WORK/host-$HOST_N.fifo"
     mkfifo "$fifo"
-    VQ_LOG=1 VQ_RELAY_FORCE_LONGPOLL="$FORCE_LP" "$VQHOST" --relay "http://127.0.0.1:$RELAY_PORT" \
-      --owner-token "$OWNER_TOKEN" --log-dir "$LOG_DIR" --config-dir "$HOST_CFG" \
+    VQ_LOG=1 VQ_RELAY_FORCE_LONGPOLL="$FORCE_LP" VQ_RELAY_OWNER_TOKEN="$OWNER_TOKEN" \
+      "$VQHOST" --relay "http://127.0.0.1:$RELAY_PORT" \
+      --log-dir "$LOG_DIR" --config-dir "$HOST_CFG" \
       --name "E2E Desk" <"$fifo" >"$HOST_EV" 2>"$WORK/host-$HOST_N.err" 3>&- 4>&- 5>&- &
     HOST_PID=$!
     exec 6>"$fifo"

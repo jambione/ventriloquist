@@ -6,7 +6,7 @@
   <string>com.jbrasfield.vq-relay</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/bin/vq-relay</string>
+    <string>__HOME__/.local/bin/vq-relay</string>
     <string>--listen</string>
     <string>127.0.0.1:8787</string>
     <string>--data-dir</string>

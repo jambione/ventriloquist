@@ -101,6 +101,7 @@ describe("connectionStatus", () => {
     const cases: [RelayReason, string][] = [
       ["dns", "Relay unreachable — DNS lookup failed"],
       ["proxy_auth_required", "Relay unreachable — proxy needs credentials"],
+      ["proxy_auth_unsupported", "Relay unreachable — proxy requires Windows sign-in (NTLM/Kerberos) — not supported yet"],
       ["proxy_blocked", "Relay unreachable — proxy blocked"],
       ["tls_untrusted", "Relay unreachable — certificate not trusted"],
       ["owner_token_rejected", "Relay unreachable — owner token rejected"],
@@ -164,7 +165,7 @@ describe("relay texts", () => {
   });
 
   it("every reason has a text and a hint", () => {
-    for (const r of [null, "dns", "proxy_auth_required", "proxy_blocked", "tls_untrusted", "owner_token_rejected", "room_conflict", "other"] as (RelayReason | null)[]) {
+    for (const r of [null, "dns", "proxy_auth_required", "proxy_auth_unsupported", "proxy_blocked", "tls_untrusted", "owner_token_rejected", "room_conflict", "other"] as (RelayReason | null)[]) {
       expect(relayReasonText(r).length).toBeGreaterThan(3);
       expect(relayReasonHint(r).length).toBeGreaterThan(10);
     }

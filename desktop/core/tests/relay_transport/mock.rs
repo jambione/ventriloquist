@@ -43,6 +43,8 @@ struct Conn {
 #[derive(Default)]
 struct Room {
     hash: String,
+    /// X1: hash of the desktop secret (`role=desktop` authenticates with it).
+    desktop_hash: Option<String>,
     conns: Vec<Conn>,
     sessions: HashMap<String, PollSession>,
 }
@@ -114,11 +116,15 @@ impl Mock {
     }
 
     /// Create a room directly (with the hash of `secret`).
-    pub fn create_room(&self, id: &str, secret: &str) {
+    pub fn create_room(&self, id: &str, secret: &str, desktop_secret: Option<&str>) {
         self.0.rooms.lock().unwrap().insert(
             id.to_owned(),
-            Room { hash: hash_of(secret), ..Room::default() },
+            Room { hash: hash_of(secret), desktop_hash: desktop_secret.map(hash_of), ..Room::default() },
         );
+    }
+
+    pub fn desktop_hash(&self, id: &str) -> Option<String> {
+        self.0.rooms.lock().unwrap().get(id).and_then(|r| r.desktop_hash.clone())
     }
 
     /// Close every desktop connection of the room (a network drop).
@@ -139,11 +145,14 @@ impl Mock {
             .is_some_and(|r| r.conns.iter().any(|c| c.role == "desktop"))
     }
 
-    fn auth(&self, id: &str, h: &HeaderMap) -> Result<(), StatusCode> {
+    /// `role=desktop` needs the desktop secret, `role=phone` the room secret
+    /// (X1). A room without a desktop hash refuses the desktop role.
+    fn auth(&self, id: &str, role: &str, h: &HeaderMap) -> Result<(), StatusCode> {
         let rooms = self.0.rooms.lock().unwrap();
         let room = rooms.get(id).ok_or(StatusCode::NOT_FOUND)?;
-        match bearer(h) {
-            Some(s) if hash_of(&s) == room.hash => Ok(()),
+        let expected = if role == "desktop" { room.desktop_hash.as_deref() } else { Some(room.hash.as_str()) };
+        match (bearer(h), expected) {
+            (Some(s), Some(e)) if !s.is_empty() && hash_of(&s) == e => Ok(()),
             _ => Err(StatusCode::UNAUTHORIZED),
         }
     }
@@ -240,12 +249,20 @@ async fn put_room(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let hash = body["secret_hash"].as_str().unwrap_or("").to_owned();
+    let desktop_hash = body["desktop_secret_hash"].as_str().map(str::to_owned);
     let mut rooms = m.0.rooms.lock().unwrap();
-    match rooms.get(&id) {
-        Some(r) if r.hash == hash => StatusCode::OK.into_response(),
+    match rooms.get_mut(&id) {
+        Some(r) if r.hash == hash => match (&r.desktop_hash, desktop_hash) {
+            (Some(have), Some(new)) if *have != new => StatusCode::CONFLICT.into_response(),
+            (None, Some(new)) => {
+                r.desktop_hash = Some(new);
+                StatusCode::OK.into_response()
+            }
+            _ => StatusCode::OK.into_response(),
+        },
         Some(_) => StatusCode::CONFLICT.into_response(),
         None => {
-            rooms.insert(id, Room { hash, ..Room::default() });
+            rooms.insert(id, Room { hash, desktop_hash, ..Room::default() });
             StatusCode::CREATED.into_response()
         }
     }
@@ -255,7 +272,7 @@ async fn delete_room(State(m): State<Mock>, Path(id): Path<String>, headers: Hea
     if headers.get("x-vq-owner").and_then(|v| v.to_str().ok()) != Some(OWNER) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if let Err(c) = m.auth(&id, &headers) {
+    if let Err(c) = m.auth(&id, "phone", &headers) {
         return c.into_response();
     }
     m.0.rooms.lock().unwrap().remove(&id);
@@ -277,7 +294,7 @@ async fn ws_route(
     if m.0.ws_blocked.load(Ordering::SeqCst) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if let Err(c) = m.auth(&id, &headers) {
+    if let Err(c) = m.auth(&id, &role, &headers) {
         return c.into_response();
     }
     upgrade.on_upgrade(move |sock| ws_conn(m, id, role, sock))
@@ -324,7 +341,7 @@ async fn send_route(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if let Err(c) = m.auth(&id, &headers) {
+    if let Err(c) = m.auth(&id, q.get("role").map_or("", String::as_str), &headers) {
         return c.into_response();
     }
     let (role, session) = (q["role"].clone(), q["session"].clone());
@@ -356,7 +373,7 @@ async fn poll_route(
     Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(c) = m.auth(&id, &headers) {
+    if let Err(c) = m.auth(&id, q.get("role").map_or("", String::as_str), &headers) {
         return c.into_response();
     }
     let (role, session) = (q["role"].clone(), q["session"].clone());
@@ -395,6 +412,8 @@ async fn poll_route(
 pub enum ProxyMode {
     Allow,
     Deny407,
+    /// 407 offering only NTLM/Negotiate.
+    Deny407Ntlm,
     Deny403,
 }
 
@@ -437,6 +456,11 @@ pub async fn start_proxy(mode: ProxyMode) -> Proxy {
                     ProxyMode::Deny407 => {
                         let _ = client
                             .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=x\r\ncontent-length: 0\r\n\r\n")
+                            .await;
+                    }
+                    ProxyMode::Deny407Ntlm => {
+                        let _ = client
+                            .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Negotiate\r\nProxy-Authenticate: NTLM\r\ncontent-length: 0\r\n\r\n")
                             .await;
                     }
                     ProxyMode::Deny403 => {

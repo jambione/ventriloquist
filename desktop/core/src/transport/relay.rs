@@ -3,7 +3,8 @@
 //! The desktop makes **outbound** connections only:
 //!
 //! 1. **WebSocket first** (`GET /v1/rooms/{room}/ws?role=desktop`, header
-//!    `Authorization: Bearer <room_secret>`). TLS comes from the **OS
+//!    `Authorization: Bearer <desktop_secret>`; phones use the room secret,
+//!    the desktop secret is never in the QR code). TLS comes from the **OS
 //!    certificate store** (`native-tls`: Windows schannel, macOS
 //!    Security.framework), so a TLS-inspecting corporate proxy whose root is
 //!    installed in the OS works. The TCP connection goes through the proxy
@@ -279,7 +280,7 @@ pub fn classify_error_text(text: &str) -> RelayReason {
         "host not found",
     ]) {
         RelayReason::Dns
-    } else if has(&["407", "proxy authentication"]) {
+    } else if has(&["407", "proxy authentication", "proxy authorization"]) {
         RelayReason::ProxyAuthRequired
     } else if has(&["proxy", "tunnel"]) {
         RelayReason::ProxyBlocked
@@ -291,6 +292,29 @@ pub fn classify_error_text(text: &str) -> RelayReason {
 /// Category of a proxy's answer to `CONNECT` (pure): 407 asks for
 /// credentials, anything else that is not 2xx refuses the tunnel.
 pub fn classify_connect_status(code: u16) -> Option<RelayReason> {
+    classify_connect_response(code, &[])
+}
+
+/// Text of the status for a proxy that only offers integrated Windows sign-in.
+pub const PROXY_AUTH_UNSUPPORTED_DETAIL: &str =
+    "proxy requires Windows sign-in (NTLM/Kerberos) — not supported yet";
+
+/// As [`classify_connect_status`], knowing the `Proxy-Authenticate`
+/// challenges of a 407: when it offers only NTLM/Negotiate/Kerberos (no
+/// `Basic`), the reason is [`RelayReason::ProxyAuthUnsupported`].
+pub fn classify_connect_response(code: u16, proxy_authenticate: &[String]) -> Option<RelayReason> {
+    if code == 407 && !proxy_authenticate.is_empty() {
+        let scheme = |c: &String| c.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+        let integrated = |s: &str| matches!(s, "ntlm" | "negotiate" | "kerberos");
+        let schemes: Vec<String> = proxy_authenticate.iter().map(scheme).collect();
+        if schemes.iter().all(|s| integrated(s)) {
+            return Some(RelayReason::ProxyAuthUnsupported);
+        }
+    }
+    classify_connect_status_plain(code)
+}
+
+fn classify_connect_status_plain(code: u16) -> Option<RelayReason> {
     match code {
         200..=299 => None,
         407 => Some(RelayReason::ProxyAuthRequired),
@@ -590,7 +614,10 @@ impl Net {
     /// `PUT /v1/rooms/{id}` with the owner token.
     async fn ensure_room(&self, room: &RoomSettings, owner: &str, entries: &[ProxyEntry]) -> Result<(), Failure> {
         let url = endpoint(&room.url, &format!("/rooms/{}", room.room_id));
-        let body = serde_json::json!({ "secret_hash": room.secret_hash() });
+        let body = serde_json::json!({
+            "secret_hash": room.secret_hash(),
+            "desktop_secret_hash": room.desktop_secret_hash(),
+        });
         let (resp, _) = self
             .http(entries, self.timing.connect_timeout, |c| {
                 c.put(&url).header("X-VQ-Owner", owner).json(&body)
@@ -696,7 +723,7 @@ impl Net {
         let tls = url.scheme() == "wss";
         let host = url.host_str().unwrap_or_default().to_owned();
         let port = url.port_or_known_default().unwrap_or(if tls { 443 } else { 80 });
-        let target = WsTarget { url: ws_url, host, port, tls, has_owner };
+        let target = WsTarget { url: ws_url, host, port, tls, has_owner, role: role.to_owned() };
         let mut last = Failure::new(RelayReason::Other, "no route to the relay");
         for entry in entries {
             match self.ws_connect_via(entry, &target, room).await {
@@ -713,7 +740,7 @@ impl Net {
         target: &WsTarget,
         room: &RoomSettings,
     ) -> Result<WebSocketStream<BoxIo>, Failure> {
-        let WsTarget { url: ws_url, host, port, tls, has_owner } = target;
+        let WsTarget { url: ws_url, host, port, tls, has_owner, .. } = target;
         let (host, port, tls, has_owner) = (host.as_str(), *port, *tls, *has_owner);
         let tcp = self.tunnel(entry, host, port).await?;
         let io: BoxIo = if tls {
@@ -737,7 +764,8 @@ impl Net {
             .as_str()
             .into_client_request()
             .map_err(|e| Failure::new(RelayReason::Other, format!("bad WebSocket request: {e}")))?;
-        let auth = HeaderValue::from_str(&format!("Bearer {}", room.room_secret.as_str()))
+        let secret = if target.role == "desktop" { &room.desktop_secret } else { &room.room_secret };
+        let auth = HeaderValue::from_str(&format!("Bearer {}", secret.as_str()))
             .map_err(|_| Failure::new(RelayReason::Other, "the room secret is not a valid header value"))?;
         req.headers_mut().insert("Authorization", auth);
         let handshake = tokio::time::timeout(self.timing.connect_timeout, tokio_tungstenite::client_async(req, io))
@@ -763,6 +791,7 @@ struct WsTarget {
     port: u16,
     tls: bool,
     has_owner: bool,
+    role: String,
 }
 
 /// Send `CONNECT host:port` and read the answer headers.
@@ -804,8 +833,19 @@ async fn http_connect(
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| Failure::new(RelayReason::ProxyBlocked, "the proxy's answer is not HTTP"))?;
-    match classify_connect_status(status) {
+    let challenges: Vec<String> = text
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let (k, v) = l.split_once(':')?;
+            k.trim().eq_ignore_ascii_case("proxy-authenticate").then(|| v.trim().to_owned())
+        })
+        .collect();
+    match classify_connect_response(status, &challenges) {
         None => Ok(()),
+        Some(RelayReason::ProxyAuthUnsupported) => {
+            Err(Failure::new(RelayReason::ProxyAuthUnsupported, PROXY_AUTH_UNSUPPORTED_DETAIL))
+        }
         Some(reason) => Err(Failure::new(reason, format!("the proxy answered CONNECT with HTTP {status}"))),
     }
 }
@@ -976,8 +1016,46 @@ enum SessionEnd {
     Shutdown,
     /// A [`Control`] arrived.
     Control(Control),
+    /// The long-poll session found the WebSocket usable again (the probe
+    /// succeeded); the caller continues on it.
+    Upgrade(WebSocketStream<BoxIo>),
     /// The link ended.
     Ended { lasted: Duration, reason: String, failure: Option<Failure> },
+}
+
+/// Run one WebSocket link: report it, serve it, and update the mode policy.
+/// `Err` when the host went away (the transport stops).
+async fn run_ws(
+    ws: WebSocketStream<BoxIo>,
+    timing: &Timing,
+    mode: &mut ModePolicy,
+    status: &mut StatusSink,
+    cmds: &mut mpsc::UnboundedReceiver<TransportCommand>,
+    control: &mut mpsc::UnboundedReceiver<Control>,
+    events: &mpsc::Sender<TransportEvent>,
+) -> Result<SessionEnd, ()> {
+    if !status.set(RelayStatus::of(RelayLink::Websocket)).await {
+        return Err(());
+    }
+    let started = Instant::now();
+    let end = ws_session(ws, timing, cmds, control, events, started).await;
+    if let SessionEnd::Ended { lasted, .. } = &end {
+        if mode.websocket_ended(Instant::now(), *lasted) {
+            log::info!("relay: the WebSocket keeps dropping; using long-poll");
+        }
+    }
+    Ok(end)
+}
+
+/// How informative a failure category is: the long-poll and WebSocket
+/// failures are merged by keeping the more specific one.
+fn specificity(r: RelayReason) -> u8 {
+    match r {
+        RelayReason::Other => 0,
+        RelayReason::ProxyBlocked => 1,
+        RelayReason::ProxyAuthUnsupported => 3,
+        _ => 2,
+    }
 }
 
 async fn run(
@@ -1043,16 +1121,11 @@ async fn run(
         if mode.should_try_websocket(Instant::now()) {
             match shared.net.ws_connect(&room, "desktop", &entries, owner.is_some()).await {
                 Ok(ws) => {
-                    if !status.set(RelayStatus::of(RelayLink::Websocket)).await {
+                    let Ok(end) =
+                        run_ws(ws, &timing, &mut mode, &mut status, &mut cmds, &mut control, &events).await
+                    else {
                         return;
-                    }
-                    let started = Instant::now();
-                    let end = ws_session(ws, &timing, &mut cmds, &mut control, &events, started).await;
-                    if let SessionEnd::Ended { lasted, .. } = &end {
-                        if mode.websocket_ended(Instant::now(), *lasted) {
-                            log::info!("relay: the WebSocket keeps dropping; using long-poll");
-                        }
-                    }
+                    };
                     result = Some(end);
                 }
                 Err(f) => {
@@ -1072,10 +1145,18 @@ async fn run(
                 let e = poll_session(&shared.net, &room, &entries, &mut cmds, &mut control, &events, &mut status, deadline, owner.is_some())
                     .await;
                 match e {
+                    SessionEnd::Upgrade(ws) => {
+                        let Ok(end) =
+                            run_ws(ws, &timing, &mut mode, &mut status, &mut cmds, &mut control, &events).await
+                        else {
+                            return;
+                        };
+                        end
+                    }
                     SessionEnd::Ended { lasted, reason, failure: Some(f) } if lasted.is_zero() => {
                         // Never connected: the more specific failure wins.
                         let f = match ws_failure {
-                            Some(w) if f.reason == RelayReason::Other && w.reason != RelayReason::Other => w,
+                            Some(w) if specificity(w.reason) > specificity(f.reason) => w,
                             _ => f,
                         };
                         SessionEnd::Ended { lasted, reason, failure: Some(f) }
@@ -1086,6 +1167,8 @@ async fn run(
         };
         match end {
             SessionEnd::Shutdown => return,
+            // Handled where the long-poll session ends; cannot reach here.
+            SessionEnd::Upgrade(_) => wait = Duration::ZERO,
             SessionEnd::Control(k) => {
                 handle_control(&shared, k, &mut failures, &mut ensured, &mut mode);
                 wait = Duration::ZERO;
@@ -1241,6 +1324,9 @@ async fn ws_session(
 // ------------------------------------------------------ long-poll link
 
 /// Messages from the poller task.
+type WsProbe<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<WebSocketStream<BoxIo>, Failure>> + Send + 'a>>;
+
 enum Polled {
     /// First answer: the session exists.
     Up,
@@ -1275,7 +1361,7 @@ async fn poll_session(
     };
     let session = random_session_id();
     let base = endpoint(&room.url, &format!("/rooms/{}", room.room_id));
-    let secret = room.room_secret.clone();
+    let secret = room.desktop_secret.clone();
     let (ptx, mut prx) = mpsc::channel::<Polled>(16);
     let poller: JoinHandle<()> = {
         let (client, base, session, secret) = (client.clone(), base.clone(), session.clone(), secret.clone());
@@ -1320,9 +1406,9 @@ async fn poll_session(
 
     let mut pump = Pump::new(events.clone());
     let mut connected_at: Option<Instant> = None;
-    let started = Instant::now();
     let retry = tokio::time::sleep_until(deadline.into());
     tokio::pin!(retry);
+    let mut probe: Option<WsProbe<'_>> = None;
     let send_url = format!("{base}/send?role=desktop&session={session}");
 
     let post = |bodies: Vec<String>| {
@@ -1410,15 +1496,24 @@ async fn poll_session(
                     None => SessionEnd::Shutdown,
                 };
             }
-            _ = &mut retry => {
-                // Time to retry the WebSocket: end this session cleanly.
-                poller.abort();
-                pump.close_all("retrying the WebSocket").await;
-                return SessionEnd::Ended {
-                    lasted: started.elapsed(),
-                    reason: "retrying the WebSocket".into(),
-                    failure: None,
-                };
+            _ = &mut retry, if probe.is_none() => {
+                // Time to retry the WebSocket: probe it while this session
+                // (and its phones) stays up; switch only if it connects.
+                probe = Some(Box::pin(net.ws_connect(room, "desktop", entries, has_owner)));
+            }
+            r = async { probe.as_mut().expect("guarded").await }, if probe.is_some() => {
+                probe = None;
+                match r {
+                    Ok(ws) => {
+                        poller.abort();
+                        pump.close_all("switching to the WebSocket").await;
+                        return SessionEnd::Upgrade(ws);
+                    }
+                    Err(f) => {
+                        log::info!("relay: the WebSocket is still unusable ({}); staying on long-poll", f.detail);
+                        retry.as_mut().reset((Instant::now() + t.ws_retry_every).into());
+                    }
+                }
             }
         }
     };

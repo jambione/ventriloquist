@@ -141,6 +141,14 @@ public enum RelayClientInput {
     case pollFailed(status: Int?)
     /// Send one frame to the desktop.
     case send(Data)
+    /// A `POST send` failed (HTTP status when there was one): the link is not
+    /// deliverable, so it is handled like a failed poll.
+    case sendFailed(session: String, status: Int?)
+    /// The engine dropped the connection (R5 X2): close it and reconnect
+    /// after a hold-off instead of at once.
+    case engineDropped
+    /// A session with the desktop became Secure: reset the hold-off.
+    case sessionSecure
     case tick
 }
 
@@ -162,7 +170,7 @@ public enum RelayClientAction: Equatable, Sendable {
 
 public struct RelayClientState: Sendable {
     public enum Mode: Equatable, Sendable {
-        case idle, connectingWS, wsOpen, polling, retryingWS, retryingPoll, backgrounded, stopped
+        case idle, connectingWS, wsOpen, polling, retryingWS, retryingPoll, engineBackoff, backgrounded, stopped
     }
 
     public private(set) var mode: Mode = .idle
@@ -170,10 +178,14 @@ public struct RelayClientState: Sendable {
     public private(set) var cursor = 0
     public private(set) var peerPresent = false
     public private(set) var backoff = ReconnectBackoff()
+    public private(set) var dropBackoff = EngineDropBackoff()
     var openedAt = 0.0
     var retryAt: Double?
     var probeAt: Double?
     var probing = false
+    /// Frames sent while the poll was being retried (R5 X2), oldest first.
+    var pendingSends: [Data] = []
+    static let maxPendingSends = 256
     let makeSession: @Sendable () -> String
     /// Never open a WebSocket: use the long-poll fallback from the start
     /// (`VQ_RELAY_FORCE_LONGPOLL`, for tests and restrictive networks).
@@ -192,13 +204,7 @@ public struct RelayClientState: Sendable {
         case .connectRequested:
             guard mode == .idle || mode == .backgrounded else { return [] }
             backoff.reset()
-            if forceLongPoll {
-                mode = .polling; probing = false; probeAt = nil
-                startFreshSession()
-                return [.startLongPoll(session: session!, cursor: 0)]
-            }
-            mode = .connectingWS
-            return [.openWebSocket]
+            return connect()
         case .disconnectRequested: return shutdown(.idle)
         case .backgrounded: return shutdown(.backgrounded)
         case .wsOpened:
@@ -220,8 +226,33 @@ public struct RelayClientState: Sendable {
             switch mode {
             case .wsOpen: return [.sendWS(RelayCodec.encodeFrame(d))]
             case .polling: return session.map { [.sendPoll(session: $0, frames: [d])] } ?? []
+            case .retryingPoll:
+                // The poll is being retried on the same session: keep the
+                // frame (bounded) for when it works again.
+                if peerPresent {
+                    if pendingSends.count >= Self.maxPendingSends { pendingSends.removeFirst() }
+                    pendingSends.append(d)
+                }
+                return []
             default: return []
             }
+        case .sendFailed(let s, let status):
+            guard mode == .polling, s == session else { return [] }
+            return sendFailed(status, now: now)
+        case .engineDropped:
+            switch mode {
+            case .idle, .backgrounded, .stopped, .engineBackoff: return []
+            default: break
+            }
+            // The engine already forgot the connection: no `peerDisconnected`.
+            peerPresent = false
+            let d = dropBackoff.nextDelay()
+            mode = .engineBackoff; session = nil; cursor = 0; probing = false; probeAt = nil
+            retryAt = now + d
+            return [.closeAll, .scheduleRetry(after: d)]
+        case .sessionSecure:
+            dropBackoff.reset()
+            return []
         case .pollResponse(let r): return pollResponse(r, now: now)
         case .pollFailed(let status): return pollFailed(status, now: now)
         case .tick: return tick(now: now)
@@ -230,7 +261,18 @@ public struct RelayClientState: Sendable {
 
     // MARK: pieces
 
+    private mutating func connect() -> [RelayClientAction] {
+        if forceLongPoll {
+            mode = .polling; probing = false; probeAt = nil
+            startFreshSession()
+            return [.startLongPoll(session: session!, cursor: 0)]
+        }
+        mode = .connectingWS
+        return [.openWebSocket]
+    }
+
     private mutating func dropPeer() -> [RelayClientAction] {
+        pendingSends = []
         guard peerPresent else { return [] }
         peerPresent = false
         return [.peerDisconnected]
@@ -304,6 +346,12 @@ public struct RelayClientState: Sendable {
         var out: [RelayClientAction] = []
         for (i, e) in r.events.enumerated() where first + i > cursor { out += apply(e) }
         cursor = max(cursor, r.cursor)
+        if r.closed == nil, peerPresent, !pendingSends.isEmpty {
+            // The poll works again: deliver what was sent meanwhile.
+            let frames = pendingSends
+            pendingSends = []
+            out.append(.sendPoll(session: session, frames: frames))
+        }
         if let closed = r.closed {
             if Self.isDeleted(closed.code) { return out + stop() }
             out += dropPeer()
@@ -322,9 +370,24 @@ public struct RelayClientState: Sendable {
             startFreshSession()
             return a + [.startLongPoll(session: session!, cursor: 0)]
         }
+        if status == 401 || status == 404 { return stop() }   // the room is gone (reset or deleted)
+        // Same session, same cursor: frames sent meanwhile wait in
+        // `pendingSends` and go out once a poll succeeds again.
         let d = backoff.nextDelay()
         mode = .retryingPoll; retryAt = now + d
         return [.scheduleRetry(after: d)]
+    }
+
+    /// A `POST send` failed: its frame is lost, so report the desktop gone
+    /// (the engine re-sends everything on reconnect) and start over on a
+    /// fresh session, whose first event is the presence snapshot.
+    private mutating func sendFailed(_ status: Int?, now: Double) -> [RelayClientAction] {
+        if status == 401 || status == 404 { return [.cancelLongPoll] + stop() }
+        let a = dropPeer()
+        startFreshSession()
+        let d = backoff.nextDelay()
+        mode = .retryingPoll; retryAt = now + d
+        return [.cancelLongPoll] + a + [.scheduleRetry(after: d)]
     }
 
     private mutating func tick(now: Double) -> [RelayClientAction] {
@@ -333,6 +396,10 @@ public struct RelayClientState: Sendable {
             guard let t = retryAt, now >= t else { return [] }
             retryAt = nil; mode = .connectingWS
             return [.openWebSocket]
+        case .engineBackoff:
+            guard let t = retryAt, now >= t else { return [] }
+            retryAt = nil
+            return connect()
         case .retryingPoll:
             guard let t = retryAt, now >= t, let session else { return [] }
             retryAt = nil; mode = .polling

@@ -3,7 +3,7 @@
 //! this crate). Reads optional JSON commands, one per line, from stdin.
 //!
 //! ```text
-//! vq-host [--connect HOST:PORT | --relay URL --owner-token TOKEN]
+//! vq-host [--connect HOST:PORT | --relay URL [--owner-token-file FILE]]
 //!         [--log-dir DIR] [--config-dir DIR] [--name NAME]
 //! ```
 
@@ -21,10 +21,11 @@ use vq_host_core::transport::Transport;
 use vq_host_core::{spawn_host, CoreOptions, HostCommand, SystemClock};
 
 const USAGE: &str =
-    "usage: vq-host [--connect HOST:PORT | --relay URL --owner-token TOKEN] [--log-dir DIR] [--config-dir DIR] [--name NAME]\n\
+    "usage: vq-host [--connect HOST:PORT | --relay URL [--owner-token-file FILE]] [--log-dir DIR] [--config-dir DIR] [--name NAME]\n\
   --connect     phone simulator address (default 127.0.0.1:47800)\n\
   --relay       use the relay transport at URL (http:// allowed for loopback); room kept in --config-dir\n\
-  --owner-token owner token for creating the room on the relay (with --relay)\n\
+  --owner-token-file file holding the owner token for creating the room (with --relay); or env VQ_RELAY_OWNER_TOKEN.\n\
+                (--owner-token TOKEN also works but is visible in `ps`)\n\
   --log-dir     log directory for this run (default: configured, else ~/Documents/Ventriloquist)\n\
   --config-dir  identity / pairing / config directory\n\
                 (default: <OS local config dir>/com.ventriloquist.desktop.dev, never the app's)\n\
@@ -35,6 +36,7 @@ struct Args {
     connect: String,
     relay: Option<String>,
     owner_token: Option<String>,
+    owner_token_file: Option<PathBuf>,
     log_dir: Option<PathBuf>,
     config_dir: Option<PathBuf>,
     name: Option<String>,
@@ -49,6 +51,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
         connect: format!("127.0.0.1:{}", vq_protocol::TCP_DEFAULT_PORT),
         relay: None,
         owner_token: None,
+        owner_token_file: None,
         log_dir: None,
         config_dir: None,
         name: None,
@@ -60,6 +63,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
             "--connect" => a.connect = value()?,
             "--relay" => a.relay = Some(value()?),
             "--owner-token" => a.owner_token = Some(value()?),
+            "--owner-token-file" => a.owner_token_file = Some(PathBuf::from(value()?)),
             "--log-dir" => a.log_dir = Some(PathBuf::from(value()?)),
             "--config-dir" => a.config_dir = Some(PathBuf::from(value()?)),
             "--name" => a.name = Some(value()?),
@@ -67,10 +71,25 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Args, Strin
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
-    if a.owner_token.is_some() && a.relay.is_none() {
-        return Err("--owner-token needs --relay".to_owned());
+    if (a.owner_token.is_some() || a.owner_token_file.is_some()) && a.relay.is_none() {
+        return Err("--owner-token and --owner-token-file need --relay".to_owned());
+    }
+    if a.owner_token.is_some() && a.owner_token_file.is_some() {
+        return Err("use only one of --owner-token and --owner-token-file".to_owned());
     }
     Ok(a)
+}
+
+/// The owner token: the file, else `--owner-token`, else `VQ_RELAY_OWNER_TOKEN`.
+fn owner_token(flag: &Option<String>, file: Option<&std::path::Path>) -> Result<Option<String>, String> {
+    if let Some(f) = file {
+        let t = std::fs::read_to_string(f).map_err(|e| format!("cannot read {}: {e}", f.display()))?;
+        return Ok(Some(t.trim().to_owned()).filter(|t| !t.is_empty()));
+    }
+    if flag.is_some() {
+        return Ok(flag.clone());
+    }
+    Ok(std::env::var("VQ_RELAY_OWNER_TOKEN").ok().filter(|t| !t.is_empty()))
 }
 
 struct StderrLog;
@@ -120,7 +139,14 @@ async fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             };
-            let opts = RelayOptions { owner_token: args.owner_token, ..RelayOptions::default() };
+            let owner_token = match owner_token(&args.owner_token, args.owner_token_file.as_deref()) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("vq-host: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let opts = RelayOptions { owner_token, ..RelayOptions::default() };
             let (t, _relay_handle) = RelayTransport::new(store.clone(), opts);
             (Box::new(t), Some(store))
         }
@@ -214,6 +240,9 @@ mod tests {
         assert_eq!(a.relay.as_deref(), Some("http://127.0.0.1:1"));
         assert_eq!(a.owner_token.as_deref(), Some("t"));
         assert!(parse(&["--owner-token", "t"]).is_err());
+        let b = parse(&["--relay", "http://127.0.0.1:1", "--owner-token-file", "/x"]).unwrap();
+        assert_eq!(b.owner_token_file.as_deref(), Some(std::path::Path::new("/x")));
+        assert!(parse(&["--relay", "u", "--owner-token", "t", "--owner-token-file", "/x"]).is_err());
         assert!(parse(&["--relay"]).is_err());
         assert!(parse(&["--connect", "x:1"]).unwrap().relay.is_none());
     }

@@ -153,6 +153,9 @@ struct PeerSession {
 struct QrCode {
     code: PairingCode,
     started: Duration,
+    /// Wrong confirmations against this code so far, across every attempt,
+    /// connection and `device_id` (README §7.3: 3 strikes burn the code).
+    failures: u32,
 }
 
 /// All live sessions.
@@ -193,7 +196,7 @@ impl SessionManager {
     /// the phone confirms with the code from the QR automatically.
     pub fn start_qr_pairing(&mut self, clock: &dyn Clock) -> PairingCode {
         let code = PairingCode::generate();
-        self.qr = Some(QrCode { code, started: clock.mono() });
+        self.qr = Some(QrCode { code, started: clock.mono(), failures: 0 });
         code
     }
 
@@ -373,6 +376,12 @@ impl SessionManager {
                     qr,
                 };
                 handle_envelope(peer, s, &envelope, ctx, &mut out);
+            }
+        }
+        // Failures of a QR attempt count against the QR code itself.
+        if let (Some(a), Some(q)) = (s.pairing.as_ref().filter(|a| a.via_qr), self.qr.as_mut()) {
+            if a.code == q.code {
+                q.failures = q.failures.max(a.failures);
             }
         }
         if s.qr_burned {
@@ -828,16 +837,16 @@ fn handle_unsecured(
             // README §7.3: always a new code and nonce_d, failures reset.
             // SPEC_V3 §5: with an active QR the code is the QR's (the phone
             // read it from the QR), and the attempt lives as long as the QR.
-            let (code, created_at, via_qr) = match ctx.qr {
-                Some(q) => (q.code, q.started, true),
-                None => (PairingCode::generate(), now, false),
+            let (code, created_at, via_qr, failures) = match ctx.qr {
+                Some(q) => (q.code, q.started, true, q.failures),
+                None => (PairingCode::generate(), now, false, 0),
             };
             let attempt = PairingAttempt {
                 request: req,
                 challenge: PairChallenge::generate(),
                 code,
                 created_at,
-                failures: 0,
+                failures,
                 via_qr,
             };
             let challenge = attempt.challenge.clone();

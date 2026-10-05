@@ -85,6 +85,8 @@ export function relayReasonText(reason: RelayReason | null): string {
       return "DNS lookup failed";
     case "proxy_auth_required":
       return "proxy needs credentials";
+    case "proxy_auth_unsupported":
+      return "proxy requires Windows sign-in (NTLM/Kerberos) — not supported yet";
     case "proxy_blocked":
       return "proxy blocked";
     case "tls_untrusted":
@@ -106,6 +108,8 @@ export function relayReasonHint(reason: RelayReason | null): string {
       return "The relay's address could not be resolved. Check the relay URL and the network.";
     case "proxy_auth_required":
       return "The proxy asks for credentials, which are not supported (NTLM/Kerberos). Ask IT to allow the relay host without sign-in.";
+    case "proxy_auth_unsupported":
+      return "The proxy only accepts Windows sign-in (NTLM/Kerberos), which Ventriloquist does not support yet. Ask IT to allow the relay host without sign-in, or use a proxy URL with Basic credentials in HTTPS_PROXY.";
     case "proxy_blocked":
       return "The proxy refused the connection to the relay. Ask IT to allow the relay host on port 443.";
     case "tls_untrusted":

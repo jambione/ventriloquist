@@ -73,7 +73,7 @@ async fn rig_with_room(opts: impl FnOnce(&mock::Running) -> RelayOptions, precre
     store.set_url(&mock.url()).unwrap();
     if let Some(other) = precreate {
         let r = store.get();
-        mock.mock.create_room(&r.room_id, other.unwrap_or(&r.room_secret));
+        mock.mock.create_room(&r.room_id, other.unwrap_or(&r.room_secret), Some(&r.desktop_secret));
     }
     let o = opts(&mock);
     let (transport, handle) = RelayTransport::new(store.clone(), o);
@@ -192,6 +192,10 @@ async fn connects_over_websocket_creates_the_room_and_routes_frames() {
     // The room was created with the hash of our secret.
     let (room, secret) = r.room();
     assert_eq!(r.mock.mock.room_hash(&room).unwrap(), vq_host_core::relay_room::secret_hash(&secret));
+    // X1: the relay also learned the desktop secret's hash (never the QR's).
+    let ds = r.store.get();
+    assert_eq!(r.mock.mock.desktop_hash(&room).unwrap(), ds.desktop_secret_hash());
+    assert_ne!(ds.desktop_secret_hash(), ds.secret_hash());
     assert_eq!(r.mock.mock.0.put_calls.load(Ordering::SeqCst), 1);
 
     let mut p = phone(&r).await;
@@ -438,10 +442,33 @@ async fn uses_an_http_connect_tunnel_through_the_proxy() {
     r.stop().await;
 }
 
+/// X1: a room created before desktop secrets existed is upgraded by the
+/// next PUT (valid owner token and room secret), then the desktop connects.
+#[tokio::test]
+async fn a_room_without_a_desktop_hash_is_upgraded_by_the_put() {
+    let mock = mock::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RelayRoomStore::load_or_create(dir.path()).unwrap());
+    store.set_url(&mock.url()).unwrap();
+    let room = store.get();
+    mock.mock.create_room(&room.room_id, &room.room_secret, None);
+    assert!(mock.mock.desktop_hash(&room.room_id).is_none());
+    let o = options(Some(OWNER), fast(), HashMap::new());
+    let (transport, handle) = RelayTransport::new(store.clone(), o);
+    let (cmd, cmd_rx) = mpsc::unbounded_channel();
+    let (ev_tx, ev) = mpsc::channel(256);
+    let task = Box::new(transport).start(cmd_rx, ev_tx);
+    let mut r = Rig { mock, store, handle, cmd, ev, task, _dir: dir };
+    r.link(RelayLink::Websocket).await;
+    assert_eq!(r.mock.mock.desktop_hash(&room.room_id).unwrap(), room.desktop_secret_hash());
+    r.stop().await;
+}
+
 #[tokio::test]
 async fn proxy_refusals_are_categorised() {
     for (mode, reason) in [
         (ProxyMode::Deny407, RelayReason::ProxyAuthRequired),
+        (ProxyMode::Deny407Ntlm, RelayReason::ProxyAuthUnsupported),
         (ProxyMode::Deny403, RelayReason::ProxyBlocked),
     ] {
         let proxy = mock::start_proxy(mode).await;

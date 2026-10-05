@@ -58,6 +58,15 @@ public struct PairingURI: Equatable, Sendable {
         self.name = name
     }
 
+    /// `http://` relays are accepted only on loopback (development): the room
+    /// secret would otherwise travel in clear text.
+    static func isLoopbackHost(_ host: String) -> Bool {
+        let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if h == "localhost" || h == "::1" { return true }
+        let parts = h.split(separator: ".", omittingEmptySubsequences: false)
+        return parts.count == 4 && parts[0] == "127" && parts.allSatisfy { UInt8($0) != nil }
+    }
+
     static func isIdChars(_ s: String) -> Bool {
         s.utf8.allSatisfy { ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x41 && $0 <= 0x5A) || ($0 >= 0x61 && $0 <= 0x7A) || $0 == 0x2D || $0 == 0x5F }
     }
@@ -77,7 +86,8 @@ public struct PairingURI: Equatable, Sendable {
         }
         guard try need("v") == "3" else { throw .unsupportedVersion }
         guard let url = URL(string: try need("r")), let scheme = url.scheme?.lowercased(),
-              scheme == "https" || scheme == "http", url.host?.isEmpty == false
+              let host = url.host, !host.isEmpty,
+              scheme == "https" || (scheme == "http" && isLoopbackHost(host))
         else { throw .invalid("r") }
         let room = try need("room")
         guard (16...64).contains(room.utf8.count), isIdChars(room) else { throw .invalid("room") }

@@ -38,7 +38,7 @@ iPhone app ──wss/https──► relay.jbrasfield.com (Cloudflare edge) ─�
 
   The desktop keeps both in its config dir; the room secret goes in a 0600 file / the per-user store.
 - **Roles in a room.** At most **one desktop** connection; **0..n phone** connections. The relay gives each connection an opaque `conn_id`.
-- **Relay data model.** The relay stores only what it needs to authenticate a room: `room_id → { secret_hash: SHA-256(room_secret), created_at }`. It **never stores or logs frame contents**, and logs no payload sizes beyond aggregate counts.
+- **Relay data model.** The relay stores only what it needs to authenticate a room: `room_id → { secret_hash: SHA-256(room_secret), desktop_secret_hash: SHA-256(desktop_secret), created_at }`. It **never stores or logs frame contents**, and logs no payload sizes beyond aggregate counts.
 - **Above the relay, nothing changes.** Each phone↔desktop link carries the existing vq-protocol: §4.2 framing, the envelope, hello and session establishment, ChaCha20-Poly1305, `utt`/`ack`, pings. The relay sees only ciphertext plus plaintext hello/pairing messages, and those contain no secrets.
 - **MTU.** The framing layer's mtu becomes **8192 bytes** for the relay transport, which keeps long-poll requests small.
 
@@ -48,8 +48,8 @@ iPhone app ──wss/https──► relay.jbrasfield.com (Cloudflare edge) ─�
 
 | Method & path | Who | Purpose |
 |---|---|---|
-| `PUT /rooms/{room_id}` | desktop | Create or claim a room. Header `X-VQ-Owner: <owner_token>`. Body `{ "secret_hash": "<b64url sha256(room_secret)>" }`. **201** created; **200** if it already exists with the same hash; **409** if it exists with a different hash; **401** for a bad owner token |
-| `GET /rooms/{room_id}/ws?role=desktop\|phone` (WebSocket upgrade) | both | Real-time channel. Auth header `Authorization: Bearer <room_secret>` (or the `vq.auth.<secret>` WebSocket subprotocol, for clients that can't set headers) |
+| `PUT /rooms/{room_id}` | desktop | Create or claim a room. Header `X-VQ-Owner: <owner_token>`. Body `{ "secret_hash": "<b64url sha256(room_secret)>", "desktop_secret_hash": "<b64url sha256(desktop_secret)>" }`. **201** created; **200** if it already exists with the same hashes, or if the room has no `desktop_secret_hash` yet and `secret_hash` matches (the desktop hash is added); **409** if `secret_hash` differs or a different `desktop_secret_hash` is already set; **401** for a bad owner token |
+| `GET /rooms/{room_id}/ws?role=desktop\|phone` (WebSocket upgrade) | both | Real-time channel. Auth header `Authorization: Bearer <secret>`: the `desktop_secret` for `role=desktop`, the `room_secret` for `role=phone`; a room without `desktop_secret_hash` refuses `role=desktop` with 401 until the desktop re-PUTs (or the `vq.auth.<secret>` WebSocket subprotocol, for clients that can't set headers) |
 | `POST /rooms/{room_id}/send?role=…&session=…` | both | Long-poll fallback: send one or more frames |
 | `GET /rooms/{room_id}/poll?role=…&session=…&cursor=…` | both | Long-poll fallback: wait up to **25 s** for frames and events |
 | `DELETE /rooms/{room_id}` | desktop | Delete a room (room secret, plus the owner token) |
@@ -138,12 +138,16 @@ The owner token is set in the relay's config (owner-token file on the Mac mini),
 - Tests: Rust integration tests that start the server on an ephemeral port, covering SPEC_V3 §10 gate 1. `tests/e2e` runs `vq-relay` locally (R4).
 
 ## 9. Security
-- The room secret authorizes joining. The owner token authorizes creating rooms. **Frames are E2E-encrypted by the existing session keys**, so the relay can't read or forge utterances.
+- The room secret authorizes joining as a phone; the separate desktop secret (never in the QR) authorizes joining as the desktop, so a leaked QR or a forgotten phone cannot kick the desktop. Forgetting a phone does not revoke its relay access; a leaked QR needs "Reset relay room", which rotates both secrets. The owner token authorizes creating rooms. **Frames are E2E-encrypted by the existing session keys**, so the relay can't read or forge utterances.
 - QR pairing pins the desktop's public key, which removes the v1 accepted MITM risk on the pairing code.
 - Relay hardening:
   - constant-time secret checks;
   - per-IP rate limits on room creation and failed auth;
-  - size and rate limits per connection;
+  - size and rate limits per connection: 96 KiB WebSocket messages enforced by the protocol layer (1009), a bounded outbound queue per connection (256 messages, overflow 4008), `/send` bodies 128 KiB and `PUT` bodies 4 KiB enforced while streaming;
+  - request headers must arrive within 10 s and bodies within 10 s; auth is checked before any body is read;
+  - `CF-Connecting-IP` is trusted only from a loopback TCP peer;
+  - rooms with an empty secret (or its hash) are refused; an empty bearer is 401;
+  - `DELETE` is persisted before 204 (500 and the room stays on failure);
   - **no CORS needed** (native clients only).
 - Anyone who photographs the QR during its 120 s window can pair. The desktop shows "Phone '<name>' paired", and the phone list makes extra phones visible.
 

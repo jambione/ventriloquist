@@ -60,6 +60,9 @@ pub enum RelayReason {
     Dns,
     /// The proxy wants credentials (407); not supported.
     ProxyAuthRequired,
+    /// The proxy wants Windows sign-in (NTLM/Negotiate/Kerberos only), which
+    /// is not supported yet (R5 X2).
+    ProxyAuthUnsupported,
     /// The proxy refused the tunnel (e.g. 403) or could not be reached.
     ProxyBlocked,
     /// The relay's certificate (or the proxy's inspection certificate) is

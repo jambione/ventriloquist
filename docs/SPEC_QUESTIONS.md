@@ -548,3 +548,14 @@ Decisions the spec did not cover. The relay protocol is relay/README.md (a Rust 
 - **Not testable here:** the real Windows proxy/PAC path (WinHTTP, compile-checked only), schannel TLS, a TLS-inspecting proxy (the TLS error categorisation is tested on sample strings), macOS PAC scripts (the CFNetwork call runs, but no proxy is configured in the build environment), the system keychain prompts. The relay is mocked (axum) in `tests/relay_transport`.
 - **Long-poll body.** `POST …/send` sends `{"frames":[{"type":"frame","to":…,"data":…}]}`; `GET …/poll` is a new session at `cursor=0`, cursor advanced to each answer's `cursor`; a 410 ends the session (a new one is started with a new id).
 
+## v3 R5 (review fixes, desktop and phone)
+
+- **Desktop secret (X1).** `relay_desktop_secret` (256 bits, 0600) beside `relay_secret`; `PUT` sends `desktop_secret_hash`; `role=desktop` (WebSocket and long-poll) uses it; never in the QR. A pre-upgrade store gets one generated on load (room id kept). "Reset relay room" rotates both.
+- **QR code failures** accumulate on the QR code itself (across attempts, connections and device ids); 3 burn it and start the v2 lockout.
+- **Proxy.** A 407 offering only NTLM/Negotiate/Kerberos is `proxy_auth_unsupported` ("proxy requires Windows sign-in (NTLM/Kerberos) — not supported yet"). Failures from the WebSocket and the long-poll are merged by keeping the more specific one, so reqwest's "proxy authorization required" no longer hides the WebSocket reason.
+- **http relay URLs** are accepted only for loopback (desktop, vq-host, QR parse on the phone).
+- **WebSocket retry in fallback** probes the WebSocket while the long-poll session (and its phones) stays up; it switches only when the probe connects.
+- **Phone.** Engine-initiated drops reconnect after a hold-off (5 s doubling to 5 min; reset when a session becomes Secure; none while backgrounded). Frames sent while a poll is retried are queued (256, oldest dropped) and sent when polling works; a failed `POST send` reports the desktop gone so the engine re-sends. 401/404 on a poll stops the room. WebSocket close codes are read in `didCloseWith`.
+- **vq-host** reads the owner token from `--owner-token-file` or `VQ_RELAY_OWNER_TOKEN` (`--owner-token` still works).
+- **Not changed.** Finding 11 (forget the room after a failed QR auto-pair): the phone deliberately lets the user retype the code (E2E g). Finding 12 ("Test connection" joins as a phone): kept; it only needs the room secret. Finding 13 (WPAD cache, DIRECT fallback) and 15: device check / documentation only.
+
