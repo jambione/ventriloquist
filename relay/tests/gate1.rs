@@ -25,6 +25,14 @@ fn rnd(n: usize) -> String {
 fn hash_of(secret: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()))
 }
+/// The test desktop secret for a room secret (the relay never sees either).
+fn dsec(room_secret: &str) -> String {
+    format!("desk-{room_secret}")
+}
+/// PUT body for a room with both hashes (SPEC_V3 X1).
+fn put_body(room_secret: &str) -> Value {
+    json!({"secret_hash": hash_of(room_secret), "desktop_secret_hash": hash_of(&dsec(room_secret))})
+}
 fn b64(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
 }
@@ -80,7 +88,15 @@ impl Srv {
     }
     async fn room(&self) -> Room {
         let r = Room { id: rnd(16), secret: rnd(32) };
-        assert_eq!(self.put(&r.id, &hash_of(&r.secret), Some(OWNER), None).await, 201);
+        let resp = self
+            .http
+            .put(self.url(&format!("/v1/rooms/{}", r.id)))
+            .header("X-VQ-Owner", OWNER)
+            .json(&put_body(&r.secret))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 201);
         r
     }
     async fn ws_try(&self, r: &Room, role: &str, how: Auth<'_>) -> Result<Ws, u16> {
@@ -101,13 +117,14 @@ impl Srv {
         }
     }
     async fn ws(&self, r: &Room, role: &str) -> Ws {
-        self.ws_try(r, role, Auth::Bearer(&r.secret)).await.unwrap()
+        let secret = if role == "desktop" { dsec(&r.secret) } else { r.secret.clone() };
+        self.ws_try(r, role, Auth::Bearer(&secret)).await.unwrap()
     }
     async fn send(&self, r: &Room, role: &str, session: &str, body: Value) -> (u16, Value) {
         let resp = self
             .http
             .post(self.url(&format!("/v1/rooms/{}/send?role={role}&session={session}", r.id)))
-            .header("Authorization", format!("Bearer {}", r.secret))
+            .header("Authorization", format!("Bearer {}", if role == "desktop" { dsec(&r.secret) } else { r.secret.clone() }))
             .json(&body)
             .send()
             .await
@@ -119,7 +136,7 @@ impl Srv {
         let resp = self
             .http
             .get(self.url(&format!("/v1/rooms/{}/poll?role={role}&session={session}&cursor={cursor}", r.id)))
-            .header("Authorization", format!("Bearer {}", r.secret))
+            .header("Authorization", format!("Bearer {}", if role == "desktop" { dsec(&r.secret) } else { r.secret.clone() }))
             .send()
             .await
             .unwrap();

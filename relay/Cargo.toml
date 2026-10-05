@@ -24,6 +24,9 @@ base64 = "0.22"
 sha2 = "0.10"
 subtle = "2.6"
 rand = "0.8.5"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "http1", "server"] }
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 tokio-tungstenite = "0.29"

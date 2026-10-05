@@ -13,9 +13,9 @@ use std::path::{Path as FsPath, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -27,6 +27,12 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::mpsc;
+
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use tower::ServiceExt;
 
 use room::*;
 
@@ -61,10 +67,24 @@ impl Config {
 }
 
 const WINDOW: Duration = Duration::from_secs(60);
+/// Time a client has to send its request headers.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time a client has to deliver a request body.
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Largest `/send` request body.
+const SEND_BODY_LIMIT: usize = 128 * 1024;
+/// Largest `PUT /v1/rooms/{id}` request body.
+const PUT_BODY_LIMIT: usize = 4 * 1024;
+/// Base64url SHA-256 of the empty string: a room with an empty secret.
+const EMPTY_SECRET_HASH: &str = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU";
 
 #[derive(Serialize, Deserialize, Clone)]
 struct Meta {
     secret_hash: String,
+    /// Hash of the desktop secret (role=desktop). Absent on rooms created
+    /// before it existed, which refuse role=desktop until the desktop re-PUTs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_secret_hash: Option<String>,
     created_at: u64,
 }
 
@@ -170,13 +190,39 @@ fn valid_id(s: &str, min: usize, max: usize) -> bool {
     (min..=max).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
+/// The client address used for rate limits. `CF-Connecting-IP` is trusted
+/// only when the TCP peer is loopback (the local cloudflared); otherwise the
+/// peer address is used.
 fn client_ip(headers: &HeaderMap, peer: SocketAddr) -> String {
-    headers
-        .get("cf-connecting-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| peer.ip().to_string())
+    if peer.ip().is_loopback() {
+        if let Some(ip) = headers
+            .get("cf-connecting-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && s.len() <= 64)
+        {
+            return ip.to_owned();
+        }
+    }
+    peer.ip().to_string()
+}
+
+fn is_hash(h: &str) -> bool {
+    h.len() == 43 && b64url().decode(h).map(|b| b.len()) == Ok(32) && h != EMPTY_SECRET_HASH
+}
+
+/// Read a request body, enforcing the size limit while streaming and a
+/// deadline for the whole body.
+async fn read_body(headers: &HeaderMap, body: Body, limit: usize) -> Result<Bytes, Response> {
+    let declared = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|n| n > limit as u64) {
+        return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large"));
+    }
+    match tokio::time::timeout(BODY_READ_TIMEOUT, axum::body::to_bytes(body, limit)).await {
+        Err(_) => Err(err(StatusCode::REQUEST_TIMEOUT, "body_timeout")),
+        Ok(Err(_)) => Err(err(StatusCode::PAYLOAD_TOO_LARGE, "body_too_large")),
+        Ok(Ok(b)) => Ok(b),
+    }
 }
 
 fn bearer(headers: &HeaderMap) -> Option<String> {
@@ -212,16 +258,23 @@ impl App {
         eq && !self.cfg.owner_token.is_empty()
     }
 
-    /// Check the room secret. Err is the response to return.
-    fn authorize(&self, id: &str, secret: Option<&str>, ip: &str) -> Result<Arc<RoomCell>, Response> {
+    /// Check the secret for `role` (the desktop secret for role=desktop, the
+    /// room secret for role=phone). Err is the response to return.
+    fn authorize(&self, id: &str, role: Role, secret: Option<&str>, ip: &str) -> Result<Arc<RoomCell>, Response> {
         if self.rate_blocked(ip) {
             return Err(err(StatusCode::TOO_MANY_REQUESTS, "rate_limited"));
         }
         let meta = self.store.lock().unwrap().rooms.get(id).cloned();
         let Some(meta) = meta else { return Err(err(StatusCode::NOT_FOUND, "no_such_room")) };
-        let stored = b64url().decode(&meta.secret_hash).unwrap_or_default();
+        let stored_hash = match role {
+            Role::Phone => Some(meta.secret_hash.as_str()),
+            Role::Desktop => meta.desktop_secret_hash.as_deref(),
+        };
+        let stored = stored_hash.map(|h| b64url().decode(h).unwrap_or_default()).unwrap_or_default();
         let given = sha256(secret.unwrap_or("").as_bytes());
-        let ok = stored.len() == 32 && bool::from(given.as_slice().ct_eq(stored.as_slice()));
+        let ok = stored.len() == 32
+            && bool::from(given.as_slice().ct_eq(stored.as_slice()))
+            && secret.is_some_and(|s| !s.is_empty());
         if !ok {
             self.fail(ip);
             return Err(err(StatusCode::UNAUTHORIZED, "unauthorized"));
@@ -239,6 +292,8 @@ async fn health() -> &'static str {
 #[derive(Deserialize)]
 struct PutBody {
     secret_hash: String,
+    #[serde(default)]
+    desktop_secret_hash: Option<String>,
 }
 
 async fn put_room(
@@ -246,7 +301,7 @@ async fn put_room(
     Path(id): Path<String>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let ip = client_ip(&headers, peer);
     if app.rate_blocked(&ip) || count(&mut app.limiter.lock().unwrap().creates, &ip) >= app.cfg.create_limit {
@@ -259,22 +314,54 @@ async fn put_room(
     if !valid_id(&id, 16, 64) {
         return err(StatusCode::BAD_REQUEST, "bad_room_id");
     }
-    let Ok(PutBody { secret_hash }) = serde_json::from_slice(&body) else {
+    let body = match read_body(&headers, body, PUT_BODY_LIMIT).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let Ok(PutBody { secret_hash, desktop_secret_hash }) = serde_json::from_slice(&body) else {
         return err(StatusCode::BAD_REQUEST, "bad_body");
     };
-    if b64url().decode(&secret_hash).map(|b| b.len()) != Ok(32) || secret_hash.len() != 43 {
+    if !is_hash(&secret_hash) {
         return err(StatusCode::BAD_REQUEST, "bad_secret_hash");
     }
+    if desktop_secret_hash.as_deref().is_some_and(|h| !is_hash(h)) {
+        return err(StatusCode::BAD_REQUEST, "bad_desktop_secret_hash");
+    }
     let mut store = app.store.lock().unwrap();
-    if let Some(m) = store.rooms.get(&id) {
+    if let Some(m) = store.rooms.get_mut(&id) {
         let same: bool = m.secret_hash.as_bytes().ct_eq(secret_hash.as_bytes()).into();
-        return if same { StatusCode::OK.into_response() } else { err(StatusCode::CONFLICT, "hash_mismatch") };
+        if !same {
+            return err(StatusCode::CONFLICT, "hash_mismatch");
+        }
+        let Some(given) = desktop_secret_hash else { return StatusCode::OK.into_response() };
+        return match m.desktop_secret_hash.clone() {
+            Some(cur) => {
+                let same: bool = cur.as_bytes().ct_eq(given.as_bytes()).into();
+                if same {
+                    StatusCode::OK.into_response()
+                } else {
+                    err(StatusCode::CONFLICT, "desktop_hash_mismatch")
+                }
+            }
+            None => {
+                // Migration: a room created before the desktop secret existed.
+                m.desktop_secret_hash = Some(given);
+                if let Err(e) = store.persist() {
+                    if let Some(m) = store.rooms.get_mut(&id) {
+                        m.desktop_secret_hash = None;
+                    }
+                    eprintln!("vq-relay: persist failed for room {}: {e}", &id[..6]);
+                    return err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed");
+                }
+                StatusCode::OK.into_response()
+            }
+        };
     }
     let created_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    store.rooms.insert(id.clone(), Meta { secret_hash, created_at });
+    store.rooms.insert(id.clone(), Meta { secret_hash, desktop_secret_hash, created_at });
     if let Err(e) = store.persist() {
         store.rooms.remove(&id);
         eprintln!("vq-relay: persist failed for room {}: {e}", &id[..6]);
@@ -299,15 +386,17 @@ async fn delete_room(
         app.fail(&ip);
         return err(StatusCode::UNAUTHORIZED, "unauthorized");
     }
-    let cell = match app.authorize(&id, bearer(&headers).as_deref(), &ip) {
+    let cell = match app.authorize(&id, Role::Phone, bearer(&headers).as_deref(), &ip) {
         Ok(c) => c,
         Err(r) => return r,
     };
     {
         let mut store = app.store.lock().unwrap();
-        store.rooms.remove(&id);
+        let Some(old) = store.rooms.remove(&id) else { return err(StatusCode::NOT_FOUND, "no_such_room") };
         if let Err(e) = store.persist() {
+            store.rooms.insert(id.clone(), old);
             eprintln!("vq-relay: persist failed for room {}: {e}", &id[..6]);
+            return err(StatusCode::INTERNAL_SERVER_ERROR, "persist_failed");
         }
     }
     app.rooms.lock().unwrap().remove(&id);
@@ -341,11 +430,11 @@ async fn ws_route(
     };
     let sub = subprotocol(&headers);
     let secret = bearer(&headers).or_else(|| sub.as_ref().map(|s| s["vq.auth.".len()..].to_owned()));
-    let cell = match app.authorize(&id, secret.as_deref(), &ip) {
+    let cell = match app.authorize(&id, role, secret.as_deref(), &ip) {
         Ok(c) => c,
         Err(r) => return r,
     };
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::channel(WS_QUEUE_MESSAGES + 1);
     let conn_id = match cell.lock().unwrap().join(role, Sink::Ws(tx.clone())) {
         Ok(c) => c,
         Err(JoinErr::Full) => return err(StatusCode::TOO_MANY_REQUESTS, "room_full"),
@@ -355,7 +444,8 @@ async fn ws_route(
         _ => ws,
     };
     let app2 = app.clone();
-    ws.on_upgrade(move |socket| ws_task(app2, cell, conn_id, tx, rx, socket))
+    let ws = ws.max_message_size(MAX_MESSAGE_BYTES).max_frame_size(MAX_MESSAGE_BYTES);
+    ws.on_upgrade(move |socket| ws_task(app2, cell, conn_id, rx, socket))
 }
 
 fn handle_ws_message(cell: &RoomCell, id: &str, raw: &[u8]) -> Result<(), FrameErr> {
@@ -373,30 +463,41 @@ async fn ws_task(
     app: Arc<App>,
     cell: Arc<RoomCell>,
     id: String,
-    tx: mpsc::UnboundedSender<Out>,
-    mut rx: mpsc::UnboundedReceiver<Out>,
+    mut rx: mpsc::Receiver<Out>,
     socket: WebSocket,
 ) {
     let (mut sink, mut stream) = socket.split();
     let ping = app.cfg.ping_interval;
+    let idle = app.cfg.idle;
+    // A peer that stops reading is cut off after `idle` instead of holding the
+    // writer (and its queue) forever.
+    let write_timeout = idle;
     let mut writer = tokio::spawn(async move {
         let mut iv = tokio::time::interval(ping);
         iv.tick().await;
         loop {
             tokio::select! {
                 m = rx.recv() => match m {
-                    Some(Out::Text(t)) => if sink.send(Message::Text(t.into())).await.is_err() { break },
+                    Some(Out::Text(t)) => {
+                        if !matches!(tokio::time::timeout(write_timeout, sink.send(Message::Text(t.into()))).await, Ok(Ok(()))) {
+                            break;
+                        }
+                    }
                     Some(Out::Close(code, reason)) => {
-                        let _ = sink.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+                        let close = Message::Close(Some(CloseFrame { code, reason: reason.into() }));
+                        let _ = tokio::time::timeout(write_timeout, sink.send(close)).await;
                         break;
                     }
                     None => break,
                 },
-                _ = iv.tick() => if sink.send(Message::Ping(Bytes::new())).await.is_err() { break },
+                _ = iv.tick() => {
+                    if !matches!(tokio::time::timeout(write_timeout, sink.send(Message::Ping(Bytes::new()))).await, Ok(Ok(()))) {
+                        break;
+                    }
+                }
             }
         }
     });
-    let idle = app.cfg.idle;
     let reader = async {
         loop {
             let next = tokio::time::timeout(idle, stream.next()).await;
@@ -405,13 +506,20 @@ async fn ws_task(
                     cell.lock().unwrap().terminate(&id, CLOSE_IDLE, "idle");
                     return;
                 }
-                Ok(None) | Ok(Some(Err(_))) => return,
+                Ok(None) => return,
+                Ok(Some(Err(e))) => {
+                    // Over the size limit (tungstenite capacity error): 1009.
+                    if e.to_string().to_ascii_lowercase().contains("too long") {
+                        cell.lock().unwrap().terminate(&id, CLOSE_TOO_BIG, "frame too big");
+                    }
+                    return;
+                }
                 Ok(Some(Ok(m))) => m,
             };
             cell.lock().unwrap().touch(&id);
             let res = match msg {
                 Message::Text(t) if t.as_str() == "ping" => {
-                    let _ = tx.send(Out::Text("pong".into()));
+                    cell.lock().unwrap().push_text(&id, "pong");
                     Ok(())
                 }
                 Message::Text(t) => handle_ws_message(&cell, &id, t.as_bytes()),
@@ -426,12 +534,14 @@ async fn ws_task(
             }
         }
     };
-    tokio::select! {
-        _ = reader => {}
-        _ = &mut writer => {}
-    }
+    let writer_done = tokio::select! {
+        _ = reader => false,
+        _ = &mut writer => true,
+    };
     cell.lock().unwrap().terminate(&id, 1000, "");
-    let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer).await;
+    if !writer_done {
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut writer).await;
+    }
     writer.abort();
 }
 
@@ -464,15 +574,19 @@ async fn send_route(
     Query(q): Query<RoleQ>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    body: Bytes,
+    body: Body,
 ) -> Response {
     let ip = client_ip(&headers, peer);
     let role = match parse_role(&q) {
         Ok(r) => r,
         Err(r) => return r,
     };
-    let cell = match app.authorize(&id, bearer(&headers).as_deref(), &ip) {
+    let cell = match app.authorize(&id, role, bearer(&headers).as_deref(), &ip) {
         Ok(c) => c,
+        Err(r) => return r,
+    };
+    let body = match read_body(&headers, body, SEND_BODY_LIMIT).await {
+        Ok(b) => b,
         Err(r) => return r,
     };
     let Ok(v) = serde_json::from_slice::<Value>(&body) else {
@@ -557,7 +671,7 @@ async fn poll_route(
             Err(_) => return err(StatusCode::BAD_REQUEST, "bad_cursor"),
         },
     };
-    let cell = match app.authorize(&id, bearer(&headers).as_deref(), &ip) {
+    let cell = match app.authorize(&id, role, bearer(&headers).as_deref(), &ip) {
         Ok(c) => c,
         Err(r) => return r,
     };
@@ -614,7 +728,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/rooms/{id}/ws", get(ws_route))
         .route("/v1/rooms/{id}/send", post(send_route))
         .route("/v1/rooms/{id}/poll", get(poll_route))
-        .layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES * 60))
         .with_state(app)
 }
 
@@ -658,5 +771,45 @@ pub fn build_app(cfg: Config) -> std::io::Result<Arc<App>> {
 /// Serve on an existing listener until the future is dropped.
 pub async fn serve(listener: tokio::net::TcpListener, cfg: Config) -> std::io::Result<()> {
     let app = build_app(cfg)?;
-    axum::serve(listener, router(app).into_make_service_with_connect_info::<SocketAddr>()).await
+    let router = router(app);
+    // One task per connection; dropping this future aborts them all.
+    let mut conns = tokio::task::JoinSet::new();
+    loop {
+        let (stream, peer) = match listener.accept().await {
+            Ok(x) => x,
+            Err(_) => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+        };
+        while conns.try_join_next().is_some() {}
+        let router = router.clone().layer(axum::Extension(ConnectInfo(peer)));
+        conns.spawn(async move {
+            let svc = service_fn(move |req: hyper::Request<Incoming>| {
+                let router = router.clone();
+                async move { router.oneshot(req.map(Body::new)).await }
+            });
+            let mut http = http1::Builder::new();
+            http.timer(TokioTimer::new()).header_read_timeout(HEADER_READ_TIMEOUT);
+            let _ = http.serve_connection(TokioIo::new(stream), svc).with_upgrades().await;
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cf_connecting_ip_is_trusted_only_from_a_loopback_peer() {
+        let mut h = HeaderMap::new();
+        h.insert("cf-connecting-ip", "203.0.113.9".parse().unwrap());
+        let lo: SocketAddr = "127.0.0.1:5000".parse().unwrap();
+        let lo6: SocketAddr = "[::1]:5000".parse().unwrap();
+        let far: SocketAddr = "198.51.100.7:5000".parse().unwrap();
+        assert_eq!(client_ip(&h, lo), "203.0.113.9");
+        assert_eq!(client_ip(&h, lo6), "203.0.113.9");
+        assert_eq!(client_ip(&h, far), "198.51.100.7");
+        assert_eq!(client_ip(&HeaderMap::new(), lo), "127.0.0.1");
+    }
 }

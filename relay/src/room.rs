@@ -9,7 +9,7 @@ use std::time::Instant;
 use base64::Engine;
 use rand::RngCore;
 use serde_json::{json, Value};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::sync::Notify;
 
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
@@ -18,6 +18,9 @@ pub const MAX_MESSAGE_BYTES: usize = 96 * 1024;
 pub const MAX_PHONES: usize = 8;
 pub const FRAMES_PER_SEC: f64 = 50.0;
 pub const MAX_QUEUE_EVENTS: usize = 1000;
+/// Messages buffered for one WebSocket connection before it is cut off (4008).
+/// The channel has one extra slot, reserved for the close message.
+pub const WS_QUEUE_MESSAGES: usize = 256;
 
 pub const CLOSE_REPLACED: u16 = 4001;
 pub const CLOSE_IDLE: u16 = 4002;
@@ -59,7 +62,7 @@ pub struct Poll {
 }
 
 pub enum Sink {
-    Ws(UnboundedSender<Out>),
+    Ws(Sender<Out>),
     Poll(Poll),
 }
 
@@ -178,7 +181,12 @@ impl Room {
         let Some(c) = self.conns.get_mut(id) else { return };
         match &mut c.sink {
             Sink::Ws(tx) => {
-                let _ = tx.send(Out::Text(msg.to_string()));
+                // Keep the last slot free for the close message.
+                if tx.capacity() > 1 {
+                    let _ = tx.try_send(Out::Text(msg.to_string()));
+                } else {
+                    self.kill.push(id.to_owned());
+                }
             }
             Sink::Poll(p) => {
                 if p.closed.is_some() {
@@ -255,7 +263,7 @@ impl Room {
         let role = c.role;
         match &mut c.sink {
             Sink::Ws(tx) => {
-                let _ = tx.send(Out::Close(code, reason.to_owned()));
+                let _ = tx.try_send(Out::Close(code, reason.to_owned()));
                 self.conns.remove(id);
             }
             Sink::Poll(p) => {
@@ -288,6 +296,19 @@ impl Room {
         self.terminate(id, CLOSE_IDLE, "idle");
         self.conns.remove(id);
         self.sessions.retain(|_, v| v != id);
+    }
+
+    /// Queue a raw text message (e.g. a pong) for a WebSocket connection; it
+    /// counts toward the bounded outbound queue.
+    pub fn push_text(&mut self, id: &str, text: &str) {
+        if let Some(Conn { sink: Sink::Ws(tx), .. }) = self.conns.get(id) {
+            if tx.capacity() > 1 {
+                let _ = tx.try_send(Out::Text(text.to_owned()));
+            } else {
+                self.kill.push(id.to_owned());
+            }
+        }
+        self.process_kills();
     }
 
     pub fn touch(&mut self, id: &str) {

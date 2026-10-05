@@ -2,7 +2,7 @@
 
 The Ventriloquist relay: a small Rust server (axum + tokio) that forwards **end-to-end encrypted** frames between a desktop and its phones. It runs on the owner's Mac mini, behind a Cloudflare Tunnel, at `https://relay.jbrasfield.com`. See SPEC_V3.md.
 
-The relay stores only `room_id -> { secret_hash, created_at }` (a JSON file, written atomically). It never stores or logs frame contents.
+The relay stores only `room_id -> { secret_hash, desktop_secret_hash?, created_at }` (a JSON file, written atomically). It never stores or logs frame contents.
 
 ## Protocol (normative)
 
@@ -11,6 +11,7 @@ All paths are under `/v1`. Bodies are JSON. Errors are `{"error": "<code>"}` wit
 ### Identities and secrets
 - `room_id`: 16 to 64 characters of `[A-Za-z0-9_-]` (the desktop uses 128 random bits, base64url).
 - `room_secret`: 256 random bits, base64url. The relay holds only `secret_hash = base64url(SHA-256(room_secret))` (43 characters, unpadded).
+- `desktop_secret`: a second 256-bit secret, known only to the desktop and never put in the QR. The relay holds `desktop_secret_hash = base64url(SHA-256(desktop_secret))`. `role=desktop` authenticates with it; `role=phone` authenticates with `room_secret`. A room without `desktop_secret_hash` (created before it existed) refuses `role=desktop` with **401** until the desktop re-PUTs. Forgetting a phone does not revoke its relay access (it keeps `room_secret`); "Reset relay room" rotates both secrets.
 - `owner_token`: configured on the relay. It authorizes creating and deleting rooms. Phones never see it.
 - Secrets are compared in constant time (SHA-256 digests compared with a constant-time equality).
 
@@ -18,7 +19,7 @@ All paths are under `/v1`. Bodies are JSON. Errors are `{"error": "<code>"}` wit
 
 | Method and path | Who | Purpose |
 |---|---|---|
-| `PUT /rooms/{room_id}` | desktop | Create or claim a room. Header `X-VQ-Owner: <owner_token>`. Body `{"secret_hash":"<b64url>"}`. **201** created, **200** exists with the same hash, **409** exists with a different hash, **401** bad owner token, **400** malformed id or hash |
+| `PUT /rooms/{room_id}` | desktop | Create or claim a room. Header `X-VQ-Owner: <owner_token>`. Body `{"secret_hash":"<b64url>","desktop_secret_hash":"<b64url>"}` (`desktop_secret_hash` is optional on the wire, for migration). **201** created, **200** exists with the same hashes, **200** and the desktop hash is added when the room has none and `secret_hash` matches, **409** `secret_hash` differs or a different `desktop_secret_hash` is already set, **401** bad owner token, **400** malformed id or hash, or a hash of the empty string. Body limit 4 KiB; auth is checked before any body is read, and the body must arrive within 10 s (else **408**) |
 | `GET /rooms/{room_id}/ws?role=desktop\|phone` | both | WebSocket upgrade (real-time channel) |
 | `POST /rooms/{room_id}/send?role=..&session=..` | both | Long-poll fallback: send frames |
 | `GET /rooms/{room_id}/poll?role=..&session=..&cursor=..` | both | Long-poll fallback: wait for frames and events |
@@ -26,8 +27,8 @@ All paths are under `/v1`. Bodies are JSON. Errors are `{"error": "<code>"}` wit
 | `GET /health` | anyone | `200 ok` |
 
 ### Authentication
-- WebSocket, send, poll: `Authorization: Bearer <room_secret>`. For clients that cannot set headers on a WebSocket, offer the subprotocol `vq.auth.<room_secret>` instead; the relay echoes it in `Sec-WebSocket-Protocol`.
-- Bad or missing secret: **401**. Unknown room: **404**. Bad `role`: **400**.
+- WebSocket, send, poll: `Authorization: Bearer <secret>`, where the secret is the `desktop_secret` for `role=desktop` and the `room_secret` for `role=phone`. For clients that cannot set headers on a WebSocket, offer the subprotocol `vq.auth.<room_secret>` instead; the relay echoes it in `Sec-WebSocket-Protocol`.
+- Bad, empty or missing secret: **401**. Unknown room: **404**. Bad `role`: **400**.
 - There is no CORS; the clients are native.
 
 ### Roles
@@ -65,10 +66,11 @@ A phone gets the current value right after it connects, and again whenever it ch
 - The relay sends a WebSocket ping every 20 s. A connection that sends nothing (messages, pongs or text `ping`) for **60 s** is closed with 4002 `idle`.
 
 ### Limits
-- Frame: 64 KiB decoded. A message larger than 96 KiB, or a frame over 64 KiB, closes the WebSocket with 1009 (HTTP: **413**).
+- Frame: 64 KiB decoded. A message larger than 96 KiB, or a frame over 64 KiB, closes the WebSocket with 1009 (HTTP: **413**). `/send` bodies are limited to 128 KiB, enforced while streaming; request headers must arrive within 10 s.
+- Each WebSocket connection has an outbound queue of 256 messages (pongs included); overflow closes it with 4008.
 - 50 frames/s per connection (token bucket, burst 50). Exceeding it closes the WebSocket with 4029 (HTTP: **429**).
 - 8 phones per room.
-- Per IP: 10 new rooms per minute, and 10 failed authentications (owner token or room secret) per minute. Beyond that: **429** `rate_limited`. The IP is the `CF-Connecting-IP` header when present, else the peer address. (Only `cloudflared` can reach the relay, which listens on loopback; do not expose the port directly, or the header can be spoofed.)
+- Per IP: 10 new rooms per minute, and 10 failed authentications (owner token or room secret) per minute. Beyond that: **429** `rate_limited`. The IP is the `CF-Connecting-IP` header only when the TCP peer is loopback (the local `cloudflared`); from any other peer the peer address is used.
 
 ### Close codes
 
@@ -77,7 +79,7 @@ A phone gets the current value right after it connects, and again whenever it ch
 | 4001 | replaced by a newer desktop connection |
 | 4002 | idle for 60 s |
 | 4003 | room deleted |
-| 4008 | long-poll queue overflow (WebSocket peers only see this if their queue is flooded; see below) |
+| 4008 | queue overflow (long-poll: more than 1000 unacknowledged events; WebSocket: 256 queued messages not being read) |
 | 4029 | frame rate limit exceeded |
 | 1008 | malformed message (not JSON, not a `frame`, bad base64, desktop frame without `to`) |
 | 1009 | frame or message too large |
