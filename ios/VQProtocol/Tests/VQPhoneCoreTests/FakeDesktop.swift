@@ -260,7 +260,7 @@ final class FakeNetwork: PhoneTransport {
     /// `true` (default): a close from the phone still delivers frames that
     /// were already sent, like the transports' documented graceful close
     /// (a socket close flushes written bytes; the BLE queue sends what it
-    /// holds, see `FrameSendQueue.closeAfterFlush`). `false` models an
+    /// holds, see the transport). `false` models an
     /// abrupt close that discards queued frames.
     var gracefulDisconnect = true
 
