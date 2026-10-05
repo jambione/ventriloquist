@@ -39,7 +39,7 @@ gate2_desktop_core() {
   fi
 }
 
-# Gate 3: end-to-end over the TCP dev transport: vq-host (debug, dev-tcp)
+# Gate 3: end-to-end through a real local vq-relay (run.sh --tcp: TCP dev transport): vq-host (debug, dev-tcp)
 # against PhoneSim (the real PhoneEngine). run.sh builds both itself.
 gate3_e2e() {
   step "gate 3: swift build --product PhoneSim (ios/VQProtocol)"

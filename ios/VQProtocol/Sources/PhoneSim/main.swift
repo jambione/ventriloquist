@@ -15,6 +15,7 @@ let usage = """
       --state-dir  keep identity, paired desktops and the last desktop here (default: in memory)
       --script     read commands from FILE instead of stdin
       --relay-pair-uri  pair through the relay with this QR link (no TCP listener)
+      --relay      relay mode without a new pairing (reconnect to the desktops in --state-dir)
       --verbose    engine diagnostics on stderr
     Events: one JSON object per line on stdout. Exit status 1 if any command failed.
     """
@@ -52,6 +53,8 @@ func parseOptions() -> Sim.Options? {
                 Out.diag(error.text)
                 return nil
             }
+        case "--relay":
+            o.relayMode = true
         case "--verbose":
             o.verbose = true
         default:

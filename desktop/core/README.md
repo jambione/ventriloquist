@@ -33,7 +33,7 @@ cargo run   -p vq-host-core --features dev-tcp --bin vq-host -- --connect 127.0.
 
 **`dev-tcp` is refused in release builds** (`compile_error!`; D14): run the tests, the E2E harness and `vq-host` in debug builds only, and never enable `dev-tcp` for the app.
 
-`vq-host` is the desktop side of the TCP dev transport, so it is the **client**. Its default config directory is `<OS local config dir>/com.ventriloquist.desktop.dev`, which is separate from the app's. It reconnects with backoff (1, 2, 4, 8, max 15 s) until the phone simulator's server is up. Set `VQ_LOG=1` to get diagnostics on stderr. It stops on SIGINT or SIGTERM.
+`vq-host --relay <url> --owner-token <t>` runs the relay transport instead (the room is kept in `--config-dir`; `http://` URLs are accepted; `start_phone_pairing` on stdin emits `phone_pairing_qr`). `VQ_RELAY_FORCE_LONGPOLL=1` makes the relay transport skip the WebSocket and use only the long-poll fallback (tests). Without `--relay`, `vq-host` is the desktop side of the TCP dev transport, so it is the **client**. Its default config directory is `<OS local config dir>/com.ventriloquist.desktop.dev`, which is separate from the app's. It reconnects with backoff (1, 2, 4, 8, max 15 s) until the phone simulator's server is up. Set `VQ_LOG=1` to get diagnostics on stderr. It stops on SIGINT or SIGTERM.
 
 ## `vq-host` stdout format (stable; the M4 E2E test parses it)
 

@@ -175,9 +175,14 @@ public struct RelayClientState: Sendable {
     var probeAt: Double?
     var probing = false
     let makeSession: @Sendable () -> String
+    /// Never open a WebSocket: use the long-poll fallback from the start
+    /// (`VQ_RELAY_FORCE_LONGPOLL`, for tests and restrictive networks).
+    let forceLongPoll: Bool
 
-    public init(makeSession: @escaping @Sendable () -> String = RelayCodec.randomSession) {
+    public init(makeSession: @escaping @Sendable () -> String = RelayCodec.randomSession,
+                forceLongPoll: Bool = false) {
         self.makeSession = makeSession
+        self.forceLongPoll = forceLongPoll
     }
 
     static func isDeleted(_ code: Int) -> Bool { code == 4001 || code == 4003 }
@@ -187,6 +192,11 @@ public struct RelayClientState: Sendable {
         case .connectRequested:
             guard mode == .idle || mode == .backgrounded else { return [] }
             backoff.reset()
+            if forceLongPoll {
+                mode = .polling; probing = false; probeAt = nil
+                startFreshSession()
+                return [.startLongPoll(session: session!, cursor: 0)]
+            }
             mode = .connectingWS
             return [.openWebSocket]
         case .disconnectRequested: return shutdown(.idle)

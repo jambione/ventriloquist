@@ -1,30 +1,51 @@
 #!/usr/bin/env bash
-# End-to-end test, SPEC §9 gate 3: the real desktop core (`vq-host`, TCP
-# client, feature dev-tcp) against the real phone engine (`PhoneSim`, TCP
-# server), over the TCP dev transport of protocol/README.md §2.1.
+# End-to-end test, SPEC §9 / SPEC_V3 §10 gate 3: the real desktop core
+# (`vq-host`) against the real phone engine (`PhoneSim`).
+#
+# Default: through a real local `vq-relay` (random port and owner token, temp
+# data dir): vq-host creates its room, the phone pairs from the QR link that
+# vq-host emits (start_phone_pairing), and everything runs over the relay's
+# WebSocket (scenarios h and i: long-poll only; relay restart).
+# `--tcp`: the old TCP dev transport of protocol/README.md §2.1 (scenarios
+# a-g only; vq-host is the TCP client, PhoneSim the server).
 #
 # Scenarios (each prints PASS or FAIL; the first failure stops the run and
 # the rest are reported as SKIP):
-#   a  pairing with the code from vq-host's pairing_code_shown; secure session
+#   a  pairing with the code from vq-host's pairing_code_shown (relay: from the
+#      QR link, no code shown); secure session
 #   b  partials stream, then final, then edit; log format; no partials logged;
 #      re-send from history makes a new id
 #   c  multi-line + unicode text is byte-exact in entry_upserted and rendered
 #      inertly in the log
 #   d  drop the connection with an unacked final (desktop never saw it; and
 #      desktop saw it but the ack was lost) -> reconnect -> re-delivery ->
-#      acked once, shown once, logged once
+#      acked once, shown once, logged once. Relay: the desktop process is
+#      frozen and killed with a final pending (the TCP-only "ack lost" half
+#      is covered by i)
 #   e  restart vq-host (same config dir) -> secure again without re-pairing
 #   f  restart PhoneSim (same state dir) -> secure again without re-pairing
-#   g  a fresh phone with a wrong pairing code -> pair_result ok:false on both
-#      sides; nothing it sends is accepted
+#   g  a fresh phone with a wrong pairing code -> pairing fails on both
+#      sides; nothing it sends is accepted. Relay: a wrong `c`, and a wrong
+#      `k` (desktop key pin mismatch) in the QR link
+#   h  (relay) a fresh pairing and session with the WebSocket never used
+#      (VQ_RELAY_FORCE_LONGPOLL=1 in both clients)
+#   i  (relay) vq-relay is killed mid-session (finals pending, one maybe in
+#      flight) and restarted -> both reconnect; every final arrives once
 #
-# Usage: tests/e2e/run.sh            (env: E2E_TIMEOUT=seconds, default 300;
+# Usage: tests/e2e/run.sh [--tcp]    (env: E2E_TIMEOUT=seconds, default 300;
 #                                     E2E_KEEP=1 keeps the temp dir)
-# Needs: swift, cargo, python3.
+# Needs: swift, cargo, python3, curl.
 set -euo pipefail
 set -E
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+MODE=relay
+for arg in "$@"; do
+  case "$arg" in
+    --tcp) MODE=tcp ;;
+    *) echo "usage: tests/e2e/run.sh [--tcp]" >&2; exit 2 ;;
+  esac
+done
 HELPER="$ROOT/tests/e2e/e2e.py"
 OVERALL_TIMEOUT="${E2E_TIMEOUT:-300}"
 WAIT=20 # default seconds for one awaited event
@@ -43,6 +64,12 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/vq-e2e.XXXXXX")"
 LOG_DIR="$WORK/logs"
 HOST_CFG="$WORK/host-config"
 PHONE_STATE="$WORK/phone-state"
+RELAY_DATA="$WORK/relay-data"
+RELAY_PID=""
+RELAY_PORT=""
+RELAY_N=0
+OWNER_TOKEN=""
+FORCE_LP="" # VQ_RELAY_FORCE_LONGPOLL for vq-host and PhoneSim (scenario h)
 
 PHONE_PID=""
 HOST_PID=""
@@ -54,9 +81,23 @@ HOST_N=0
 HOST_FILES=()
 PORT=""
 
-SCENARIOS=(a b c d e f g)
+if [ "$MODE" = tcp ]; then SCENARIOS=(a b c d e f g); else SCENARIOS=(a b c d e f g h i); fi
 # bash 3.2 (macOS /bin/bash) has no associative arrays.
 title() {
+  if [ "$MODE" = relay ]; then
+    case "$1" in
+      a) echo "pairing from the QR link through the relay; secure session" ;;
+      d) echo "desktop frozen+killed with a pending final -> reconnect -> re-delivered, acked once, logged once" ;;
+      g) echo "wrong code and wrong key pin in the QR link -> pairing fails, nothing accepted" ;;
+      h) echo "long-poll only (no WebSocket): pairing and a session" ;;
+      i) echo "vq-relay killed and restarted mid-session -> both reconnect, finals arrive once" ;;
+    esac
+    [ "$1" = a ] || [ "$1" = d ] || [ "$1" = g ] || [ "$1" = h ] || [ "$1" = i ] || title_common "$1"
+    return
+  fi
+  title_common "$1"
+}
+title_common() {
   case "$1" in
     a) echo "pairing succeeds on both sides; secure session" ;;
     b) echo "partials, final, edit; log format; re-send" ;;
@@ -111,8 +152,10 @@ cleanup() {
   set +e
   exec 1>&4 2>&5
   { exec 3>&-; } 2>/dev/null || true
+  { exec 6>&-; } 2>/dev/null || true
   stop_pid "$PHONE_PID"
   stop_pid "$HOST_PID"
+  stop_pid "$RELAY_PID"
   [ -n "$WATCHDOG_PID" ] && kill "$WATCHDOG_PID" 2>/dev/null || true
   if [ -n "$CURRENT" ]; then
     FAILED="$CURRENT"
@@ -182,12 +225,25 @@ phone_start() { # name state_dir port
   echo 0 >"$WORK/phone.seq"
   local fifo="$WORK/phone-$PHONE_N.fifo"
   mkfifo "$fifo"
-  "$PHONESIM" --port "$3" --name "$1" --state-dir "$2" <"$fifo" >"$PHONE_EV" 2>"$WORK/phone-$PHONE_N.err" 4>&- 5>&- &
+  "$PHONESIM" --port "$3" --name "$1" --state-dir "$2" <"$fifo" >"$PHONE_EV" 2>"$WORK/phone-$PHONE_N.err" 3>&- 4>&- 5>&- 6>&- &
   PHONE_PID=$!
   exec 3>"$fifo"
   local listening
   listening=$(phone_wait 0 'e["event"]=="listening"')
   PORT=$(get "$listening" port)
+}
+
+phone_start_relay() { # name state_dir [pairing-uri]: without a URI, reconnect to the saved desktops
+  PHONE_N=$((PHONE_N + 1))
+  PHONE_EV="$WORK/phone-$PHONE_N.jsonl"
+  echo 0 >"$WORK/phone.seq"
+  local fifo="$WORK/phone-$PHONE_N.fifo" args=(--name "$1" --state-dir "$2")
+  mkfifo "$fifo"
+  if [ -n "${3:-}" ]; then args+=(--relay-pair-uri "$3"); else args+=(--relay); fi
+  VQ_RELAY_FORCE_LONGPOLL="$FORCE_LP" "$PHONESIM" "${args[@]}" <"$fifo" >"$PHONE_EV" 2>"$WORK/phone-$PHONE_N.err" 3>&- 4>&- 5>&- 6>&- &
+  PHONE_PID=$!
+  exec 3>"$fifo"
+  phone_wait 0 'e["event"]=="started"' >/dev/null
 }
 
 # The seq counter lives in a file: phone is often called inside $(...), a
@@ -231,9 +287,20 @@ host_start() {
   HOST_N=$((HOST_N + 1))
   HOST_EV="$WORK/host-$HOST_N.jsonl"
   HOST_FILES+=("$HOST_EV")
-  VQ_LOG=1 "$VQHOST" --connect "127.0.0.1:$PORT" --log-dir "$LOG_DIR" --config-dir "$HOST_CFG" \
-    --name "E2E Desk" </dev/null >"$HOST_EV" 2>"$WORK/host-$HOST_N.err" 4>&- 5>&- &
-  HOST_PID=$!
+  if [ "$MODE" = tcp ]; then
+    VQ_LOG=1 "$VQHOST" --connect "127.0.0.1:$PORT" --log-dir "$LOG_DIR" --config-dir "$HOST_CFG" \
+      --name "E2E Desk" </dev/null >"$HOST_EV" 2>"$WORK/host-$HOST_N.err" 3>&- 4>&- 5>&- &
+    HOST_PID=$!
+  else
+    # Commands (start_phone_pairing) go to stdin through a FIFO on fd 6.
+    local fifo="$WORK/host-$HOST_N.fifo"
+    mkfifo "$fifo"
+    VQ_LOG=1 VQ_RELAY_FORCE_LONGPOLL="$FORCE_LP" "$VQHOST" --relay "http://127.0.0.1:$RELAY_PORT" \
+      --owner-token "$OWNER_TOKEN" --log-dir "$LOG_DIR" --config-dir "$HOST_CFG" \
+      --name "E2E Desk" <"$fifo" >"$HOST_EV" 2>"$WORK/host-$HOST_N.err" 3>&- 4>&- 5>&- &
+    HOST_PID=$!
+    exec 6>"$fifo"
+  fi
   host_wait 0 'e["event"]=="started"' >/dev/null
 }
 
@@ -242,7 +309,52 @@ host_stop() {
   kill -TERM "$HOST_PID"
   wait "$HOST_PID" || status=$?
   HOST_PID=""
+  { exec 6>&-; } 2>/dev/null || true
   expect_eq "$status" 0 "vq-host exit status"
+}
+
+host_kill() { # SIGKILL (also works on a stopped process); no exit status check
+  kill -KILL "$HOST_PID" 2>/dev/null || true
+  wait "$HOST_PID" 2>/dev/null || true
+  HOST_PID=""
+  { exec 6>&-; } 2>/dev/null || true
+}
+
+host_cmd() { printf '%s\n' "$1" >&6; }
+
+# A fresh pairing URI (it carries the room secret: kept in shell variables
+# and the event file only; the code in it is the active v1 pairing code).
+pairing_uri() {
+  local m
+  m=$(host_mark)
+  host_cmd '{"command":"start_phone_pairing"}'
+  get "$(host_wait "$m" 'e["event"]=="phone_pairing_qr"')" uri
+}
+
+relay_start() {
+  RELAY_N=$((RELAY_N + 1))
+  local i attempt
+  for attempt in 1 2 3 4 5; do
+    VQ_RELAY_OWNER_TOKEN="$OWNER_TOKEN" "$VQRELAY" --listen "127.0.0.1:$RELAY_PORT" --data-dir "$RELAY_DATA" \
+      >"$WORK/relay-$RELAY_N.out" 2>"$WORK/relay-$RELAY_N.err" 3>&- 4>&- 5>&- 6>&- &
+    RELAY_PID=$!
+    for i in $(seq 50); do
+      curl -fsS --max-time 2 "http://127.0.0.1:$RELAY_PORT/v1/health" >/dev/null 2>&1 && return 0
+      kill -0 "$RELAY_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    wait "$RELAY_PID" 2>/dev/null || true # the port may still be closing: retry
+    sleep 0.5
+  done
+  RELAY_PID=""
+  say "    vq-relay did not start" >&5
+  return 1
+}
+
+relay_kill() {
+  kill -KILL "$RELAY_PID" 2>/dev/null || true
+  wait "$RELAY_PID" 2>/dev/null || true
+  RELAY_PID=""
 }
 
 log_check() { ev log-check "$LOG_DIR" "${HOST_FILES[@]}"; }
@@ -262,17 +374,45 @@ pass() {
 # ---------------------------------------------------------------------------
 # Build
 
-say "==> build PhoneSim and vq-host (debug)"
+say "==> build PhoneSim, vq-host$([ "$MODE" = relay ] && echo ", vq-relay") (debug)"
 t0=$(date +%s)
 (cd "$ROOT/ios/VQProtocol" && swift build --product PhoneSim 2>&1 | tail -n 3)
 PHONESIM="$(cd "$ROOT/ios/VQProtocol" && swift build --show-bin-path)/PhoneSim"
 (cd "$ROOT" && cargo build -q -p vq-host-core --features dev-tcp --bin vq-host)
 VQHOST="$ROOT/target/debug/vq-host"
+VQRELAY="$ROOT/target/debug/vq-relay"
+if [ "$MODE" = relay ]; then
+  (cd "$ROOT" && cargo build -q -p vq-relay --bin vq-relay)
+  [ -x "$VQRELAY" ]
+fi
 [ -x "$PHONESIM" ] && [ -x "$VQHOST" ]
 note "built in $(($(date +%s) - t0)) s; work dir $WORK"
 
 # ---------------------------------------------------------------------------
 begin a
+if [ "$MODE" = relay ]; then
+  RELAY_PORT=$(ev free-port)
+  OWNER_TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
+  relay_start
+  note "vq-relay on 127.0.0.1:$RELAY_PORT"
+  host_start
+  HOST_ID=$(get "$(host_wait 0 'e["event"]=="started"')" device_id)
+  host_wait 0 'e["event"]=="relay_status" and e["status"]["link"]=="websocket"' >/dev/null
+  URI=$(pairing_uri)
+  phone_start_relay "E2E Phone" "$PHONE_STATE" "$URI"
+  PHONE_ID=$(get "$(phone_wait 0 'e["event"]=="started"')" device_id)
+  phone_wait 0 'e["event"]=="relay_pairing"' >/dev/null
+  host_wait 0 'e["event"]=="pairing_result" and e["ok"] is True and e["device_id"]==p' "p=$PHONE_ID" >/dev/null
+  host_wait 0 'e["event"]=="paired_peers_changed" and any(x["device_id"]==p for x in e["peers"])' "p=$PHONE_ID" >/dev/null
+  host_wait 0 'e["event"]=="phone_pairing_ended" and e["reason"]=="paired"' >/dev/null
+  host_wait 0 'e["event"]=="connection_status" and e["state"]=="secure" and e["device_id"]==p and e["paired"] is True' "p=$PHONE_ID" >/dev/null
+  phone wait-secure >/dev/null
+  phone_wait 0 'e["event"]=="paired" and e["host_id"]==h' "h=$HOST_ID" >/dev/null
+  # The QR carries the code: nothing to type, no code modal on the desktop.
+  ev expect-count "$HOST_EV" 0 0 'e["event"] in ("pairing_code_shown","pairing_code_ended")'
+  [ -f "$PHONE_STATE/relay-desktops.json" ]
+  pass
+else
 phone_start "E2E Phone" "$PHONE_STATE" 0
 PHONE_ID=$(get "$(phone_wait 0 'e["event"]=="started"')" device_id)
 note "PhoneSim listening on 127.0.0.1:$PORT, device $PHONE_ID"
@@ -298,6 +438,7 @@ phone wait-secure >/dev/null
 phone_wait 0 'e["event"]=="paired" and e["host_id"]==h' "h=$HOST_ID" >/dev/null
 [ -f "$PHONE_STATE/paired-hosts.json" ]
 pass
+fi
 
 # ---------------------------------------------------------------------------
 begin b
@@ -383,6 +524,33 @@ pass
 
 # ---------------------------------------------------------------------------
 begin d
+if [ "$MODE" = relay ]; then
+# The desktop is frozen (SIGSTOP: it reads and acks nothing), the phone sends
+# a final, then the desktop is killed; a restarted desktop (same config) is
+# a new peer, so the phone re-hello's and re-delivers the pending final.
+D1=$(get "$(phone start)" id)
+pm=$(phone_mark)
+phone "partial d1-partial" >/dev/null
+host_wait 0 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="partial"' "u=$D1" >/dev/null
+kill -STOP "$HOST_PID"
+phone "final d1 final sent while the desktop is frozen" >/dev/null
+phone "sleep 500" >/dev/null
+expect_eq "$(get "$(phone "status $D1")" status)" pending "d1 status before the kill"
+host_kill
+host_start
+host_wait 0 'e["event"]=="started" and any(x["device_id"]==p for x in e["paired_peers"])' "p=$PHONE_ID" >/dev/null
+phone "wait-secure 30000" 30 >/dev/null
+phone "wait-acked $D1 30000" 30 >/dev/null
+host_wait 0 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="final"' "u=$D1" >/dev/null
+phone "sleep 500" >/dev/null
+ev expect-count "$HOST_EV" 0 1 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="final"' "u=$D1"
+ev expect-count "$HOST_EV" 0 1 'e["event"]=="final_accepted" and e["entry"]["id"]==u' "u=$D1"
+ev expect-count "$PHONE_EV" "$pm" 1 'e["event"]=="delivery" and e["id"]==u and e["status"]=="acked"' "u=$D1"
+expect_eq "$(log_count "id=${D1:0:8}")" 1 "log entries for ${D1:0:8}"
+expect_eq "$(log_count d1-partial)" 0 "interrupted partial in the log"
+log_check
+pass
+else
 # d1: the final never reaches the desktop (TX paused, then the socket closes).
 m=$(host_mark)
 pm=$(phone_mark)
@@ -419,11 +587,17 @@ reconnects=$(ev count "$HOST_EV" "$m" 'e["event"]=="connection_status" and e["st
 expect_eq "$reconnects" 2 "secure reconnects"
 log_check
 pass
+fi
 
 # ---------------------------------------------------------------------------
 begin e
+pm=$(phone_mark)
 host_stop
-phone "wait-disconnected" >/dev/null
+if [ "$MODE" = tcp ]; then
+  phone "wait-disconnected" >/dev/null
+else
+  phone_wait "$pm" 'e["event"]=="hosts_changed" and e["indicator"]!="secure"' >/dev/null
+fi
 host_start
 started=$(host_wait 0 'e["event"]=="started"')
 expect_eq "$(get "$started" device_id)" "$HOST_ID" "vq-host device id after restart"
@@ -443,7 +617,11 @@ begin f
 m=$(host_mark)
 phone_stop
 host_wait "$m" 'e["event"]=="connection_status" and e["state"]=="closed" and e["device_id"]==p' "p=$PHONE_ID" >/dev/null
-phone_start "E2E Phone" "$PHONE_STATE" "$PORT"
+if [ "$MODE" = tcp ]; then
+  phone_start "E2E Phone" "$PHONE_STATE" "$PORT"
+else
+  phone_start_relay "E2E Phone" "$PHONE_STATE"
+fi
 st=$(phone_wait 0 'e["event"]=="started"')
 expect_eq "$(get "$st" device_id)" "$PHONE_ID" "PhoneSim device id after restart"
 expect_eq "$(get "$st" active_host_id)" "$HOST_ID" "remembered active host"
@@ -464,6 +642,49 @@ pass
 
 # ---------------------------------------------------------------------------
 begin g
+if [ "$MODE" = relay ]; then
+m=$(host_mark)
+phone_stop
+host_wait "$m" 'e["event"]=="connection_status" and e["state"]=="closed" and e["device_id"]==p' "p=$PHONE_ID" >/dev/null
+# g1: a wrong code (`c`): the phone's confirmation is refused.
+URI=$(pairing_uri)
+CODE=$(python3 -c 'import sys,urllib.parse as u; print(u.parse_qs(u.urlparse(sys.argv[1]).query)["c"][0])' "$URI")
+BADCODE=$(printf '%06d' $(((10#$CODE + 1) % 1000000)))
+m=$(host_mark)
+phone_start_relay "Intruder" "$WORK/intruder-state" "$(ev uri-set "$URI" c "$BADCODE")"
+INTRUDER=$(get "$(phone_wait 0 'e["event"]=="started"')" device_id)
+[ "$INTRUDER" != "$PHONE_ID" ]
+host_wait "$m" 'e["event"]=="pairing_result" and e["ok"] is False and e["device_id"]==p' "p=$INTRUDER" >/dev/null
+phone_wait 0 'e["event"]=="pairing" and e["phase"]=="enter_code" and e["error"] is not None' >/dev/null
+phone start >/dev/null
+phone "final g text that must not arrive" >/dev/null
+phone "sleep 1000" >/dev/null
+expect_eq "$(get "$(phone hosts)" indicator)" none "intruder indicator after a wrong code"
+ev expect-count "$HOST_EV" "$m" 0 'e["event"]=="entry_upserted"'
+ev expect-count "$HOST_EV" "$m" 0 'e["event"]=="paired_peers_changed"'
+ev expect-count "$HOST_EV" "$m" 0 'e["event"]=="connection_status" and e["state"]=="secure"'
+phone_stop
+# g2: a wrong desktop key pin (`k`) with the right code: the phone refuses the
+# desktop's hello and never confirms.
+URI=$(pairing_uri)
+BADKEY=$(python3 -c 'import base64; print(base64.urlsafe_b64encode(bytes([0x42]) * 32).decode().rstrip("="))')
+m=$(host_mark)
+phone_start_relay "Intruder" "$WORK/intruder-state-2" "$(ev uri-set "$URI" k "$BADKEY")"
+phone_wait 0 'e["event"]=="notice" and e["kind"]=="pairing_code_mismatch"' >/dev/null
+phone start >/dev/null
+phone "final g2 text that must not arrive" >/dev/null
+phone "sleep 1000" >/dev/null
+expect_eq "$(get "$(phone hosts)" indicator)" none "intruder indicator after a key mismatch"
+ev expect-count "$HOST_EV" "$m" 0 'e["event"]=="entry_upserted"'
+ev expect-count "$HOST_EV" "$m" 0 'e["event"]=="paired_peers_changed"'
+ev expect-count "$HOST_EV" "$m" 0 'e["event"]=="pairing_result" and e["ok"] is True'
+ev expect-count "$HOST_EV" "$m" 0 'e["event"]=="connection_status" and e["state"]=="secure"'
+expect_eq "$(log_count "g text")" 0 "intruder text in the log"
+expect_eq "$(log_count "g2 text")" 0 "intruder text in the log"
+log_check
+phone_stop
+pass
+else
 m=$(host_mark)
 phone_stop
 host_wait "$m" 'e["event"]=="connection_status" and e["state"]=="closed" and e["device_id"]==p' "p=$PHONE_ID" >/dev/null
@@ -495,6 +716,86 @@ expect_eq "$(log_count "g injected")" 0 "injected text in the log"
 log_check
 phone_stop
 pass
+fi
+
+if [ "$MODE" = relay ]; then
+# ---------------------------------------------------------------------------
+begin i
+# The legitimate phone comes back (scenario g left only intruders).
+phone_start_relay "E2E Phone" "$PHONE_STATE"
+phone "wait-secure 30000" 30 >/dev/null
+I0=$(get "$(phone start)" id)
+phone "final i before the relay dies" >/dev/null
+phone "wait-acked $I0" >/dev/null
+hm=$(host_mark)
+pm=$(phone_mark)
+# I1 is sent and the relay is killed at once: delivered with its ack lost, or
+# not delivered at all (a race that either way must end in exactly one entry).
+I1=$(get "$(phone start)" id)
+phone "final i1 sent as the relay dies" >/dev/null
+relay_kill
+# I2 is sent while the relay is down.
+I2=$(get "$(phone start)" id)
+phone "final i2 sent while the relay is down" >/dev/null
+phone "sleep 500" >/dev/null
+expect_eq "$(get "$(phone "status $I2")" status)" pending "i2 status while the relay is down"
+host_wait "$hm" 'e["event"]=="relay_status" and e["status"]["link"] not in ("websocket","fallback")' >/dev/null
+relay_start
+host_wait "$hm" 'e["event"]=="relay_status" and e["status"]["link"] in ("websocket","fallback")' >/dev/null
+host_wait "$hm" 'e["event"]=="connection_status" and e["state"]=="secure" and e["device_id"]==p and e["paired"] is True' "p=$PHONE_ID" >/dev/null
+phone "wait-secure 30000" 30 >/dev/null
+for id in "$I1" "$I2"; do
+  phone "wait-acked $id 30000" 30 >/dev/null
+  host_wait "$hm" 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="final"' "u=$id" >/dev/null
+done
+phone "sleep 500" >/dev/null
+for id in "$I1" "$I2"; do
+  ev expect-count "$HOST_EV" "$hm" 1 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="final"' "u=$id"
+  ev expect-count "$HOST_EV" "$hm" 1 'e["event"]=="final_accepted" and e["entry"]["id"]==u' "u=$id"
+  ev expect-count "$PHONE_EV" "$pm" 1 'e["event"]=="delivery" and e["id"]==u and e["status"]=="acked"' "u=$id"
+  expect_eq "$(log_count "id=${id:0:8}")" 1 "log entries for ${id:0:8}"
+done
+ev expect-count "$HOST_EV" "$hm" 0 'e["event"] in ("pairing_code_shown","pairing_result","paired_peers_changed")'
+# The session works after the outage, both ways of delivery.
+I3=$(get "$(phone start)" id)
+phone "final i3 after the relay came back" >/dev/null
+phone "wait-acked $I3" >/dev/null
+host_wait "$hm" 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="final"' "u=$I3" >/dev/null
+log_check
+pass
+
+# ---------------------------------------------------------------------------
+begin h
+# A new desktop identity and a new phone, both with the WebSocket disabled:
+# room creation, QR pairing and the session all run over the long-poll.
+phone_stop
+host_stop
+FORCE_LP=1
+HOST_CFG="$WORK/host-config-h"
+host_start
+HOST_ID=$(get "$(host_wait 0 'e["event"]=="started"')" device_id)
+# (vq-host reports `fallback` only once the first poll answers, which an
+# empty room holds back for up to 25 s: pair first, check the link after.)
+URI=$(pairing_uri)
+phone_start_relay "E2E Phone H" "$WORK/phone-state-h" "$URI"
+PHONE_ID=$(get "$(phone_wait 0 'e["event"]=="started"')" device_id)
+host_wait 0 'e["event"]=="pairing_result" and e["ok"] is True and e["device_id"]==p' "p=$PHONE_ID" >/dev/null
+host_wait 0 'e["event"]=="connection_status" and e["state"]=="secure" and e["device_id"]==p and e["paired"] is True' "p=$PHONE_ID" >/dev/null
+phone "wait-secure 30000" 30 >/dev/null
+host_wait 0 'e["event"]=="relay_status" and e["status"]["link"]=="fallback"' >/dev/null
+H1=$(get "$(phone start)" id)
+phone "partial h-partial" >/dev/null
+phone "sleep 300" >/dev/null
+phone "final over the long-poll only" >/dev/null
+phone "wait-acked $H1 30000" 30 >/dev/null
+host_wait 0 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="final" and e["entry"]["text"]=="over the long-poll only"' "u=$H1" >/dev/null
+ev expect-count "$HOST_EV" 0 1 'e["event"]=="entry_upserted" and e["entry"]["id"]==u and e["entry"]["state"]=="final"' "u=$H1"
+ev expect-count "$HOST_EV" 0 0 'e["event"]=="relay_status" and e["status"]["link"]=="websocket"'
+expect_eq "$(log_count "id=${H1:0:8}")" 1 "log entries for ${H1:0:8}"
+log_check
+phone_stop
+pass
+fi
 
 host_stop
 CURRENT=""

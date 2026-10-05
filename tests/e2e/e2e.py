@@ -13,6 +13,8 @@ line. Predicates are Python expressions over `e` (the event); extra
   e2e.py get JSON PATH                            field of a JSON object, e.g. entry.id
   e2e.py log-check LOG_DIR HOST_EVENTS...         log files == what the events imply
   e2e.py log-count LOG_DIR NEEDLE                 occurrences of NEEDLE in all log files
+  e2e.py free-port                                a free TCP port on 127.0.0.1
+  e2e.py uri-set URI KEY VALUE                    a pairing URI with one query field replaced
   e2e.py render TEXT_JSON                         the core's inert log rendering of a text
 """
 
@@ -174,6 +176,20 @@ def main(argv):
     elif cmd == "log-count":
         log_dir, needle = args[0], args[1]
         print(sum(content.count(needle) for content in log_files(log_dir).values()))
+    elif cmd == "free-port":
+        import socket
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            print(sock.getsockname()[1])
+    elif cmd == "uri-set":
+        from urllib.parse import parse_qsl, quote, urlsplit
+
+        uri, key, value = args
+        pairs = [(k, value if k == key else v) for k, v in parse_qsl(urlsplit(uri).query, keep_blank_values=True)]
+        if key not in dict(pairs):
+            die(f"uri-set: no field {key} in the URI")
+        print("vq://pair?" + "&".join(f"{k}={quote(v, safe='-_.~')}" for k, v in pairs))
     elif cmd == "render":
         sys.stdout.write(render_text(json.loads(args[0])))
     else:

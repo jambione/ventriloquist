@@ -123,24 +123,34 @@ pub struct ModePolicy {
     timing: Timing,
     fallback_since: Option<Instant>,
     short_drops: u32,
+    /// `VQ_RELAY_FORCE_LONGPOLL`: never try the WebSocket.
+    force_longpoll: bool,
 }
 
 impl ModePolicy {
     /// A policy that starts with the WebSocket.
     pub fn new(timing: Timing) -> Self {
-        Self { timing, fallback_since: None, short_drops: 0 }
+        Self { timing, fallback_since: None, short_drops: 0, force_longpoll: false }
+    }
+
+    /// A policy for a transport with `VQ_RELAY_FORCE_LONGPOLL` set to a
+    /// non-empty value other than `0` in `env`: the WebSocket is never tried.
+    pub fn from_env(timing: Timing, env: &dyn Fn(&str) -> Option<String>) -> Self {
+        let force = env("VQ_RELAY_FORCE_LONGPOLL").is_some_and(|v| !v.is_empty() && v != "0");
+        Self { force_longpoll: force, ..Self::new(timing) }
     }
 
     /// Whether the next attempt should use the WebSocket: always, until a
     /// fallback began; then again `ws_retry_every` after it began.
     pub fn should_try_websocket(&self, now: Instant) -> bool {
-        self.fallback_since
+        !self.force_longpoll
+            && self.fallback_since
             .is_none_or(|t| now.saturating_duration_since(t) >= self.timing.ws_retry_every)
     }
 
     /// Whether we are currently on the fallback.
     pub fn in_fallback(&self) -> bool {
-        self.fallback_since.is_some()
+        self.force_longpoll || self.fallback_since.is_some()
     }
 
     /// The WebSocket could not be established: use long-poll now.
@@ -167,6 +177,9 @@ impl ModePolicy {
 
     /// When a fallback session should hand over to a WebSocket retry.
     pub fn retry_deadline(&self, now: Instant) -> Instant {
+        if self.force_longpoll {
+            return now + Duration::from_secs(365 * 86_400);
+        }
         self.fallback_since.map_or(now, |t| t + self.timing.ws_retry_every)
     }
 }
@@ -979,7 +992,7 @@ async fn run(
         return;
     }
     let mut failures: u32 = 0;
-    let mut mode = ModePolicy::new(timing.clone());
+    let mut mode = ModePolicy::from_env(timing.clone(), &*shared.net.env);
     let mut ensured: Option<(String, String)> = None;
     let mut wait = Duration::ZERO;
     loop {
@@ -1113,7 +1126,7 @@ fn handle_control(
 ) {
     *failures = 0;
     *ensured = None;
-    *mode = ModePolicy::new(shared.net.timing.clone());
+    *mode = ModePolicy::from_env(shared.net.timing.clone(), &*shared.net.env);
     if let Control::ResetRoom(old) = k {
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -1475,6 +1488,20 @@ mod tests {
         m.websocket_failed(t1);
         assert!(!m.should_try_websocket(t1 + Duration::from_secs(10)));
         assert_eq!(m.retry_deadline(t1), t1 + Duration::from_secs(300));
+    }
+
+    #[test]
+    fn force_longpoll_env_never_tries_the_websocket() {
+        let on = |k: &str| (k == "VQ_RELAY_FORCE_LONGPOLL").then(|| "1".to_owned());
+        let m = ModePolicy::from_env(Timing::default(), &on);
+        let now = Instant::now();
+        assert!(!m.should_try_websocket(now));
+        assert!(!m.should_try_websocket(now + Duration::from_secs(10_000)));
+        assert!(m.in_fallback());
+        assert!(m.retry_deadline(now) > now + Duration::from_secs(86_400));
+        let off = |k: &str| (k == "VQ_RELAY_FORCE_LONGPOLL").then(|| "0".to_owned());
+        assert!(ModePolicy::from_env(Timing::default(), &off).should_try_websocket(now));
+        assert!(ModePolicy::from_env(Timing::default(), &|_| None).should_try_websocket(now));
     }
 
     #[test]

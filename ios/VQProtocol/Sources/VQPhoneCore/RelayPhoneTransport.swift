@@ -60,14 +60,15 @@ extension PhoneEngine: RelayPeerEvents {}
     let relayURL: URL
     let secret: String
     unowned let owner: RelayPhoneTransport
-    var state = RelayClientState()
+    var state: RelayClientState
     var socket: RelayWebSocket?
     var socketGen = 0
     var pollTask: Task<Void, Never>?
     var sendChain: Task<Void, Never>?
     var stopped = false
 
-    init(roomId: String, relayURL: URL, secret: String, owner: RelayPhoneTransport) {
+    init(roomId: String, relayURL: URL, secret: String, owner: RelayPhoneTransport, forceLongPoll: Bool = false) {
+        self.state = RelayClientState(forceLongPoll: forceLongPoll)
         self.roomId = roomId; self.relayURL = relayURL; self.secret = secret; self.owner = owner
     }
 
@@ -180,16 +181,19 @@ public final class RelayPhoneTransport: PhoneTransport, @unchecked Sendable {  /
     @MainActor let scheduler: RelayScheduler
     @MainActor private var rooms: [String: RelayRoom] = [:]
     @MainActor private var paused = false
+    @MainActor private let forceLongPoll: Bool
 
+    /// `forceLongPoll`: skip the WebSocket entirely (the PhoneSim and E2E
+    /// harness set it from `VQ_RELAY_FORCE_LONGPOLL`).
     @MainActor public init(networking: RelayNetworking, clock: PhoneClock = SystemClock(),
-                           scheduler: RelayScheduler = TaskRelayScheduler()) {
-        self.net = networking; self.clock = clock; self.scheduler = scheduler
+                           scheduler: RelayScheduler = TaskRelayScheduler(), forceLongPoll: Bool = false) {
+        self.net = networking; self.clock = clock; self.scheduler = scheduler; self.forceLongPoll = forceLongPoll
     }
 
     /// Start (or restart) a room. Connects at once unless the app is paused.
     @MainActor public func addRoom(relayURL: URL, roomId: String, secret: String) {
         removeRoom(roomId: roomId)
-        let room = RelayRoom(roomId: roomId, relayURL: relayURL, secret: secret, owner: self)
+        let room = RelayRoom(roomId: roomId, relayURL: relayURL, secret: secret, owner: self, forceLongPoll: forceLongPoll)
         rooms[roomId] = room
         if !paused { room.feed(.connectRequested) }
     }

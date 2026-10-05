@@ -15,6 +15,8 @@ final class Sim {
         var verbose = false
         /// Relay mode: pair through this `vq://pair?...` link instead of listening on TCP.
         var relayPairURI: PairingURI?
+        /// Relay mode without a new pairing: reconnect to the desktops saved in `--state-dir`.
+        var relayMode = false
     }
 
     /// One utterance sent by this run (`start` … `final`, or a `resend`).
@@ -59,6 +61,12 @@ final class Sim {
     private var lastHosts = ""
     private var lastPairing = ""
 
+    /// `VQ_RELAY_FORCE_LONGPOLL` set to anything but empty or `0`: no WebSocket.
+    static func forceLongPollFromEnv() -> Bool {
+        guard let v = ProcessInfo.processInfo.environment["VQ_RELAY_FORCE_LONGPOLL"] else { return false }
+        return !v.isEmpty && v != "0"
+    }
+
     init(options: Options) throws {
         self.options = options
         let idStore: IdentityKeyStore
@@ -83,11 +91,12 @@ final class Sim {
         }
         let identity = try PhoneIdentity.loadOrCreate(from: idStore)
         let transport: PhoneTransport
-        if options.relayPairURI != nil {
+        if options.relayPairURI != nil || options.relayMode {
             // Relay mode runs on the main thread/run loop (see `run`).
             let c = SystemClock()
             let r = MainActor.assumeIsolated {
-                RelayPhoneTransport(networking: URLSessionRelayNetworking(), clock: c)
+                RelayPhoneTransport(networking: URLSessionRelayNetworking(), clock: c,
+                                    forceLongPoll: Self.forceLongPollFromEnv())
             }
             relay = r
             server = nil
@@ -228,6 +237,8 @@ final class Sim {
         ])
         if let server {
             Out.event("listening", [("host", .s(options.host)), ("port", .i(Int(server.port)))])
+        } else if options.relayPairURI == nil {
+            Out.event("relay_mode", [])
         } else if let uri = options.relayPairURI {
             Out.event("relay_pairing", [("relay", .s(uri.relayURL.absoluteString)), ("room", .s(uri.roomId)),
                                         ("desktop", .s(uri.name))])

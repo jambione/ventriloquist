@@ -113,6 +113,16 @@ private func polling() -> RelayClientState {
         #expect(m.mode == .wsOpen)
     }
 
+    @Test func forcedLongPollNeverOpensAWebSocket() {
+        var m = RelayClientState(makeSession: { "session-f" }, forceLongPoll: true)
+        #expect(m.handle(.connectRequested, now: 0) == [.startLongPoll(session: "session-f", cursor: 0)])
+        #expect(m.mode == .polling)
+        // No WebSocket probe is ever scheduled, even long after.
+        #expect(m.handle(.tick, now: 100_000) == [])
+        let sent = m.handle(.send(hello), now: 1)
+        #expect(sent == [.sendPoll(session: "session-f", frames: [hello])])
+    }
+
     @Test func presenceAndFramesOverWS() {
         var m = openWS()
         #expect(m.handle(.wsText(#"{"type":"desktop_present","present":true}"#), now: 1) == [.peerConnected])
