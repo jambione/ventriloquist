@@ -14,14 +14,16 @@ The Ventriloquist desktop core (SPEC §7). It has no Tauri dependencies and uses
 | `outbox` | `EventOutbox`: coalescing queue between the host loop and a slow UI. |
 | `pairing_guard` | Pairing rate limits and global lockout (README §7.3; D10). |
 | `host` | `spawn_host`: tokio runtime, with `HostCommand` in and `HostEvent` out over a bounded channel (`spawn_host_with_io` lets tests inject a slow disk). |
-| `transport` | The `Transport` trait; `ble::BleCentralTransport` (feature `ble`, on by default); `tcp::TcpTransport` (feature `dev-tcp`, for tests and dev only); `policy` (backoff, MTU, idle drop, BLE slot expiry, scan retry, adapter re-acquire). |
+| `relay_room` | `RelayRoomStore`: the relay URL, `room_id` and `room_secret` (generated once; `relay.json` + the 0600 file `relay_secret`), shared by the core (QR pairing) and the relay transport. |
+| `pairing_uri` | The `vq://pair?…` QR payload (SPEC_V3 §5). |
+| `transport` | The `Transport` trait; `relay::RelayTransport` (feature `relay`, on by default) with `proxy` (OS proxy / PAC resolution); `tcp::TcpTransport` (feature `dev-tcp`, for tests and dev only); `policy` (backoff, idle drop). |
 
 ## Commands
 
 ```sh
 cargo test  -p vq-host-core --features dev-tcp
 cargo clippy -p vq-host-core --all-targets --features dev-tcp -- -D warnings   # --all-features also works (debug)
-cargo build -p vq-host-core                       # default features (ble)
+cargo build -p vq-host-core                       # default features (relay)
 scripts/verify.sh                                 # all gates
 cargo run   -p vq-host-core --features dev-tcp --bin vq-host -- --connect 127.0.0.1:47800 \
             --log-dir /tmp/vq-logs --config-dir /tmp/vq-cfg [--name "My Mac"]
@@ -48,7 +50,7 @@ Events:
 | `event` | Fields |
 |---|---|
 | `started` | `device_id`, `name`, `log_dir`, `paired_peers` (array of `{device_id,name,public_key(b64),paired_at_ms}`) |
-| `snapshot` | answer to the `snapshot` command: `device_id`, `name`, `log_dir`, `paired_peers`, `adapter_state`, `peers` (array of `{peer, state, device_id, name, paired, pairing: null or {code, phone_name, expires_in_secs}}`), `entries` (array of entries, oldest first), `log_warning` (string while the log folder cannot be written, else null) |
+| `snapshot` | answer to the `snapshot` command: `device_id`, `name`, `log_dir`, `paired_peers`, `relay` (`{link, reason, detail}`), `phone_pairing` (null, or `{uri, expires_in_secs}` while "Add phone" is open), `peers` (array of `{peer, state, device_id, name, paired, pairing: null or {code, phone_name, expires_in_secs}}`), `entries` (array of entries, oldest first), `log_warning` (string while the log folder cannot be written, else null) |
 | `connection_status` | `peer`, `state` (`connected`/`hello_exchanged`/`pairing`/`secure`/`closed`), `device_id` (null until the phone's hello), `name` (likewise), `paired` (bool), `reason` (null, or e.g. `unknown_peer`, `keepalive_timeout`, `idle_unpaired`, `rate_limited`, `protocol`, `version`) |
 | `pairing_code_shown` | `peer`, `device_id`, `phone_name`, `code` (exactly 6 ASCII digits), `expires_in_secs` (120) |
 | `pairing_code_ended` | `peer`, `reason` (`expired`/`too_many_failures`/`cancelled`/`disconnected`) |
@@ -62,9 +64,9 @@ Events:
 | `message_rejected` | `peer`, `code` (vq-protocol error code, e.g. `plaintext_not_allowed`, `text_too_long`) |
 | `log_warning` / `storage_warning` | `message` |
 | `log_recovered` | (none): every entry that failed to log has now been written |
-| `adapter_state` | `state` (`unknown`/`no_adapter`/`powered_off`/`unauthorized`/`scanning`; TCP reports `scanning`) |
-| `devices_seen` | `count`: BLE advertisements seen since the current scan started (diagnostics; at most one event per second, coalesced; `snapshot` carries it as `devices_seen`) |
-| `phone_app_not_open` | `active` (bool): the BLE transport found a phone by its name but the Ventriloquist GATT service is missing (the iPhone app is not in the foreground). Emitted on change only; `active:false` is emitted when the next connection of any phone is established. `snapshot` carries the current value as `phone_app_not_open`. The UI says "iPhone found — open Ventriloquist on it" |
+| `relay_status` | `status`: `{link, reason, detail}`. `link` is `idle` (no relay: the TCP dev transport), `connecting`, `websocket`, `fallback` (HTTPS long-poll) or `unreachable`; then `reason` is one of `dns`, `proxy_auth_required`, `proxy_blocked`, `tls_untrusted`, `owner_token_rejected`, `room_conflict`, `other`. `detail` is a short technical text without secrets. Emitted on change only. |
+| `phone_pairing_qr` | `uri` (the `vq://pair?…` payload, **contains the room secret: render it, never log it**), `expires_in_secs` (120). Emitted for `start_phone_pairing`, then again every 120 s while the dialog is open (and at once if the code was used up by wrong confirmations). The `c` field of the URI is the active v1 pairing code. |
+| `phone_pairing_ended` | `reason` (`paired`: a phone paired with the QR's code; `closed`: `stop_phone_pairing`) |
 | `config_changed` | `log_dir`, `name`, `persisted` (bool) |
 
 `entry_upserted` is emitted only when a revision is **accepted**, meaning its `rev` is higher than any seen for that `id` in this run (evicted ids included, D8). Duplicate or older revisions are acked to the phone but produce no event. The one exception: when a connection closes, its live partials are re-emitted once with `state:"interrupted"` and `partial:false`.
@@ -83,6 +85,8 @@ Example:
 Commands are optional. Send one JSON object per line on stdin. EOF on stdin does **not** stop the host.
 
 ```json
+{"command":"start_phone_pairing"}
+{"command":"stop_phone_pairing"}
 {"command":"cancel_pairing","peer":"tcp:127.0.0.1:47800#1"}
 {"command":"forget_peer","device_id":"…"}
 {"command":"set_log_dir","path":"/tmp/other"}
@@ -106,27 +110,22 @@ The logger writes `<log_dir>/YYYY-MM-DD.md`, using the local date when the revis
 
 Rendering rules and the dedupe index are described in `src/logger.rs` and in docs/SPEC_QUESTIONS.md D1–D3.
 
-## Windows
+## Phone pairing by QR (SPEC_V3 §5)
 
-The crate keeps to the portable APIs:
-- `btleplug` uses WinRT on Windows.
-- The unix permission code is behind `cfg(unix)`.
-- Config files live in the per-user, non-roaming `%LOCALAPPDATA%` and rely on its ACL.
+`start_phone_pairing` starts a v1 pairing code (`SessionManager::start_qr_pairing`) and emits `phone_pairing_qr`. While that code is active (120 s), the next `pair_request` **uses it** instead of a fresh code: the phone read it from the QR and confirms with it, so the user types nothing. The rest of the flow (`pair_challenge`, `pair_confirm`, the guard's rate limits and lockout) is unchanged. A QR attempt shows **no code modal** (no `pairing_code_shown`/`_ended`); on success the core emits `pairing_result{ok:true}`, `paired_peers_changed` and `phone_pairing_ended{paired}`. The QR code is single-use: it is dropped after a successful pairing and after 3 wrong confirmations (a new one is generated while the dialog is open). `stop_phone_pairing` ends the flow and cancels attempts in progress.
 
-On Windows the host uses `transport::ble_peripheral::BlePeripheralTransport` (v2.3) **instead of** the btleplug central, under the same `ble` feature; macOS keeps `BleCentralTransport`. `transport::platform_ble_transport()` picks it, and `VQ_BLE_MODE=central|peripheral` overrides it for diagnostics (logged at info).
+## Relay transport (SPEC_V3 §4, §6)
 
-No Windows build is run by the agents (CI cross-checks with `--target x86_64-pc-windows-msvc`).
+`transport::relay::RelayTransport::new(store, RelayOptions) -> (RelayTransport, RelayHandle)`. The handle is the run-time configuration surface (owner token, URL, `reset_room`, `test_connection`).
 
-### Windows peripheral transport (v2.3)
+- **Connection order.** `PUT /v1/rooms/{room}` with the owner token (only when a token is set and the room is not known to exist; 201/200 are success), then the WebSocket (`…/ws?role=desktop`, `Authorization: Bearer <room secret>`). If the WebSocket cannot be established (any failure) or ends twice in a row within 10 s, the transport uses the **long-poll fallback** (`POST …/send`, `GET …/poll`, 25 s hold, cursor acknowledgement) and retries the WebSocket every 5 minutes. Reconnect backoff: 1, 2, 4, 8, then 30 s (`relay::backoff_factor`).
+- **TLS** is `native-tls` (Windows schannel, macOS Security.framework), so the **OS certificate store** decides (a TLS-inspecting proxy works once its root is installed in the OS). `reqwest` (long-poll, room creation) uses the same `native-tls`.
+- **Proxy** (`transport::proxy`): `HTTPS_PROXY`/`ALL_PROXY` (and `HTTP_PROXY` for `http://` relays), filtered by `NO_PROXY`; else the OS: Windows `WinHttpGetIEProxyConfigForCurrentUser` + `WinHttpGetProxyForUrl` (WPAD and PAC evaluated by WinHTTP), macOS `CFNetworkCopySystemProxySettings` + `CFNetworkCopyProxiesForURL`; a PAC URL is fetched (direct, 5 s, cached 5 min) and evaluated with `CFNetworkCopyProxiesForAutoConfigurationScript`. The WebSocket goes through an HTTP `CONNECT` tunnel; `SOCKS` entries are skipped. Proxy credentials are only supported from the `HTTPS_PROXY` URL (Basic); a 407 is reported as `proxy_auth_required` (NTLM/Kerberos single sign-on is not implemented).
+- **Peers.** `peer_joined` is `Connected` (`relay:<conn_id>`, `mtu` 8192); `peer_left` and any link failure are `Disconnected`. The relay cannot drop a phone, so a host `Disconnect` reports the peer gone and ignores its frames until it leaves; `reconnect_after` hold-offs do not apply (a reconnecting phone is a new `conn_id`).
+- **Errors** are categorised into `RelayReason` (see `relay_status`): DNS; proxy 407/other refusal; TLS trust (by the TLS error text: schannel `0x800B0109`, Security.framework `-9807…`, OpenSSL wording); relay 401 (owner token on `PUT`) / 409 / room secret rejected (`room_conflict`); a 404 for the room without an owner token is `owner_token_rejected`.
+- **Reset relay room** rotates the room id **and** secret (the relay answers 409 for a known id with another secret), reconnects, and deletes the old room on a best-effort basis. Desktop pairing records are not touched by core (the app forgets them).
+- `http://` relay URLs are accepted (local development, `wrangler dev`/`vq-relay` on loopback); production uses `https://`.
 
-- A WinRT `GattServiceProvider` publishes `HOST_SERVICE_UUID` with `H_RX` (Write with response, Plain) and `H_TX` (Notify, Plain) and advertises it (connectable, discoverable). `BluetoothAdapter.IsPeripheralRoleSupported == false` is reported as `AdapterState::PeripheralUnsupported` (toolbar: "This PC's Bluetooth adapter can't accept connections from the iPhone (peripheral role not supported)"); advertising is `AdapterState::Advertising`.
-- Each client subscribing to `H_TX` is a peer `ble-h:<session DeviceId>#<n>` (`policy::ClientBook`), `Connected` with `mtu = MaxPduSize − 3` capped at 512 (`policy::peripheral_frame_mtu`); the core then sends `hello`. `H_RX` writes from that client's session are its frames (every write is answered). Sends are `NotifyValueForSubscribedClientAsync` per frame, in order, from a per-peer writer task with a bounded queue; overflow or a 10 s notification is a disconnect. Unsubscribe or GATT session close is a disconnect. WinRT cannot drop a central, so a dropped client that stays subscribed is ignored until it unsubscribes.
-- An aborted or failed advertisement restarts with backoff (`policy::advertising_restart_delay`); the provider is released on shutdown.
+Unsafe code is denied crate-wide except in `transport::proxy::sys` (the OS bindings).
 
-## BLE scanning and diagnostics
-
-- The scan starts with an **empty `ScanFilter`**: nothing is filtered by the OS or by btleplug (some Windows drivers drop filtered advertisements; btleplug's WinRT backend filters in software). `transport::ble` matches every advertisement itself with `policy::is_candidate(services, local_name)`: the advertised services contain the Ventriloquist service UUID **or** the local name is `Ventriloquist` (iOS may put a 128-bit UUID in the scan response or the overflow area).
-- A name-only match is verified after connecting (`discover_services`). If the GATT service is missing, the device is dropped and not retried for 5 minutes (`policy::NAME_ONLY_BLOCK`).
-- The transport logs at info (the desktop app writes these to its log file): the adapter (and `adapter_info`), scan start/stop/errors, every discovered device once per id per 60 s (id, local name, RSSI, advertised services, matched), every connect attempt, the services and characteristics found, the subscribe result and every error with its Debug text.
-- A name-only match without the GATT service also sends `TransportEvent::PhoneAppNotOpen` (the core turns it into `HostEvent::PhoneAppNotOpen`, cleared on the next `Connected`).
-- `TransportEvent::DevicesSeen(n)` / `HostEvent::DevicesSeen` carry the advertisement count so the UI can show "Scanning… (N devices seen)".
+No Windows build is run by the agents (CI cross-checks with `--target x86_64-pc-windows-msvc`); the Windows proxy code (WinHTTP) is therefore only compile-checked, as is schannel TLS.

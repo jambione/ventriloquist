@@ -92,6 +92,7 @@ async fn pair_stream_reconnect_and_redeliver_over_tcp() {
             log_dir_override: Some(log_dir.clone()),
             name_override: Some("E2E Desktop".into()),
             clock: Arc::new(SystemClock::new()),
+            relay: None,
         },
         Box::new(TcpTransport::new(addr)),
     )

@@ -108,6 +108,9 @@ struct PairingAttempt {
     code: PairingCode,
     created_at: Duration,
     failures: u32,
+    /// Started from the QR code ("Add phone"): the code travels in the QR,
+    /// so the UI shows no code modal (no `pairing_code_shown`/`_ended`).
+    via_qr: bool,
 }
 
 impl PairingAttempt {
@@ -138,6 +141,18 @@ struct PeerSession {
     unanswered_pings: u32,
     closing: bool,
     close_reason: Option<String>,
+    /// A QR attempt on this connection used up its failures: the QR code
+    /// must not be offered again.
+    qr_burned: bool,
+}
+
+/// The pairing code shown in the QR (SPEC_V3 §5): a v1 pairing code that is
+/// started when the QR is shown and used, unchanged, for the next
+/// `pair_request`s instead of a freshly generated one.
+#[derive(Clone, Copy)]
+struct QrCode {
+    code: PairingCode,
+    started: Duration,
 }
 
 /// All live sessions.
@@ -146,6 +161,7 @@ pub struct SessionManager {
     name: String,
     sessions: HashMap<PeerId, PeerSession>,
     guard: PairingGuard,
+    qr: Option<QrCode>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -168,8 +184,39 @@ impl SessionManager {
             name,
             sessions: HashMap::new(),
             guard: PairingGuard::new(),
+            qr: None,
         }
     }
+
+    /// Start a v1 pairing code for the QR (replacing any previous one) and
+    /// return it. A `pair_request` arriving while it is active uses it, so
+    /// the phone confirms with the code from the QR automatically.
+    pub fn start_qr_pairing(&mut self, clock: &dyn Clock) -> PairingCode {
+        let code = PairingCode::generate();
+        self.qr = Some(QrCode { code, started: clock.mono() });
+        code
+    }
+
+    /// Stop offering the QR code. Attempts already in progress end too.
+    pub fn stop_qr_pairing(&mut self, store: &PairingStore) -> Out {
+        self.qr = None;
+        let mut out = Vec::new();
+        for (peer, s) in &mut self.sessions {
+            if s.pairing.as_ref().is_some_and(|a| a.via_qr) {
+                s.end_pairing(peer, CodeEndReason::Cancelled, store, &mut out);
+            }
+        }
+        out
+    }
+
+    /// The QR code, while it is active (not expired).
+    pub fn active_qr_code(&self, clock: &dyn Clock) -> Option<PairingCode> {
+        let now = clock.mono();
+        self.qr
+            .filter(|q| now.saturating_sub(q.started) < PAIR_CODE_TTL)
+            .map(|q| q.code)
+    }
+
 
     /// This desktop's identity.
     pub fn identity(&self) -> &Identity {
@@ -215,7 +262,7 @@ impl SessionManager {
                     device_id: h.map(|h| h.device_id),
                     name: h.map(|h| h.name.clone()),
                     paired: h.is_some_and(|h| store.knows(&h.device_id, &h.public_key)),
-                    pairing: s.pairing.as_ref().filter(|a| a.active(now)).map(|a| {
+                    pairing: s.pairing.as_ref().filter(|a| a.active(now) && !a.via_qr).map(|a| {
                         PairingStatus {
                             code: a.code.to_string(),
                             phone_name: h.map(|h| h.name.clone()).unwrap_or_default(),
@@ -259,6 +306,7 @@ impl SessionManager {
             unanswered_pings: 0,
             closing: false,
             close_reason: None,
+            qr_burned: false,
         };
         out.push(status_event(&peer, &s, None));
         s.send_plain(&peer, &Message::Hello(hello), &mut out);
@@ -270,7 +318,7 @@ impl SessionManager {
     pub fn on_disconnected(&mut self, peer: &str, reason: &str, store: &PairingStore) -> Out {
         let mut out = Vec::new();
         if let Some(mut s) = self.sessions.remove(peer) {
-            if s.pairing.take().is_some() {
+            if s.pairing.take().is_some_and(|a| !a.via_qr) {
                 out.push(SessionOutput::Event(HostEvent::PairingCodeEnded {
                     peer: peer.to_owned(),
                     reason: CodeEndReason::Disconnected,
@@ -301,6 +349,7 @@ impl SessionManager {
         let other_code_active = self.sessions.iter().any(|(p, s)| {
             p != peer && !s.closing && s.pairing.as_ref().is_some_and(|a| a.active(now))
         });
+        let qr = self.qr.filter(|q| now.saturating_sub(q.started) < PAIR_CODE_TTL);
         let Some(s) = self.sessions.get_mut(peer) else {
             return out;
         };
@@ -321,9 +370,14 @@ impl SessionManager {
                     clock,
                     guard: &mut self.guard,
                     other_code_active,
+                    qr,
                 };
                 handle_envelope(peer, s, &envelope, ctx, &mut out);
             }
+        }
+        if s.qr_burned {
+            s.qr_burned = false;
+            self.qr = None;
         }
         out
     }
@@ -404,6 +458,10 @@ impl SessionManager {
             }
             None => {
                 self.guard.on_paired();
+                if s.pairing.as_ref().is_some_and(|a| a.via_qr) {
+                    // The QR code is single-use.
+                    self.qr = None;
+                }
                 s.pairing = None;
                 s.send_plain(peer, &Message::PairResult(key.success_message()), &mut out);
                 out.push(pairing_result(peer, hello.as_ref(), true, 0));
@@ -450,6 +508,8 @@ struct Ctx<'a> {
     guard: &'a mut PairingGuard,
     /// Another connection shows an active pairing code.
     other_code_active: bool,
+    /// The active QR code, if any.
+    qr: Option<QrCode>,
 }
 
 fn pairing_result(peer: &str, hello: Option<&Hello>, ok: bool, remaining: u32) -> SessionOutput {
@@ -554,11 +614,16 @@ impl PeerSession {
         out: &mut Out,
     ) {
         self.pending_key = None;
-        if self.pairing.take().is_some() {
-            out.push(SessionOutput::Event(HostEvent::PairingCodeEnded {
-                peer: peer.to_owned(),
-                reason,
-            }));
+        if let Some(a) = self.pairing.take() {
+            if a.via_qr && reason == CodeEndReason::TooManyFailures {
+                self.qr_burned = true;
+            }
+            if !a.via_qr {
+                out.push(SessionOutput::Event(HostEvent::PairingCodeEnded {
+                    peer: peer.to_owned(),
+                    reason,
+                }));
+            }
         }
         if self.state == PeerState::Pairing {
             self.set_state(peer, PeerState::HelloExchanged, store, out);
@@ -761,25 +826,34 @@ fn handle_unsecured(
             }
             ctx.guard.on_code_issued(device_id, now);
             // README §7.3: always a new code and nonce_d, failures reset.
+            // SPEC_V3 §5: with an active QR the code is the QR's (the phone
+            // read it from the QR), and the attempt lives as long as the QR.
+            let (code, created_at, via_qr) = match ctx.qr {
+                Some(q) => (q.code, q.started, true),
+                None => (PairingCode::generate(), now, false),
+            };
             let attempt = PairingAttempt {
                 request: req,
                 challenge: PairChallenge::generate(),
-                code: PairingCode::generate(),
-                created_at: now,
+                code,
+                created_at,
                 failures: 0,
+                via_qr,
             };
             let challenge = attempt.challenge.clone();
             let code = attempt.code.to_string();
             s.pairing = Some(attempt);
             s.set_state(peer, PeerState::Pairing, ctx.store, out);
             s.send_plain(peer, &Message::PairChallenge(challenge), out);
-            out.push(SessionOutput::Event(HostEvent::PairingCodeShown {
-                peer: peer.to_owned(),
-                device_id,
-                phone_name,
-                code,
-                expires_in_secs: PAIR_CODE_TTL_SECS,
-            }));
+            if !via_qr {
+                out.push(SessionOutput::Event(HostEvent::PairingCodeShown {
+                    peer: peer.to_owned(),
+                    device_id,
+                    phone_name,
+                    code,
+                    expires_in_secs: PAIR_CODE_TTL_SECS,
+                }));
+            }
         }
         Message::PairConfirm(confirm) => {
             // Activity only while a code is active, so confirms without a

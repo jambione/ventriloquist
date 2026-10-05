@@ -11,7 +11,9 @@ import type {
   HotkeyView,
   Modifier,
   NewlineMode,
+  RelaySettingsView,
   SlotsView,
+  TestReport,
 } from "./types";
 
 /** The single Tauri event that carries every `HostEvent` (typed JSON). */
@@ -68,4 +70,18 @@ export const backend = {
     invoke("set_hotkey_modifiers", { kind, modifiers }),
   accessibilityStatus: (): Promise<AccessibilityStatus> => invoke("accessibility_status"),
   openAccessibilitySettings: (): Promise<void> => invoke("open_accessibility_settings"),
+  // ---- relay (SPEC_V3 §6)
+  relaySettings: (): Promise<RelaySettingsView> => invoke("relay_settings"),
+  setRelayUrl: (url: string): Promise<RelaySettingsView> => invoke("set_relay_url", { url }),
+  /** An empty token clears it. */
+  setOwnerToken: (token: string): Promise<RelaySettingsView> => invoke("set_owner_token", { token }),
+  /** Makes, stores and returns a new owner token (shown once). */
+  generateOwnerToken: (): Promise<string> => invoke("generate_owner_token"),
+  testRelay: (): Promise<TestReport> => invoke("test_relay"),
+  resetRelayRoom: (): Promise<void> => invoke("reset_relay_room"),
+  /** "Add phone": the host answers with `phone_pairing_qr` events. */
+  startPhonePairing: (): Promise<void> => invoke("start_phone_pairing"),
+  stopPhonePairing: (): Promise<void> => invoke("stop_phone_pairing"),
+  /** The QR for a pairing URI as an SVG data: URL, rendered locally. */
+  qrSvg: (uri: string): Promise<string> => invoke("qr_svg", { uri }),
 };

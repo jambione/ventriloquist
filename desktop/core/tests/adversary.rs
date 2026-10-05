@@ -492,6 +492,7 @@ fn open_with(dir: &std::path::Path) -> std::io::Result<Core> {
         log_dir_override: Some(dir.join("logs")),
         name_override: None,
         clock: Arc::new(ManualClock::new(common::start_time())),
+        relay: None,
     })
 }
 
@@ -587,8 +588,8 @@ fn k2_snapshot_restores_the_whole_ui_state() {
     h.frames(P, f);
     let o = h
         .core
-        .handle_transport(vq_host_core::transport::TransportEvent::Adapter(
-            vq_host_core::AdapterState::Scanning,
+        .handle_transport(vq_host_core::transport::TransportEvent::Relay(
+            vq_host_core::events::RelayStatus::of(vq_host_core::events::RelayLink::Websocket),
         ));
     h.absorb(o);
     let mut b = FakePhone::new("B");
@@ -602,7 +603,7 @@ fn k2_snapshot_restores_the_whole_ui_state() {
         name,
         log_dir,
         paired_peers,
-        adapter_state,
+        relay,
         peers,
         entries,
         ..
@@ -613,7 +614,7 @@ fn k2_snapshot_restores_the_whole_ui_state() {
     assert_eq!(name, "Test Desktop");
     assert_eq!(log_dir, &h.log_dir());
     assert_eq!(paired_peers.len(), 1);
-    assert_eq!(*adapter_state, vq_host_core::AdapterState::Scanning);
+    assert_eq!(relay.link, vq_host_core::events::RelayLink::Websocket);
     assert_eq!(peers.len(), 2);
     assert_eq!(peers[0].peer, P);
     assert_eq!(peers[0].state, PeerState::Secure);
@@ -771,6 +772,7 @@ mod host_runtime {
                 log_dir_override: Some(log_dir.clone()),
                 name_override: Some("Host".into()),
                 clock: Arc::new(SystemClock::new()),
+                relay: None,
             },
             Box::new(TcpTransport::new(addr)),
             wrap,

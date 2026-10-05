@@ -43,7 +43,7 @@ function snapshot(entries: Entry[] = [], peers: PeerStatus[] = []): HostEvent {
     name: "Mac",
     log_dir: "/tmp/log",
     paired_peers: [],
-    adapter_state: "scanning",
+    relay: { link: "websocket", reason: null, detail: null },
     peers,
     entries,
   };
@@ -144,7 +144,7 @@ describe("injection: bidi spoofing in composed strings", () => {
 
   it("toolbar status isolates a phone name containing U+202E (\" (secure)\" must not be reordered)", () => {
     const s = ready([conn("p1", "secure", name, true)]);
-    const text = connectionStatus(s, "mac").text;
+    const text = connectionStatus(s).text;
     expect(overrideLeaks(text, name), JSON.stringify(text)).toBe(false);
   });
 
@@ -353,7 +353,7 @@ describe("scale", () => {
   it("toolbar status text stays bounded with many connected phones", () => {
     let s = ready();
     for (let i = 0; i < 1000; i++) s = feed(s, [conn(`p${i}`, "hello_exchanged", `phone-${i}-${"n".repeat(50)}`)]);
-    expect(connectionStatus(s, "mac").text.length).toBeLessThan(1000);
+    expect(connectionStatus(s).text.length).toBeLessThan(1000);
   });
 
   it("Clear view then edits re-show only the edited entry", () => {

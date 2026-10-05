@@ -2,7 +2,16 @@
 
 import { clip, isolate, stripBidi } from "./bidi";
 import type { AppState, PeerInfo } from "./state";
-import type { DeliveryEvent, HotkeyView, Modifier, SlotsView, SlotView } from "./types";
+import type {
+  DeliveryEvent,
+  HotkeyView,
+  Modifier,
+  RelayReason,
+  RelayStatus,
+  SlotsView,
+  SlotView,
+  TestReport,
+} from "./types";
 
 export type Platform = "mac" | "windows" | "other";
 
@@ -53,6 +62,8 @@ export interface StatusView {
   tone: StatusTone;
   /** Shown after a coloured "●". */
   text: string;
+  /** Technical detail for a tooltip (never contains a secret). */
+  detail?: string | undefined;
 }
 
 /** Names shown in the status line: at most this many, each clipped. */
@@ -67,34 +78,95 @@ function names(peers: PeerInfo[]): string {
   return uniq.length > MAX_STATUS_NAMES ? `${shown} and ${uniq.length - MAX_STATUS_NAMES} more` : shown;
 }
 
-/** Toolbar connection status (SPEC §6.1, §6.3). */
-export function connectionStatus(state: AppState, platform: Platform): StatusView {
+/** Short, human reason for an unreachable relay (SPEC_V3 §6). */
+export function relayReasonText(reason: RelayReason | null): string {
+  switch (reason) {
+    case "dns":
+      return "DNS lookup failed";
+    case "proxy_auth_required":
+      return "proxy needs credentials";
+    case "proxy_blocked":
+      return "proxy blocked";
+    case "tls_untrusted":
+      return "certificate not trusted";
+    case "owner_token_rejected":
+      return "owner token rejected";
+    case "room_conflict":
+      return "room conflict";
+    case "other":
+    case null:
+      return "connection failed";
+  }
+}
+
+/** What to do about an unreachable relay (Settings → Relay). */
+export function relayReasonHint(reason: RelayReason | null): string {
+  switch (reason) {
+    case "dns":
+      return "The relay's address could not be resolved. Check the relay URL and the network.";
+    case "proxy_auth_required":
+      return "The proxy asks for credentials, which are not supported (NTLM/Kerberos). Ask IT to allow the relay host without sign-in.";
+    case "proxy_blocked":
+      return "The proxy refused the connection to the relay. Ask IT to allow the relay host on port 443.";
+    case "tls_untrusted":
+      return "The relay's certificate is not trusted by this computer (a TLS-inspecting proxy whose root certificate is not installed in the OS store?).";
+    case "owner_token_rejected":
+      return "The relay rejected the owner token, or the room does not exist yet and no owner token is set. Paste the relay's owner token above.";
+    case "room_conflict":
+      return "The room already exists on the relay with another secret (or was deleted). Use “Reset relay room”.";
+    case "other":
+    case null:
+      return "The relay could not be reached.";
+  }
+}
+
+/** One line for the relay link (Settings → Relay). */
+export function relayStatusLine(r: RelayStatus): string {
+  switch (r.link) {
+    case "websocket":
+      return "Connected via relay (WebSocket)";
+    case "fallback":
+      return "Connected via relay (fallback: HTTPS long-poll)";
+    case "connecting":
+      return "Connecting to the relay…";
+    case "unreachable":
+      return `Relay unreachable — ${relayReasonText(r.reason)}`;
+    case "idle":
+      return "Not connected";
+  }
+}
+
+/** The outcome of "Test connection" as a sentence. */
+export function testReportText(t: TestReport): string {
+  const r = t.status;
+  switch (r.link) {
+    case "websocket":
+      return "OK: the relay is reachable and WebSockets work.";
+    case "fallback":
+      return "The relay is reachable, but WebSockets are blocked: the HTTPS fallback will be used.";
+    case "unreachable":
+      return `Failed — ${relayReasonText(r.reason)}. ${relayReasonHint(r.reason)}`;
+    default:
+      return relayStatusLine(r);
+  }
+}
+
+/** Toolbar connection status (SPEC_V3 §6). */
+export function connectionStatus(state: AppState): StatusView {
   if (state.phase === "fatal") return { tone: "warn", text: "Not running" };
   if (state.phase === "loading") return { tone: "idle", text: "Starting…" };
-  switch (state.adapter) {
-    case "powered_off":
-      return { tone: "warn", text: "Bluetooth off" };
-    case "unauthorized":
-      return {
-        tone: "warn",
-        text:
-          platform === "windows"
-            ? "Bluetooth not allowed — enable it in Settings › Privacy & security"
-            : "Bluetooth not authorized — enable in System Settings",
-      };
-    case "no_adapter":
-      return { tone: "warn", text: "No Bluetooth adapter" };
-    case "peripheral_unsupported":
-      return {
-        tone: "warn",
-        text: "This PC's Bluetooth adapter can't accept connections from the iPhone (peripheral role not supported)",
-      };
-    default:
-      break;
+  const relay = state.relay;
+  const detail = relay.detail ?? undefined;
+  if (relay.link === "unreachable") {
+    return { tone: "warn", text: `Relay unreachable — ${relayReasonText(relay.reason)}`, detail };
   }
+  const via =
+    relay.link === "websocket" ? " via relay (WebSocket)" : relay.link === "fallback" ? " via relay (fallback)" : "";
   const peers = [...state.peers.values()];
   const secure = peers.filter((p) => p.state === "secure");
-  if (secure.length > 0) return { tone: "ok", text: `Connected to ${names(secure)} (secure)` };
+  if (secure.length > 0) {
+    return { tone: "ok", text: `Connected to ${names(secure)} (secure)${relay.link === "fallback" ? " · relay fallback" : ""}` };
+  }
   const pairing = peers.filter((p) => p.state === "pairing");
   if (pairing.length > 0) return { tone: "busy", text: `Pairing with ${names(pairing)}…` };
   const connecting = peers.filter(
@@ -105,17 +177,15 @@ export function connectionStatus(state: AppState, platform: Platform): StatusVie
   if (unpaired.length > 0) {
     return { tone: "busy", text: `${names(unpaired)} found — pair from the phone` };
   }
-  if (state.phoneAppNotOpen) {
-    return { tone: "busy", text: "iPhone found — open Ventriloquist on it" };
-  }
-  if (state.adapter === "advertising") {
-    return { tone: "idle", text: "Waiting for the iPhone — open Ventriloquist on it" };
-  }
-  if (state.adapter === "scanning") {
-    const n = state.devicesSeen;
-    return { tone: "idle", text: `Scanning… (${n} ${n === 1 ? "device" : "devices"} seen)` };
-  }
-  return { tone: "idle", text: "Starting Bluetooth…" };
+  if (relay.link === "connecting") return { tone: "busy", text: "Connecting to the relay…" };
+  if (via !== "") return { tone: "idle", text: `Connected${via} · Waiting for iPhone` };
+  return { tone: "idle", text: "Waiting for iPhone" };
+}
+
+/** Whether to show the "Add phone" QR on its own: once per run, as soon as
+ * the state is known, while no phone is paired. */
+export function shouldAutoShowQr(state: AppState, alreadyShown: boolean): boolean {
+  return !alreadyShown && state.phase === "ready" && state.pairedPeers.length === 0 && state.phonePairing === null;
 }
 
 /** Local date of a pairing, e.g. "2026-10-03"; "" for anything that is not

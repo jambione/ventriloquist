@@ -13,13 +13,13 @@
 import { clip, isolate, stripBidi } from "./bidi";
 import type {
   AccessibilityStatus,
-  AdapterState,
   BindingNotice,
   DeliveryEvent,
   Entry,
   HostEvent,
   PairedPeer,
   PeerState,
+  RelayStatus,
   SlotsView,
 } from "./types";
 
@@ -73,7 +73,15 @@ export interface PairingModal {
   attemptsRemaining: number | null;
 }
 
-export type NoticeKind = "storage" | "peer" | "version" | "binding";
+export type NoticeKind = "storage" | "peer" | "version" | "binding" | "info";
+
+/** The QR in the "Add phone" dialog. */
+export interface PhonePairingState {
+  /** `vq://pair?…` (contains the room secret: never log it). */
+  uri: string;
+  /** Expiry on the monotonic clock; the host replaces the QR every 120 s. */
+  deadline: number;
+}
 
 export interface Notice {
   id: number;
@@ -96,11 +104,10 @@ export interface AppState {
   /** False after a `config_changed` whose save failed. */
   configPersisted: boolean;
   pairedPeers: PairedPeer[];
-  adapter: AdapterState;
-  /** Advertisements seen since the current scan started (diagnostics). */
-  devicesSeen: number;
-  /** The phone was found by name but the app is not open on it. */
-  phoneAppNotOpen: boolean;
+  /** Relay link state (SPEC_V3 §6). */
+  relay: RelayStatus;
+  /** "Add phone" is open: the QR on offer. */
+  phonePairing: PhonePairingState | null;
   /** Live connections (closed ones are removed). */
   peers: ReadonlyMap<string, PeerInfo>;
   entries: ReadonlyMap<string, Entry>;
@@ -132,6 +139,8 @@ export type Action =
   | { type: "clear_view" }
   | { type: "tick"; now: number }
   | { type: "dismiss_pairing" }
+  /** "Add phone" was closed in the UI (the host is told separately). */
+  | { type: "dismiss_phone_pairing" }
   | { type: "dismiss_notice"; id: number }
   | { type: "fatal"; message: string }
   /** A `slots` event: the whole slot bar. */
@@ -152,9 +161,8 @@ export function initialState(): AppState {
     logDir: "",
     configPersisted: true,
     pairedPeers: [],
-    adapter: "unknown",
-    devicesSeen: 0,
-    phoneAppNotOpen: false,
+    relay: { link: "idle", reason: null, detail: null },
+    phonePairing: null,
     peers: new Map(),
     entries: new Map(),
     order: [],
@@ -188,6 +196,8 @@ export function reduce(state: AppState, action: Action): AppState {
       const shown = state.pairing;
       return shown === null ? state : withCodes(state, withoutPeer(state.codes, shown.peer));
     }
+    case "dismiss_phone_pairing":
+      return state.phonePairing === null ? state : { ...state, phonePairing: null };
     case "dismiss_notice":
       return { ...state, notices: state.notices.filter((n) => n.id !== action.id) };
     case "fatal":
@@ -394,8 +404,16 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
       // Always follows the entry_upserted of the same revision (a no-op
       // then); the reducer must still return a state for it.
       return upsertEntry(state, ev.entry);
-    case "phone_app_not_open":
-      return state.phoneAppNotOpen === ev.active ? state : { ...state, phoneAppNotOpen: ev.active };
+    case "relay_status":
+      return sameRelay(state.relay, ev.status) ? state : { ...state, relay: ev.status };
+    case "phone_pairing_qr": {
+      const ms = codeLifetimeMs(ev.expires_in_secs);
+      return ms <= 0
+        ? { ...state, phonePairing: null }
+        : { ...state, phonePairing: { uri: ev.uri, deadline: mono() + ms } };
+    }
+    case "phone_pairing_ended":
+      return state.phonePairing === null ? state : { ...state, phonePairing: null };
     case "entry_evicted":
       return evictEntry(state, ev.id);
     case "connection_status": {
@@ -432,8 +450,18 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
     case "pairing_code_ended":
       return withCodes(state, withoutPeer(state.codes, ev.peer));
     case "pairing_result": {
-      const code = state.codes.find((c) => c.peer === ev.peer);
-      if (code === undefined) return state;
+      // SPEC_V3 §9: say which phone paired (a QR pairing shows no code modal).
+      const announced =
+        ev.ok && ev.phone_name !== null
+          ? addNotice(
+              state,
+              "info",
+              `Phone “${isolate(clip(stripBidi(ev.phone_name), MAX_LABEL_CHARS))}” paired.`,
+            )
+          : state;
+      const code = announced.codes.find((c) => c.peer === ev.peer);
+      if (code === undefined) return announced;
+      state = announced;
       // A wrong code keeps the modal open (the code is still valid) until
       // the attempts run out.
       if (ev.ok || !(ev.attempts_remaining > 0)) {
@@ -468,10 +496,6 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
       return state.logWarning === null ? state : { ...state, logWarning: null };
     case "storage_warning":
       return addNotice(state, "storage", clip(ev.message, MAX_NOTICE_TEXT));
-    case "devices_seen":
-      return state.devicesSeen === ev.count ? state : { ...state, devicesSeen: ev.count };
-    case "adapter_state":
-      return state.adapter === ev.state ? state : { ...state, adapter: ev.state };
     case "config_changed":
       return { ...state, logDir: ev.log_dir, name: ev.name, configPersisted: ev.persisted };
     default:
@@ -479,6 +503,16 @@ function applyEvent(state: AppState, ev: HostEvent, now: number): AppState {
       // reducer must never return undefined, or every later event crashes.
       return state;
   }
+}
+
+function sameRelay(a: RelayStatus, b: RelayStatus): boolean {
+  return a.link === b.link && a.reason === b.reason && a.detail === b.detail;
+}
+
+function snapshotPhonePairing(p: { uri: string; expires_in_secs: number } | null | undefined): PhonePairingState | null {
+  if (p === null || p === undefined) return null;
+  const ms = codeLifetimeMs(p.expires_in_secs);
+  return ms <= 0 ? null : { uri: p.uri, deadline: mono() + ms };
 }
 
 function withoutPeer(codes: readonly PairingModal[], peer: string): PairingModal[] {
@@ -552,9 +586,8 @@ function applySnapshot(
     name: snap.name,
     logDir: snap.log_dir,
     pairedPeers: snap.paired_peers,
-    adapter: snap.adapter_state,
-    devicesSeen: snap.devices_seen ?? 0,
-    phoneAppNotOpen: snap.phone_app_not_open ?? false,
+    relay: snap.relay,
+    phonePairing: snapshotPhonePairing(snap.phone_pairing),
     peers,
     entries,
     order: order.length > MAX_ENTRIES ? order.slice(-MAX_ENTRIES) : order,

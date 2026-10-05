@@ -10,14 +10,14 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::events::{AdapterState, PeerId};
+use crate::events::{PeerId, RelayStatus};
 
 pub mod policy;
 
-#[cfg(feature = "ble")]
-pub mod ble;
-#[cfg(all(windows, feature = "ble"))]
-pub mod ble_peripheral;
+#[cfg(feature = "relay")]
+pub mod proxy;
+#[cfg(feature = "relay")]
+pub mod relay;
 #[cfg(feature = "dev-tcp")]
 pub mod tcp;
 
@@ -28,7 +28,7 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// Something that happened on the transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransportEvent {
-    /// A phone is connected and subscribed; the host now sends `hello`.
+    /// A phone is connected (relay: `peer_joined`); the host now sends `hello`.
     Connected {
         /// Connection id.
         peer: PeerId,
@@ -49,14 +49,8 @@ pub enum TransportEvent {
         /// Short description.
         reason: String,
     },
-    /// Adapter state changed.
-    Adapter(AdapterState),
-    /// Advertisements seen since the current scan started (diagnostics).
-    DevicesSeen(u64),
-    /// A phone advertising our name was found, but it has no Ventriloquist
-    /// GATT service (the iPhone app is not in the foreground). The host
-    /// clears the hint on the next `Connected`.
-    PhoneAppNotOpen,
+    /// The relay link state changed (the TCP dev transport never sends it).
+    Relay(RelayStatus),
 }
 
 /// Something the host wants the transport to do.
@@ -90,20 +84,4 @@ pub trait Transport: Send + 'static {
         commands: mpsc::UnboundedReceiver<TransportCommand>,
         events: mpsc::Sender<TransportEvent>,
     ) -> JoinHandle<()>;
-}
-
-/// The BLE transport for this platform (v2.3): on Windows the GATT
-/// peripheral ([`ble_peripheral::BlePeripheralTransport`]), elsewhere the
-/// btleplug central. `VQ_BLE_MODE=central|peripheral` overrides it for
-/// diagnostics (peripheral only exists on Windows). The choice is logged.
-#[cfg(feature = "ble")]
-pub fn platform_ble_transport() -> Box<dyn Transport> {
-    let env = std::env::var("VQ_BLE_MODE").ok();
-    let mode = policy::ble_mode(env.as_deref(), cfg!(windows));
-    log::info!("ble: mode {mode:?} (VQ_BLE_MODE={env:?}, windows={})", cfg!(windows));
-    match mode {
-        #[cfg(all(windows, feature = "ble"))]
-        policy::BleMode::Peripheral => Box::new(ble_peripheral::BlePeripheralTransport::new()),
-        _ => Box::new(ble::BleCentralTransport::new()),
-    }
 }

@@ -92,6 +92,7 @@ async fn main() -> ExitCode {
         log_dir_override: args.log_dir,
         name_override: args.name,
         clock: Arc::new(SystemClock::new()),
+        relay: None,
     };
     let (handle, mut events, task) =
         match spawn_host(opts, Box::new(TcpTransport::new(args.connect))) {

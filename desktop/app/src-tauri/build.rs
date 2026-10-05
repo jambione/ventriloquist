@@ -47,6 +47,15 @@ fn main() {
             "open_diagnostics_file",
             "open_diagnostics_folder",
             "app_version",
+            "relay_settings",
+            "set_relay_url",
+            "set_owner_token",
+            "generate_owner_token",
+            "test_relay",
+            "reset_relay_room",
+            "start_phone_pairing",
+            "stop_phone_pairing",
+            "qr_svg",
         ]),
     ))
     .expect("tauri build script failed");

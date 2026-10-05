@@ -60,10 +60,40 @@
           </div>
         </section>
 
+        <section id="relay-settings">
+          <h3>Relay</h3>
+          <p class="muted">The phone and this desktop meet through a relay (end-to-end encrypted).</p>
+          <form id="relay-url-form" class="name-form">
+            <input id="relay-url" type="url" autocomplete="off" spellcheck="false" aria-label="Relay URL" placeholder="https://relay.jbrasfield.com" />
+            <button type="submit">Save</button>
+          </form>
+          <form id="owner-token-form" class="name-form">
+            <input id="owner-token" type="password" autocomplete="off" spellcheck="false" aria-label="Owner token" placeholder="Owner token" />
+            <button type="submit">Save token</button>
+          </form>
+          <div class="row-buttons">
+            <button type="button" id="owner-token-generate">Generate token</button>
+            <button type="button" id="owner-token-clear" class="danger" hidden>Clear token</button>
+          </div>
+          <p class="muted" id="owner-token-state"></p>
+          <p id="generated-token" hidden>
+            New owner token (shown once; give it to the relay):
+            <code id="generated-token-value" class="path"></code>
+          </p>
+          <p>Status: <strong id="relay-status"></strong></p>
+          <p class="muted" id="relay-hint" hidden></p>
+          <div class="row-buttons">
+            <button type="button" id="relay-test">Test connection</button>
+            <button type="button" id="relay-reset" class="danger">Reset relay room</button>
+          </div>
+          <p class="muted" id="relay-test-result" role="status"></p>
+        </section>
+
         <section>
-          <h3>Paired phones</h3>
+          <h3>Phones</h3>
+          <div class="row-buttons"><button type="button" id="add-phone">Add phone</button></div>
           <ul id="paired" class="paired"></ul>
-          <p id="paired-empty" class="muted">No paired phones. Start pairing from the iPhone app.</p>
+          <p id="paired-empty" class="muted">No paired phones. Choose “Add phone” and scan the QR code with the iPhone app.</p>
         </section>
 
         <section id="bindings-settings">
@@ -110,6 +140,17 @@
         <p class="countdown">Expires in <span id="pairing-countdown"></span></p>
         <p class="warn-text" id="pairing-failed" hidden></p>
         <button type="button" id="pairing-cancel">Cancel</button>
+      </div>
+    </div>
+
+    <div id="add-phone-modal" class="modal-backdrop" hidden>
+      <div class="modal qr-modal" role="dialog" aria-modal="true" aria-labelledby="add-phone-title">
+        <h2 id="add-phone-title">Add phone</h2>
+        <p>Scan this code with the Ventriloquist app on your iPhone.</p>
+        <img id="qr-img" class="qr" alt="Pairing QR code" width="320" height="320" />
+        <p class="countdown">Expires in <span id="qr-countdown"></span>; a new code appears by itself.</p>
+        <p class="warn-text" id="qr-relay" hidden></p>
+        <button type="button" id="add-phone-close">Close</button>
       </div>
     </div>
 

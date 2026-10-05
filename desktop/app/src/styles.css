@@ -488,3 +488,23 @@ fieldset.mods .taken { flex-basis: 100%; }
   margin-right: 0.5rem;
   align-self: center;
 }
+
+/* Add phone: the QR is always black on white, whatever the theme. */
+.qr-modal {
+  max-width: 420px;
+}
+
+.qr {
+  display: block;
+  margin: 0.5rem auto;
+  width: min(320px, 70vw);
+  height: auto;
+  background: #fff;
+  border-radius: 6px;
+}
+
+#generated-token-value {
+  display: block;
+  user-select: all;
+  word-break: break-all;
+}

@@ -290,6 +290,7 @@ impl Harness {
             log_dir_override: Some(spare.path().join("logs")),
             name_override: None,
             clock: self.clock.clone(),
+            relay: None,
         })
         .expect("placeholder core");
         drop(std::mem::replace(&mut self.core, placeholder));
@@ -465,6 +466,10 @@ fn open_core(dir: &tempfile::TempDir, clock: Arc<ManualClock>) -> Core {
         log_dir_override: Some(dir.path().join("logs")),
         name_override: Some("Test Desktop".into()),
         clock,
+        relay: Some(Arc::new(
+            vq_host_core::relay_room::RelayRoomStore::load_or_create(&dir.path().join("config"))
+                .expect("relay room"),
+        )),
     })
     .expect("core opens")
 }

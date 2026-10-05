@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-reset-relay-room"
+description = "Enables the reset_relay_room command without any pre-configured scope."
+commands.allow = ["reset_relay_room"]
+
+[[permission]]
+identifier = "deny-reset-relay-room"
+description = "Denies the reset_relay_room command without any pre-configured scope."
+commands.deny = ["reset_relay_room"]

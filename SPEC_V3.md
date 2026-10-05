@@ -172,3 +172,10 @@ The owner token is set in the relay's config (owner-token file on the Mac mini),
 
 ## 12. Open questions
 - None blocking. The owner token is generated with `openssl rand -base64 32`, or by the desktop app ("Generate"), which shows it once to put in the relay's owner-token file.
+
+## 13. Notes from R2 (desktop)
+- Relay wire details (poll response `{conn_id, cursor, events, closed?}`, send body `{"frames":[…]}`, status codes) follow relay/README.md. Decisions on the desktop side are in docs/SPEC_QUESTIONS.md "v3 R2".
+- **Reset relay room** rotates the room id as well as the secret (a known room id with another secret is a 409).
+- `HostCommand::StartPhonePairing`/`StopPhonePairing` and the events `phone_pairing_qr`, `phone_pairing_ended`, `relay_status` are the desktop core's side of §5/§6 (desktop/core/README.md). A QR pairing shows no code modal; the code in the QR is the active v1 code.
+- The owner token lives in the OS secret store (Keychain / Credential Manager), with a 0600 file fallback.
+

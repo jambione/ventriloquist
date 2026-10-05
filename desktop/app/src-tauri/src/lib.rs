@@ -1,5 +1,5 @@
-//! Ventriloquist desktop app (SPEC §6): runs `vq-host-core` with the BLE
-//! central transport, forwards every [`HostEvent`] to the web view as one
+//! Ventriloquist desktop app (SPEC §6, SPEC_V3 §6): runs `vq-host-core` with the
+//! cloud relay transport, forwards every [`HostEvent`] to the web view as one
 //! typed JSON Tauri event ([`HOST_EVENT`]), and turns UI actions into
 //! [`HostCommand`]s.
 //!
@@ -14,6 +14,7 @@
 mod delivery;
 mod hotkeys;
 mod logging;
+mod relay;
 
 use std::panic::AssertUnwindSafe;
 use std::path::{Component, Path, PathBuf};
@@ -31,7 +32,10 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 use delivery::{DeliveryEvent, DeliveryManager, Notice, Sink, SlotsView};
 use hotkeys::{HotkeyConfig, HotkeyView};
+use relay::{OwnerTokenStore, TokenStore};
 use vq_host_core::config::default_config_dir;
+use vq_host_core::relay_room::RelayRoomStore;
+use vq_host_core::transport::relay::{RelayHandle, RelayOptions, RelayTransport, TestReport};
 use vq_host_core::{spawn_host, CoreOptions, HostCommand, HostEvent, HostHandle, SystemClock};
 
 /// The Tauri event that carries every host event (`HostEvent` as JSON,
@@ -165,6 +169,109 @@ fn set_name(host: State<'_, Host>, name: String) -> Result<(), String> {
 fn cancel_pairing(host: State<'_, Host>, peer: String) -> Result<(), String> {
     check_len("the peer id", &peer)?;
     host.send(HostCommand::CancelPairing { peer })
+}
+
+// ---------------------------------------------------------------- relay
+
+/// The relay transport's handle and the owner token store.
+struct RelayState {
+    handle: RelayHandle,
+    tokens: OwnerTokenStore,
+    /// Where the token is stored (`None` while there is none).
+    token_store: Mutex<Option<TokenStore>>,
+}
+
+impl RelayState {
+    fn token_store(&self) -> Option<TokenStore> {
+        *self.token_store.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+#[derive(Serialize)]
+struct RelayView {
+    url: String,
+    has_owner_token: bool,
+    token_store: Option<TokenStore>,
+}
+
+fn relay_view(r: &RelayState) -> RelayView {
+    RelayView {
+        url: r.handle.store().get().url,
+        has_owner_token: r.handle.has_owner_token(),
+        token_store: r.token_store(),
+    }
+}
+
+/// Settings → Relay: the URL, and whether an owner token is set and where
+/// it is stored. The token itself never reaches the web view.
+#[tauri::command]
+fn relay_settings(r: State<'_, RelayState>) -> RelayView {
+    relay_view(&r)
+}
+
+#[tauri::command]
+fn set_relay_url(r: State<'_, RelayState>, url: String) -> Result<RelayView, String> {
+    check_len("the relay URL", &url)?;
+    r.handle.set_url(&url).map_err(|e| e.to_string())?;
+    Ok(relay_view(&r))
+}
+
+/// Store the owner token (OS secret store, else a 0600 file) and reconnect.
+/// An empty token clears it.
+#[tauri::command]
+fn set_owner_token(r: State<'_, RelayState>, token: String) -> Result<RelayView, String> {
+    if token.trim().is_empty() {
+        r.tokens.clear();
+        *r.token_store.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        r.handle.set_owner_token(None);
+    } else {
+        let store = r.tokens.save(&token).map_err(|e| e.to_string())?;
+        *r.token_store.lock().unwrap_or_else(|p| p.into_inner()) = Some(store);
+        r.handle.set_owner_token(Some(token));
+    }
+    Ok(relay_view(&r))
+}
+
+/// Make a new owner token, store it, and return it once (to paste into the
+/// relay's owner-token file / environment).
+#[tauri::command]
+fn generate_owner_token(r: State<'_, RelayState>) -> Result<String, String> {
+    let token = relay::generate_owner_token();
+    let store = r.tokens.save(&token).map_err(|e| e.to_string())?;
+    *r.token_store.lock().unwrap_or_else(|p| p.into_inner()) = Some(store);
+    r.handle.set_owner_token(Some(token.clone()));
+    Ok(token)
+}
+
+/// "Test connection": relay reachable, room creation, WebSocket.
+#[tauri::command]
+async fn test_relay(r: State<'_, RelayState>) -> Result<TestReport, String> {
+    let handle = r.handle.clone();
+    Ok(handle.test_connection().await)
+}
+
+/// "Reset relay room": a new room id and secret; every phone is un-paired.
+#[tauri::command]
+fn reset_relay_room(r: State<'_, RelayState>) -> Result<(), String> {
+    r.handle.reset_room().map_err(|e| e.to_string())
+}
+
+/// "Add phone": start (or restart) the QR flow.
+#[tauri::command]
+fn start_phone_pairing(host: State<'_, Host>) -> Result<(), String> {
+    host.send(HostCommand::StartPhonePairing)
+}
+
+/// Close "Add phone".
+#[tauri::command]
+fn stop_phone_pairing(host: State<'_, Host>) -> Result<(), String> {
+    host.send(HostCommand::StopPhonePairing)
+}
+
+/// The pairing QR as an SVG `data:` URL, rendered locally.
+#[tauri::command]
+fn qr_svg(uri: String) -> Result<String, String> {
+    relay::qr_data_url(&uri)
 }
 
 /// Whether `p` is (inside) a macOS bundle or another package directory,
@@ -489,17 +596,31 @@ fn open_accessibility_settings(app: AppHandle) -> Result<(), String> {
 
 /// Start the host and the task that forwards its events to the web view.
 fn start_host(app: &AppHandle) -> std::io::Result<()> {
+    let config_dir = default_config_dir();
+    let rooms = Arc::new(RelayRoomStore::load_or_create(&config_dir)?);
+    let tokens = OwnerTokenStore::new(&config_dir);
+    let stored = tokens.load();
+    let (transport, relay_handle) = RelayTransport::new(
+        rooms.clone(),
+        RelayOptions { owner_token: stored.as_ref().map(|(t, _)| t.clone()), ..RelayOptions::default() },
+    );
+    app.manage(RelayState {
+        handle: relay_handle,
+        tokens,
+        token_store: Mutex::new(stored.map(|(_, s)| s)),
+    });
     let opts = CoreOptions {
-        config_dir: default_config_dir(),
+        config_dir,
         log_dir_override: None,
         name_override: None,
         clock: Arc::new(SystemClock::new()),
+        relay: Some(rooms),
     };
     let (handle, mut events, task) = {
         // `spawn_host` spawns onto the current tokio runtime: Tauri's.
         let rt = tauri::async_runtime::handle();
         let _guard = rt.inner().enter();
-        spawn_host(opts, vq_host_core::transport::platform_ble_transport())?
+        spawn_host(opts, Box::new(transport))?
     };
     {
         let host = app.state::<Host>();
@@ -569,7 +690,7 @@ where
 }
 
 /// Stop the host and wait (bounded) for it to finish: pending log writes
-/// are flushed and BLE connections are closed. Runs inside the OS
+/// are flushed and the relay link is closed. Runs inside the OS
 /// terminate callback, where a panic aborts the process, so nothing here
 /// may unwind.
 fn stop_host(app: &AppHandle) {
@@ -646,6 +767,15 @@ pub fn run() {
             set_hotkey_modifiers,
             accessibility_status,
             open_accessibility_settings,
+            relay_settings,
+            set_relay_url,
+            set_owner_token,
+            generate_owner_token,
+            test_relay,
+            reset_relay_room,
+            start_phone_pairing,
+            stop_phone_pairing,
+            qr_svg,
         ])
         .setup(|app| {
             let version = app.package_info().version.to_string();

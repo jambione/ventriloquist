@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-owner-token"
+description = "Enables the set_owner_token command without any pre-configured scope."
+commands.allow = ["set_owner_token"]
+
+[[permission]]
+identifier = "deny-set-owner-token"
+description = "Denies the set_owner_token command without any pre-configured scope."
+commands.deny = ["set_owner_token"]

@@ -1,12 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["protocol", "desktop/core", "desktop/inject", "desktop/app/src-tauri"]
+members = ["protocol", "relay", "desktop/core", "desktop/inject", "desktop/app/src-tauri"]
 
 [workspace.package]
 edition = "2021"
 license = "MIT"
-
-# Vendored btleplug 0.13.3 with one patch: uncached GATT service discovery on Windows.
-# See third_party/btleplug/VENTRILOQUIST_PATCH.md.
-[patch.crates-io]
-btleplug = { path = "third_party/btleplug" }

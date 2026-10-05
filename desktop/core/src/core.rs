@@ -11,13 +11,18 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::clock::Clock;
 use crate::config::{normalize_name, ConfigStore};
-use crate::events::{AdapterState, HostCommand, HostEvent};
+use crate::events::{
+    HostCommand, HostEvent, PhonePairing, PhonePairingEnd, RelayLink, RelayStatus,
+};
 use crate::io_worker::{IoJob, IoResult, IoWorker, LogJob, PeersOp};
 use crate::pairing_store::{Identity, PairingStore};
-use crate::session::{SessionManager, SessionOutput};
+use crate::pairing_uri::PairingUri;
+use crate::relay_room::RelayRoomStore;
+use crate::session::{SessionManager, SessionOutput, PAIR_CODE_TTL};
 use crate::transcript::TranscriptStore;
 use crate::transport::{TransportCommand, TransportEvent};
 
@@ -32,6 +37,9 @@ pub struct CoreOptions {
     pub name_override: Option<String>,
     /// Time source.
     pub clock: Arc<dyn Clock>,
+    /// The relay room (id, secret, URL) for QR pairing. `None` for the TCP
+    /// dev transport: "Add phone" then reports that no relay is configured.
+    pub relay: Option<Arc<RelayRoomStore>>,
 }
 
 /// Output of the core.
@@ -53,9 +61,12 @@ pub struct Core {
     transcript: TranscriptStore,
     config: ConfigStore,
     log_dir: PathBuf,
-    adapter_state: AdapterState,
-    devices_seen: u64,
-    phone_app_not_open: bool,
+    relay_status: RelayStatus,
+    relay: Option<Arc<RelayRoomStore>>,
+    /// "Add phone" is open: the QR is regenerated every 120 s.
+    qr_open: bool,
+    /// The QR on offer and when it was started (monotonic).
+    qr_current: Option<(String, Duration)>,
     startup_warnings: Vec<String>,
     /// Latest log-write warning while the logger is failing (R2).
     log_warning: Option<String>,
@@ -113,9 +124,10 @@ impl Core {
             transcript: TranscriptStore::default(),
             config,
             log_dir,
-            adapter_state: AdapterState::Unknown,
-            devices_seen: 0,
-            phone_app_not_open: false,
+            relay_status: RelayStatus::of(RelayLink::Idle),
+            relay: opts.relay,
+            qr_open: false,
+            qr_current: None,
             startup_warnings: config_warning.into_iter().collect(),
             log_warning: None,
             _lock: lock,
@@ -160,13 +172,67 @@ impl Core {
             name: self.sessions.name().to_owned(),
             log_dir: self.log_dir.clone(),
             paired_peers: self.store.peers().to_vec(),
-            adapter_state: self.adapter_state,
-            devices_seen: self.devices_seen,
+            relay: self.relay_status.clone(),
+            phone_pairing: self.phone_pairing(),
             peers: self.sessions.statuses(&self.store, self.clock.as_ref()),
             entries: self.transcript.entries().cloned().collect(),
             log_warning: self.log_warning.clone(),
-            phone_app_not_open: self.phone_app_not_open,
         }
+    }
+
+    fn phone_pairing(&self) -> Option<PhonePairing> {
+        let (uri, started) = self.qr_current.as_ref().filter(|_| self.qr_open)?;
+        let age = self.clock.mono().saturating_sub(*started);
+        Some(PhonePairing {
+            uri: uri.clone(),
+            expires_in_secs: PAIR_CODE_TTL.saturating_sub(age).as_secs(),
+        })
+    }
+
+    /// Start a fresh QR code and describe it. Without a relay room the QR
+    /// cannot be built: a `storage_warning` says so.
+    fn new_qr(&mut self) -> Vec<CoreOutput> {
+        let Some(relay) = self.relay.clone() else {
+            self.qr_open = false;
+            return vec![CoreOutput::Event(HostEvent::StorageWarning {
+                message: "Phone pairing by QR needs the relay transport, which is not running."
+                    .to_owned(),
+            })];
+        };
+        let room = relay.get();
+        let code = self.sessions.start_qr_pairing(self.clock.as_ref());
+        let identity = self.sessions.identity();
+        let uri = PairingUri {
+            relay_url: &room.url,
+            room_id: &room.room_id,
+            room_secret: &room.room_secret,
+            device_id: identity.device_id,
+            public_key: identity.keypair.public_bytes(),
+            code: &code.to_string(),
+            name: self.sessions.name(),
+        }
+        .to_uri();
+        self.qr_open = true;
+        self.qr_current = Some((uri.clone(), self.clock.mono()));
+        vec![CoreOutput::Event(HostEvent::PhonePairingQr {
+            uri,
+            expires_in_secs: PAIR_CODE_TTL.as_secs(),
+        })]
+    }
+
+    fn end_qr(&mut self, reason: PhonePairingEnd) -> Vec<CoreOutput> {
+        if !self.qr_open {
+            return Vec::new();
+        }
+        self.qr_open = false;
+        self.qr_current = None;
+        let mut out = Vec::new();
+        if reason == PhonePairingEnd::Closed {
+            let o = self.sessions.stop_qr_pairing(&self.store);
+            out.extend(self.apply(o));
+        }
+        out.push(CoreOutput::Event(HostEvent::PhonePairingEnded { reason }));
+        out
     }
 
     /// The session manager (read-only).
@@ -189,9 +255,14 @@ impl Core {
         self.log_dir.clone()
     }
 
-    /// Last reported adapter state.
-    pub fn adapter_state(&self) -> AdapterState {
-        self.adapter_state
+    /// Last reported relay link state.
+    pub fn relay_status(&self) -> &RelayStatus {
+        &self.relay_status
+    }
+
+    /// The QR code now on offer, while it is active (tests).
+    pub fn active_qr_code(&self) -> Option<vq_protocol::PairingCode> {
+        self.sessions.active_qr_code(self.clock.as_ref())
     }
 
     /// Handle one transport event.
@@ -199,12 +270,7 @@ impl Core {
         match ev {
             TransportEvent::Connected { peer, mtu } => {
                 let o = self.sessions.on_connected(peer, mtu, self.clock.as_ref());
-                let mut out = Vec::new();
-                if std::mem::take(&mut self.phone_app_not_open) {
-                    out.push(CoreOutput::Event(HostEvent::PhoneAppNotOpen { active: false }));
-                }
-                out.extend(self.apply(o));
-                out
+                self.apply(o)
             }
             TransportEvent::Frame { peer, frame } => {
                 let o = self
@@ -222,20 +288,12 @@ impl Core {
                 }
                 out
             }
-            TransportEvent::Adapter(state) => {
-                self.adapter_state = state;
-                vec![CoreOutput::Event(HostEvent::AdapterState { state })]
-            }
-            TransportEvent::PhoneAppNotOpen => {
-                if std::mem::replace(&mut self.phone_app_not_open, true) {
-                    Vec::new()
-                } else {
-                    vec![CoreOutput::Event(HostEvent::PhoneAppNotOpen { active: true })]
+            TransportEvent::Relay(status) => {
+                if self.relay_status == status {
+                    return Vec::new();
                 }
-            }
-            TransportEvent::DevicesSeen(count) => {
-                self.devices_seen = count;
-                vec![CoreOutput::Event(HostEvent::DevicesSeen { count })]
+                self.relay_status = status.clone();
+                vec![CoreOutput::Event(HostEvent::RelayStatus { status })]
             }
         }
     }
@@ -285,6 +343,8 @@ impl Core {
                 let o = self.sessions.cancel_pairing(&peer, &self.store);
                 self.apply(o)
             }
+            HostCommand::StartPhonePairing => self.new_qr(),
+            HostCommand::StopPhonePairing => self.end_qr(PhonePairingEnd::Closed),
             HostCommand::Snapshot => vec![CoreOutput::Event(self.snapshot())],
             HostCommand::Shutdown => vec![CoreOutput::Transport(TransportCommand::Shutdown)],
         }
@@ -343,7 +403,13 @@ impl Core {
     /// Run timers (call about once a second).
     pub fn tick(&mut self) -> Vec<CoreOutput> {
         let o = self.sessions.tick(self.clock.as_ref(), &self.store);
-        self.apply(o)
+        let mut out = self.apply(o);
+        // The QR is regenerated every 120 s while "Add phone" is open (and
+        // right away if its code was used up by wrong confirmations).
+        if self.qr_open && self.sessions.active_qr_code(self.clock.as_ref()).is_none() {
+            out.extend(self.new_qr());
+        }
+        out
     }
 
     fn apply(&mut self, outs: Vec<SessionOutput>) -> Vec<CoreOutput> {
@@ -363,7 +429,15 @@ impl Core {
                     peer,
                     reconnect_after,
                 })),
-                SessionOutput::Event(e) => result.push(CoreOutput::Event(e)),
+                SessionOutput::Event(e) => {
+                    let paired =
+                        matches!(&e, HostEvent::PairingResult { ok: true, .. }) && self.qr_open;
+                    result.push(CoreOutput::Event(e));
+                    if paired {
+                        // A phone paired while "Add phone" was open: close it.
+                        result.extend(self.end_qr(PhonePairingEnd::Paired));
+                    }
+                }
                 SessionOutput::PersistPairing { peer, record } => {
                     let peers = self.store.begin_upsert(record.clone());
                     result.push(CoreOutput::Io(IoJob::SavePeers {
@@ -423,6 +497,7 @@ mod tests {
             clock: Arc::new(ManualClock::new(
                 DateTime::parse_from_rfc3339("2026-10-03T14:00:00+02:00").unwrap(),
             )),
+            relay: Some(Arc::new(RelayRoomStore::load_or_create(dir).unwrap())),
         }
     }
 
@@ -437,33 +512,104 @@ mod tests {
         Core::open(opts(dir.path())).expect("the lock is released on drop");
     }
 
+    fn qr_events(out: &[CoreOutput]) -> Vec<(String, u64)> {
+        out.iter()
+            .filter_map(|o| match o {
+                CoreOutput::Event(HostEvent::PhonePairingQr { uri, expires_in_secs }) => {
+                    Some((uri.clone(), *expires_in_secs))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn query(uri: &str) -> std::collections::HashMap<String, String> {
+        let u = url::Url::parse(uri).unwrap();
+        assert_eq!((u.scheme(), u.host_str()), ("vq", Some("pair")));
+        u.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect()
+    }
+
+    /// SPEC_V3 §5: the URI carries the room, the desktop's identity and the
+    /// code that is *active* in the session layer.
     #[test]
-    fn phone_app_not_open_hint_is_emitted_on_change_and_cleared_by_a_connect() {
+    fn qr_uri_fields_are_correct_and_its_code_is_the_active_code() {
         let dir = tempfile::tempdir().unwrap();
         let mut core = Core::open(opts(dir.path())).unwrap();
-        let hints = |out: &[CoreOutput]| -> Vec<bool> {
-            out.iter()
-                .filter_map(|o| match o {
-                    CoreOutput::Event(HostEvent::PhoneAppNotOpen { active }) => Some(*active),
-                    _ => None,
-                })
-                .collect()
-        };
-        let flag = |c: &Core| match c.snapshot() {
-            HostEvent::Snapshot { phone_app_not_open, .. } => phone_app_not_open,
+        assert!(core.active_qr_code().is_none());
+        let out = core.handle_command(HostCommand::StartPhonePairing);
+        let [(uri, ttl)] = qr_events(&out).try_into().unwrap();
+        assert_eq!(ttl, 120);
+        let q = query(&uri);
+        let room = RelayRoomStore::load_or_create(dir.path()).unwrap().get();
+        let identity = core.sessions().identity();
+        assert_eq!(q["v"], "3");
+        assert_eq!(q["r"], room.url);
+        assert_eq!(q["room"], room.room_id);
+        assert_eq!(q["s"], *room.room_secret);
+        assert_eq!(q["d"], identity.device_id.to_string());
+        let k = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &q["k"]).unwrap();
+        assert_eq!(k, identity.keypair.public_bytes().to_vec());
+        assert_eq!(q["n"], "T");
+        assert_eq!(q["c"].len(), 6);
+        assert_eq!(q["c"], core.active_qr_code().expect("active").to_string());
+        // The snapshot restores the dialog.
+        match core.snapshot() {
+            HostEvent::Snapshot { phone_pairing: Some(p), .. } => {
+                assert_eq!(p.uri, uri);
+                assert_eq!(p.expires_in_secs, 120);
+            }
             e => panic!("{e:?}"),
-        };
-        assert!(!flag(&core));
-        let out = core.handle_transport(TransportEvent::PhoneAppNotOpen);
-        assert_eq!(hints(&out), vec![true]);
-        assert!(flag(&core));
-        // Repeats (the 5-minute block expiring and failing again) are silent.
-        assert!(hints(&core.handle_transport(TransportEvent::PhoneAppNotOpen)).is_empty());
-        let out = core.handle_transport(TransportEvent::Connected { peer: "p".into(), mtu: 100 });
-        assert_eq!(hints(&out), vec![false]);
-        assert!(!flag(&core));
-        let out = core.handle_transport(TransportEvent::Connected { peer: "q".into(), mtu: 100 });
-        assert!(hints(&out).is_empty());
+        }
+    }
+
+    #[test]
+    fn qr_is_regenerated_after_120_seconds_while_open_and_not_after_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let o = opts(dir.path());
+        let clock = Arc::new(ManualClock::new(
+            DateTime::parse_from_rfc3339("2026-10-03T14:00:00+02:00").unwrap(),
+        ));
+        let mut core = Core::open(CoreOptions { clock: clock.clone(), ..o }).unwrap();
+        let first = qr_events(&core.handle_command(HostCommand::StartPhonePairing))[0].0.clone();
+        clock.advance(Duration::from_secs(119));
+        assert!(qr_events(&core.tick()).is_empty());
+        clock.advance(Duration::from_secs(2));
+        let second = qr_events(&core.tick());
+        assert_eq!(second.len(), 1);
+        assert_ne!(query(&second[0].0)["c"], query(&first)["c"]);
+        assert_eq!(query(&second[0].0)["c"], core.active_qr_code().unwrap().to_string());
+        // Closing ends it: no more codes, no more regenerations.
+        let out = core.handle_command(HostCommand::StopPhonePairing);
+        assert!(out.iter().any(|o| matches!(
+            o,
+            CoreOutput::Event(HostEvent::PhonePairingEnded { reason: PhonePairingEnd::Closed })
+        )));
+        assert!(core.active_qr_code().is_none());
+        clock.advance(Duration::from_secs(500));
+        assert!(qr_events(&core.tick()).is_empty());
+    }
+
+    #[test]
+    fn qr_needs_a_relay_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = Core::open(CoreOptions { relay: None, ..opts(dir.path()) }).unwrap();
+        let out = core.handle_command(HostCommand::StartPhonePairing);
+        assert!(qr_events(&out).is_empty());
+        assert!(matches!(&out[..], [CoreOutput::Event(HostEvent::StorageWarning { .. })]));
+    }
+
+    #[test]
+    fn relay_status_is_emitted_on_change_only_and_kept_for_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut core = Core::open(opts(dir.path())).unwrap();
+        let st = RelayStatus::of(RelayLink::Fallback);
+        let out = core.handle_transport(TransportEvent::Relay(st.clone()));
+        assert!(matches!(&out[..], [CoreOutput::Event(HostEvent::RelayStatus { .. })]));
+        assert!(core.handle_transport(TransportEvent::Relay(st.clone())).is_empty());
+        match core.snapshot() {
+            HostEvent::Snapshot { relay, .. } => assert_eq!(relay, st),
+            e => panic!("{e:?}"),
+        }
     }
 
     #[test]

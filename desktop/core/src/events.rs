@@ -16,7 +16,7 @@ fn lossy_path<S: Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
 }
 
 /// Opaque transport-level identifier of one connection to one phone
-/// (e.g. `ble:<peripheral id>` or `tcp:127.0.0.1:47800#3`).
+/// (e.g. `relay:<conn_id>` or `tcp:127.0.0.1:47800#3`).
 pub type PeerId = String;
 
 /// Connection state of one peer (README §7; SPEC §7).
@@ -35,26 +35,70 @@ pub enum PeerState {
     Closed,
 }
 
-/// Bluetooth adapter state (SPEC §6.3), or the TCP transport's equivalent.
+/// How the desktop is linked to the relay (SPEC_V3 §6), or the TCP dev
+/// transport's equivalent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AdapterState {
-    /// Not yet known.
-    Unknown,
-    /// No Bluetooth adapter found.
-    NoAdapter,
-    /// Bluetooth is switched off.
-    PoweredOff,
-    /// The app is not allowed to use Bluetooth.
-    Unauthorized,
-    /// Scanning for phones.
-    Scanning,
-    /// Advertising our GATT service and waiting for a phone to connect
-    /// (Windows peripheral transport, SPEC_V2 v2.3).
-    Advertising,
-    /// The adapter cannot act as a GATT peripheral, so the iPhone cannot
-    /// connect to this PC (SPEC_V2 v2.3).
-    PeripheralUnsupported,
+pub enum RelayLink {
+    /// Not started yet / no relay (the TCP dev transport reports this).
+    Idle,
+    /// Trying to connect.
+    Connecting,
+    /// Connected through a WebSocket.
+    Websocket,
+    /// Connected through the HTTPS long-poll fallback.
+    Fallback,
+    /// Neither works; see [`RelayStatus::reason`].
+    Unreachable,
+}
+
+/// Why the relay is unreachable (categorised; SPEC_V3 §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayReason {
+    /// The relay host name did not resolve.
+    Dns,
+    /// The proxy wants credentials (407); not supported.
+    ProxyAuthRequired,
+    /// The proxy refused the tunnel (e.g. 403) or could not be reached.
+    ProxyBlocked,
+    /// The relay's certificate (or the proxy's inspection certificate) is
+    /// not trusted by the OS certificate store.
+    TlsUntrusted,
+    /// The relay rejected the owner token (401), or none is configured and
+    /// the room does not exist yet.
+    OwnerTokenRejected,
+    /// The room id exists on the relay with a different secret (409).
+    RoomConflict,
+    /// Anything else (details in [`RelayStatus::detail`]).
+    Other,
+}
+
+/// The relay link state shown in the toolbar and in Settings → Relay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayStatus {
+    /// Link state.
+    pub link: RelayLink,
+    /// Set when `link` is `unreachable`.
+    pub reason: Option<RelayReason>,
+    /// A short, secret-free technical description (diagnostics).
+    pub detail: Option<String>,
+}
+
+impl RelayStatus {
+    /// A status without reason or detail.
+    pub const fn of(link: RelayLink) -> Self {
+        Self { link, reason: None, detail: None }
+    }
+
+    /// `unreachable` with a reason.
+    pub fn unreachable(reason: RelayReason, detail: impl Into<String>) -> Self {
+        Self {
+            link: RelayLink::Unreachable,
+            reason: Some(reason),
+            detail: Some(detail.into()),
+        }
+    }
 }
 
 /// Why a pairing code stopped being valid.
@@ -99,10 +143,10 @@ pub enum HostEvent {
         log_dir: PathBuf,
         /// Paired phones.
         paired_peers: Vec<PairedPeer>,
-        /// Last reported adapter state.
-        adapter_state: AdapterState,
-        /// Advertisements seen since the current scan started.
-        devices_seen: u64,
+        /// Last reported relay link state.
+        relay: RelayStatus,
+        /// The QR currently shown for "Add phone", if the dialog is open.
+        phone_pairing: Option<PhonePairing>,
         /// Live connections.
         peers: Vec<PeerStatus>,
         /// Transcript entries, oldest first.
@@ -110,8 +154,6 @@ pub enum HostEvent {
         /// Latest log-write warning while the log is failing, else `None`
         /// (`log_warning` is only emitted on the transition).
         log_warning: Option<String>,
-        /// See [`HostEvent::PhoneAppNotOpen`].
-        phone_app_not_open: bool,
     },
     /// An entry was created or changed (a newer revision was accepted).
     EntryUpserted {
@@ -229,24 +271,24 @@ pub enum HostEvent {
         /// Human-readable description.
         message: String,
     },
-    /// Bluetooth adapter state.
-    AdapterState {
+    /// The relay link state changed.
+    RelayStatus {
         /// New state.
-        state: AdapterState,
+        status: RelayStatus,
     },
-    /// Advertisements seen since the current scan started (at most once per
-    /// second, latest wins).
-    DevicesSeen {
-        /// The count.
-        count: u64,
+    /// "Add phone": the QR payload to render (replaced every 120 s while
+    /// the dialog is open; the code in it is the active pairing code).
+    PhonePairingQr {
+        /// The `vq://pair?…` URI (SPEC_V3 §5). Contains the room secret:
+        /// render it, never log it.
+        uri: String,
+        /// Seconds until this QR stops working (120).
+        expires_in_secs: u64,
     },
-    /// Connection hint: `active` is true when the BLE transport found the
-    /// phone by name but the Ventriloquist GATT service is missing (the app
-    /// is not open on the iPhone). Emitted on change only; cleared
-    /// (`active: false`) when any connection is next established.
-    PhoneAppNotOpen {
-        /// Whether the hint is on.
-        active: bool,
+    /// The QR flow ended (a phone paired, or the dialog was closed).
+    PhonePairingEnded {
+        /// Why.
+        reason: PhonePairingEnd,
     },
     /// Log directory or display name changed (in effect for this run).
     ConfigChanged {
@@ -286,10 +328,35 @@ pub enum HostCommand {
         /// Connection id.
         peer: PeerId,
     },
+    /// Start phone pairing by QR: start a v1 pairing code and emit a
+    /// [`HostEvent::PhonePairingQr`]; it is regenerated every 120 s until
+    /// [`HostCommand::StopPhonePairing`] or a phone pairs.
+    StartPhonePairing,
+    /// Close the QR flow and invalidate its code.
+    StopPhonePairing,
     /// Ask for a [`HostEvent::Snapshot`] of the current state.
     Snapshot,
     /// Stop the host.
     Shutdown,
+}
+
+/// Why [`HostEvent::PhonePairingEnded`] was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PhonePairingEnd {
+    /// A phone paired with the QR's code.
+    Paired,
+    /// [`HostCommand::StopPhonePairing`].
+    Closed,
+}
+
+/// The QR currently on offer (for restoring the dialog after a reload).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PhonePairing {
+    /// The `vq://pair?…` URI.
+    pub uri: String,
+    /// Seconds until it expires.
+    pub expires_in_secs: u64,
 }
 
 /// One live connection, as reported in [`HostEvent::Snapshot`].

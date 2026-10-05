@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-generate-owner-token"
+description = "Enables the generate_owner_token command without any pre-configured scope."
+commands.allow = ["generate_owner_token"]
+
+[[permission]]
+identifier = "deny-generate-owner-token"
+description = "Denies the generate_owner_token command without any pre-configured scope."
+commands.deny = ["generate_owner_token"]

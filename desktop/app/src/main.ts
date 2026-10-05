@@ -19,6 +19,10 @@ import {
   formatDate,
   formatVersion,
   isAtBottom,
+  relayReasonHint,
+  relayStatusLine,
+  shouldAutoShowQr,
+  testReportText,
 } from "./format";
 import {
   copyText,
@@ -31,7 +35,7 @@ import {
   type Action,
   type AppState,
 } from "./state";
-import type { Entry, HostEvent, Modifier, NewlineMode, SlotView } from "./types";
+import type { Entry, HostEvent, Modifier, NewlineMode, RelaySettingsView, SlotView } from "./types";
 
 const COPIED_MS = 1500;
 const SNAPSHOT_RETRY_MS = 3000;
@@ -89,6 +93,26 @@ const dom = {
   modsBind: el<HTMLFieldSetElement>("mods-bind"),
   boundSlots: el<HTMLUListElement>("bound-slots"),
   boundEmpty: el("bound-empty"),
+  relayUrlForm: el<HTMLFormElement>("relay-url-form"),
+  relayUrl: el<HTMLInputElement>("relay-url"),
+  tokenForm: el<HTMLFormElement>("owner-token-form"),
+  tokenInput: el<HTMLInputElement>("owner-token"),
+  tokenGenerate: el<HTMLButtonElement>("owner-token-generate"),
+  tokenClear: el<HTMLButtonElement>("owner-token-clear"),
+  tokenState: el("owner-token-state"),
+  generatedToken: el("generated-token"),
+  generatedTokenValue: el("generated-token-value"),
+  relayStatus: el("relay-status"),
+  relayHint: el("relay-hint"),
+  relayTest: el<HTMLButtonElement>("relay-test"),
+  relayReset: el<HTMLButtonElement>("relay-reset"),
+  relayTestResult: el("relay-test-result"),
+  addPhone: el<HTMLButtonElement>("add-phone"),
+  addPhoneModal: el("add-phone-modal"),
+  qrImg: el<HTMLImageElement>("qr-img"),
+  qrCountdown: el("qr-countdown"),
+  qrRelay: el("qr-relay"),
+  addPhoneClose: el<HTMLButtonElement>("add-phone-close"),
 };
 
 const HISTORY_KEY = "vq.historyView";
@@ -317,9 +341,10 @@ function renderList(): void {
 }
 
 function renderStatus(): void {
-  const s = connectionStatus(state, platform);
+  const s = connectionStatus(state);
   dom.statusDot.className = `dot ${s.tone}`;
   dom.statusText.textContent = s.text;
+  dom.statusText.title = s.detail ?? "";
 }
 
 function banner(kind: string, text: string, onDismiss: (() => void) | null): HTMLElement {
@@ -384,6 +409,9 @@ function renderSettings(force = false): void {
     state.peers,
     state.slots,
     state.accessibility,
+    state.relay,
+    relaySettings,
+    relayBusy,
   ];
   if (!force && key.every((v, i) => v === settingsShown[i])) return;
   settingsShown = key;
@@ -413,8 +441,200 @@ function renderSettings(force = false): void {
   }
   dom.paired.replaceChildren(...items);
   dom.pairedEmpty.hidden = state.pairedPeers.length > 0;
+  renderRelaySettings();
   renderBindingsSettings();
 }
+
+// ------------------------------------------------- Settings → Relay
+
+/** The relay URL / owner token state (fetched from the host; the token
+ * itself never reaches the page). */
+let relaySettings: RelaySettingsView | null = null;
+let relayBusy = false;
+let resetTimer: number | undefined;
+
+function refreshRelaySettings(): void {
+  backend.relaySettings().then(
+    (v) => {
+      relaySettings = v;
+      renderSettings(true);
+    },
+    (e: unknown) => console.error("relay settings failed", e),
+  );
+}
+
+function renderRelaySettings(): void {
+  if (relaySettings !== null && document.activeElement !== dom.relayUrl && dom.relayUrl.value !== relaySettings.url) {
+    dom.relayUrl.value = relaySettings.url;
+  }
+  const where =
+    relaySettings?.token_store === "keychain"
+      ? "stored in the system keychain"
+      : relaySettings?.token_store === "file"
+        ? "stored in a private file in the settings folder (the system keychain was not available)"
+        : "";
+  dom.tokenState.textContent = relaySettings?.has_owner_token
+    ? `An owner token is set (${where}).`
+    : "No owner token set. It is needed once, to create this desktop's room on the relay.";
+  dom.tokenClear.hidden = !(relaySettings?.has_owner_token ?? false);
+  dom.relayStatus.textContent = relayStatusLine(state.relay);
+  dom.relayStatus.title = state.relay.detail ?? "";
+  dom.relayStatus.className = state.relay.link === "unreachable" ? "warn-text" : "";
+  dom.relayHint.hidden = state.relay.link !== "unreachable";
+  dom.relayHint.textContent = relayReasonHint(state.relay.reason);
+  dom.relayTest.disabled = relayBusy;
+  dom.relayReset.textContent = resetTimer === undefined ? "Reset relay room" : "Really reset? Every phone is un-paired";
+}
+
+dom.relayUrlForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  backend.setRelayUrl(dom.relayUrl.value).then(
+    (v) => {
+      relaySettings = v;
+      dom.relayTestResult.textContent = "";
+      renderSettings(true);
+    },
+    (err: unknown) => report("Could not change the relay URL", err),
+  );
+});
+
+dom.tokenForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const token = dom.tokenInput.value;
+  if (token.trim() === "") return;
+  backend.setOwnerToken(token).then(
+    (v) => {
+      relaySettings = v;
+      dom.tokenInput.value = "";
+      dom.generatedToken.hidden = true;
+      renderSettings(true);
+    },
+    (err: unknown) => report("Could not save the owner token", err),
+  );
+});
+
+dom.tokenGenerate.addEventListener("click", () => {
+  backend.generateOwnerToken().then(
+    (token) => {
+      // Shown once, for pasting into the relay's owner-token setting.
+      dom.generatedTokenValue.textContent = token;
+      dom.generatedToken.hidden = false;
+      refreshRelaySettings();
+    },
+    (err: unknown) => report("Could not generate an owner token", err),
+  );
+});
+
+dom.tokenClear.addEventListener("click", () => {
+  backend.setOwnerToken("").then(
+    (v) => {
+      relaySettings = v;
+      dom.generatedToken.hidden = true;
+      renderSettings(true);
+    },
+    (err: unknown) => report("Could not clear the owner token", err),
+  );
+});
+
+dom.relayTest.addEventListener("click", () => {
+  if (relayBusy) return;
+  relayBusy = true;
+  dom.relayTestResult.textContent = "Testing…";
+  renderSettings(true);
+  backend
+    .testRelay()
+    .then(
+      (t) => {
+        dom.relayTestResult.textContent = testReportText(t);
+      },
+      (err: unknown) => {
+        dom.relayTestResult.textContent = `Test failed: ${String(err)}`;
+      },
+    )
+    .finally(() => {
+      relayBusy = false;
+      renderSettings(true);
+    });
+});
+
+/** Two-click confirm, like Forget: the first click arms the button. */
+dom.relayReset.addEventListener("click", () => {
+  if (resetTimer !== undefined) {
+    window.clearTimeout(resetTimer);
+    resetTimer = undefined;
+    const phones = state.pairedPeers.map((p) => p.device_id);
+    backend.resetRelayRoom().then(
+      () => {
+        // The new room un-pairs every phone: drop their records too.
+        for (const id of phones) backend.forgetPeer(id).catch((e: unknown) => console.error("forget failed", e));
+        dom.relayTestResult.textContent = "The relay room was reset. Add your phones again.";
+        renderSettings(true);
+      },
+      (err: unknown) => report("Could not reset the relay room", err),
+    );
+  } else {
+    resetTimer = window.setTimeout(() => {
+      resetTimer = undefined;
+      renderSettings(true);
+    }, FORGET_CONFIRM_MS);
+  }
+  renderSettings(true);
+});
+
+// ------------------------------------------------- Add phone (QR)
+
+let qrUri: string | null = null;
+let qrTimer: number | undefined;
+let autoQrDone = false;
+
+function renderAddPhone(): void {
+  const p = state.phonePairing;
+  if (p === null) {
+    if (!dom.addPhoneModal.hidden) {
+      dom.addPhoneModal.hidden = true;
+      dom.qrImg.removeAttribute("src");
+      qrUri = null;
+      window.clearInterval(qrTimer);
+      qrTimer = undefined;
+    }
+    return;
+  }
+  const wasHidden = dom.addPhoneModal.hidden;
+  dom.addPhoneModal.hidden = false;
+  dom.qrCountdown.textContent = formatCountdown(p.deadline - now());
+  dom.qrRelay.hidden = state.relay.link === "websocket" || state.relay.link === "fallback";
+  dom.qrRelay.textContent = `${relayStatusLine(state.relay)}. The phone can only pair once the relay is reachable.`;
+  if (qrUri !== p.uri) {
+    qrUri = p.uri;
+    const uri = p.uri;
+    backend.qrSvg(uri).then(
+      (url) => {
+        if (qrUri === uri) dom.qrImg.src = url;
+      },
+      (e: unknown) => report("Could not draw the QR code", e),
+    );
+  }
+  if (qrTimer === undefined) {
+    qrTimer = window.setInterval(() => {
+      const cur = state.phonePairing;
+      if (cur !== null) dom.qrCountdown.textContent = formatCountdown(cur.deadline - now());
+    }, 250);
+  }
+  if (wasHidden) dom.addPhoneClose.focus();
+}
+
+function openAddPhone(): void {
+  backend.startPhonePairing().catch((e: unknown) => report("Could not start pairing", e));
+}
+
+function closeAddPhone(): void {
+  if (state.phonePairing === null) return;
+  dispatch({ type: "dismiss_phone_pairing" });
+  backend.stopPhonePairing().catch((e: unknown) => report("Could not close pairing", e));
+}
+
+dom.addPhone.addEventListener("click", openAddPhone);
+dom.addPhoneClose.addEventListener("click", closeAddPhone);
 
 function onForget(deviceId: string): void {
   if (forgetArmed.has(deviceId)) {
@@ -740,6 +960,12 @@ function render(): void {
   renderList();
   renderSettings();
   renderPairing();
+  renderAddPhone();
+  if (shouldAutoShowQr(state, autoQrDone)) {
+    // First run: no phone is paired yet, so show the QR straight away.
+    autoQrDone = true;
+    openAddPhone();
+  }
   dom.historyToggle.setAttribute("aria-pressed", historyMode ? "true" : "false");
   dom.clearView.disabled = historyMode ? entriesInView(state) === 0 : currentEntry(state) === null;
   updateInert();
@@ -757,14 +983,15 @@ dom.historyToggle.addEventListener("click", () => {
 /** While a dialog is open the page behind it is inert: Tab cannot leave
  * the dialog. */
 function updateInert(): void {
-  const modal = !dom.settings.hidden || state.pairing !== null;
+  const modal = !dom.settings.hidden || state.pairing !== null || state.phonePairing !== null;
   for (const e of [dom.header, dom.slotbar, dom.banners, dom.main]) e.inert = modal;
-  dom.settings.inert = state.pairing !== null;
+  dom.settings.inert = state.pairing !== null || state.phonePairing !== null;
 }
 
 function openSettings(): void {
   dom.settings.hidden = false;
   refreshAccessibility();
+  refreshRelaySettings();
   updateInert();
   renderSettings(true);
   dom.closeSettings.focus();
@@ -811,6 +1038,7 @@ dom.pairingCancel.addEventListener("click", cancelPairing);
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (menuSlot !== null) closeMenu();
+    else if (state.phonePairing !== null) closeAddPhone();
     else if (state.pairing !== null) cancelPairing();
     else if (!dom.settings.hidden) closeSettings();
   }

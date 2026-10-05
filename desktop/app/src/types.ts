@@ -21,7 +21,33 @@ export interface Entry {
 
 export type PeerState = "connected" | "hello_exchanged" | "pairing" | "secure" | "closed";
 
-export type AdapterState = "unknown" | "no_adapter" | "powered_off" | "unauthorized" | "scanning" | "advertising" | "peripheral_unsupported";
+/** How the desktop is linked to the relay (SPEC_V3 §6). `idle`: no relay
+ * (the TCP dev transport, or not started yet). */
+export type RelayLink = "idle" | "connecting" | "websocket" | "fallback" | "unreachable";
+
+export type RelayReason =
+  | "dns"
+  | "proxy_auth_required"
+  | "proxy_blocked"
+  | "tls_untrusted"
+  | "owner_token_rejected"
+  | "room_conflict"
+  | "other";
+
+export interface RelayStatus {
+  link: RelayLink;
+  /** Set when `link` is "unreachable". */
+  reason: RelayReason | null;
+  /** Technical description (no secrets); shown as a tooltip. */
+  detail: string | null;
+}
+
+/** The QR on offer in "Add phone". */
+export interface PhonePairing {
+  /** `vq://pair?…`, contains the room secret: render it, never log it. */
+  uri: string;
+  expires_in_secs: number;
+}
 
 export type CodeEndReason = "expired" | "too_many_failures" | "cancelled" | "disconnected";
 
@@ -55,14 +81,12 @@ export type HostEvent =
       name: string;
       log_dir: string;
       paired_peers: PairedPeer[];
-      adapter_state: AdapterState;
-      devices_seen?: number;
+      relay: RelayStatus;
+      phone_pairing?: PhonePairing | null;
       peers: PeerStatus[];
       entries: Entry[];
       /** Latest log-write warning while the log is failing, else null. */
       log_warning?: string | null;
-      /** The phone was found by name but its app is not open. */
-      phone_app_not_open?: boolean;
     }
   | { event: "entry_upserted"; entry: Entry }
   /** The first final of an id (emitted right after its entry_upserted). */
@@ -101,9 +125,9 @@ export type HostEvent =
   | { event: "log_warning"; message: string }
   | { event: "log_recovered" }
   | { event: "storage_warning"; message: string }
-  | { event: "adapter_state"; state: AdapterState }
-  | { event: "devices_seen"; count: number }
-  | { event: "phone_app_not_open"; active: boolean }
+  | { event: "relay_status"; status: RelayStatus }
+  | { event: "phone_pairing_qr"; uri: string; expires_in_secs: number }
+  | { event: "phone_pairing_ended"; reason: "paired" | "closed" }
   | { event: "config_changed"; log_dir: string; name: string; persisted: boolean };
 
 // ---- bindings (SPEC_V2; desktop/app/src-tauri/src/delivery.rs). Every app
@@ -168,4 +192,21 @@ export interface BindingNotice {
 export interface AccessibilityStatus {
   supported: boolean;
   trusted: boolean;
+}
+
+// ---- relay settings (desktop/app/src-tauri/src/lib.rs). The owner token
+// itself never reaches the web view.
+
+export type TokenStore = "keychain" | "file";
+
+export interface RelaySettingsView {
+  url: string;
+  has_owner_token: boolean;
+  token_store: TokenStore | null;
+}
+
+export interface TestReport {
+  status: RelayStatus;
+  /** e.g. ["health", "room", "websocket"]. */
+  checked: string[];
 }

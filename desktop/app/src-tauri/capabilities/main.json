@@ -26,6 +26,15 @@
     "allow-diagnostics-info",
     "allow-open-diagnostics-file",
     "allow-open-diagnostics-folder",
-    "allow-app-version"
+    "allow-app-version",
+    "allow-relay-settings",
+    "allow-set-relay-url",
+    "allow-set-owner-token",
+    "allow-generate-owner-token",
+    "allow-test-relay",
+    "allow-reset-relay-room",
+    "allow-start-phone-pairing",
+    "allow-stop-phone-pairing",
+    "allow-qr-svg"
   ]
 }

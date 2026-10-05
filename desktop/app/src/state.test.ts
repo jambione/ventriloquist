@@ -38,7 +38,7 @@ function snapshot(over: Partial<Extract<HostEvent, { event: "snapshot" }>> = {})
     name: "My Mac",
     log_dir: "/Users/me/Documents/Ventriloquist",
     paired_peers: [],
-    adapter_state: "scanning",
+    relay: { link: "websocket", reason: null, detail: null },
     peers: [],
     entries: [],
     ...over,
@@ -87,7 +87,7 @@ describe("snapshot", () => {
     ]);
     expect(s.phase).toBe("ready");
     expect(s.name).toBe("My Mac");
-    expect(s.adapter).toBe("scanning");
+    expect(s.relay.link).toBe("websocket");
     expect(texts(s)).toEqual(["one", "tw"]);
     expect(s.peers.get("ble:x#1")?.state).toBe("secure");
     expect(s.pairedPeers).toHaveLength(1);
@@ -95,7 +95,7 @@ describe("snapshot", () => {
 
   it("buffers events that arrive before the snapshot and lets the snapshot win", () => {
     let s = run([
-      host({ event: "adapter_state", state: "powered_off" }),
+      host({ event: "relay_status", status: { link: "unreachable", reason: "dns", detail: null } }),
       host(up(entry("a", 1, "final", "old"))),
       host({ event: "log_warning", message: "disk full" }),
     ]);
@@ -103,7 +103,7 @@ describe("snapshot", () => {
     expect(visibleEntries(s)).toEqual([]);
     s = reduce(s, host(snapshot({ entries: [entry("a", 2, "edit", "new")] })));
     expect(texts(s)).toEqual(["new"]);
-    expect(s.adapter).toBe("scanning"); // superseded by the snapshot
+    expect(s.relay.link).toBe("websocket"); // superseded by the snapshot
     expect(s.logWarning).toBe("disk full"); // replayed
     expect(s.buffered).toEqual([]);
   });
@@ -419,14 +419,74 @@ describe("review fixes", () => {
   });
 });
 
-describe("devices seen", () => {
-  it("follows devices_seen events and the snapshot", () => {
+describe("relay status", () => {
+  it("follows relay_status events and the snapshot", () => {
     let s = ready();
-    expect(s.devicesSeen).toBe(0);
-    s = reduce(s, host({ event: "devices_seen", count: 7 }));
-    expect(s.devicesSeen).toBe(7);
-    const fresh = reduce(initialState(), host(snapshot({ devices_seen: 9 })));
-    expect(fresh.devicesSeen).toBe(9);
+    expect(s.relay.link).toBe("websocket");
+    const down = { link: "unreachable", reason: "tls_untrusted", detail: "x" } as const;
+    s = reduce(s, host({ event: "relay_status", status: down }));
+    expect(s.relay).toEqual(down);
+    // An identical status keeps the same state object (no re-render).
+    expect(reduce(s, host({ event: "relay_status", status: { ...down } }))).toBe(s);
+    const fresh = reduce(initialState(), host(snapshot({ relay: { link: "fallback", reason: null, detail: null } })));
+    expect(fresh.relay.link).toBe("fallback");
+  });
+});
+
+describe("phone pairing (Add phone)", () => {
+  const qr = (uri: string, secs = 120): HostEvent => ({ event: "phone_pairing_qr", uri, expires_in_secs: secs });
+
+  it("shows the QR with a deadline, replaces it, and ends it", () => {
+    setClock(1000);
+    let s = ready();
+    expect(s.phonePairing).toBeNull();
+    s = reduce(s, host(qr("vq://pair?a=1")));
+    expect(s.phonePairing).toEqual({ uri: "vq://pair?a=1", deadline: 1000 + 120_000 });
+    setClock(50_000);
+    s = reduce(s, host(qr("vq://pair?a=2")));
+    expect(s.phonePairing).toEqual({ uri: "vq://pair?a=2", deadline: 50_000 + 120_000 });
+    s = reduce(s, host({ event: "phone_pairing_ended", reason: "paired" }));
+    expect(s.phonePairing).toBeNull();
+  });
+
+  it("closing in the UI hides it; an expired or absurd lifetime shows nothing", () => {
+    let s = reduce(ready(), host(qr("vq://pair?a=1")));
+    s = reduce(s, { type: "dismiss_phone_pairing" });
+    expect(s.phonePairing).toBeNull();
+    expect(reduce(ready(), host(qr("vq://pair?a=1", 0))).phonePairing).toBeNull();
+    expect(reduce(ready(), host(qr("vq://pair?a=1", Number.NaN))).phonePairing).toBeNull();
+  });
+
+  it("the snapshot restores the open dialog", () => {
+    setClock(0);
+    const s = reduce(
+      initialState(),
+      host(snapshot({ phone_pairing: { uri: "vq://pair?z=9", expires_in_secs: 77 } })),
+    );
+    expect(s.phonePairing).toEqual({ uri: "vq://pair?z=9", deadline: 77_000 });
+    expect(reduce(initialState(), host(snapshot({ phone_pairing: null }))).phonePairing).toBeNull();
+  });
+
+  it("announces which phone paired, even without a code modal", () => {
+    const s = reduce(
+      ready(),
+      host({
+        event: "pairing_result",
+        peer: "relay:c1",
+        device_id: "d",
+        phone_name: "Jon's iPhone",
+        ok: true,
+        attempts_remaining: 0,
+      }),
+    );
+    expect(s.notices.map((n) => n.text)).toEqual(["Phone “\u2068Jon's iPhone\u2069” paired."]);
+    expect(s.notices[0]?.kind).toBe("info");
+    // A failure announces nothing.
+    const f = reduce(
+      ready(),
+      host({ event: "pairing_result", peer: "p", device_id: "d", phone_name: "x", ok: false, attempts_remaining: 2 }),
+    );
+    expect(f.notices).toEqual([]);
   });
 });
 
@@ -520,17 +580,5 @@ describe("current dictation (regression: new dictations stopped appearing)", () 
     const s = ready(...dictateA());
     const odd = { event: "something_new" } as unknown as HostEvent;
     expect(reduce(s, host(odd))).toBe(s);
-  });
-});
-
-describe("phone app not open", () => {
-  it("follows phone_app_not_open events and the snapshot", () => {
-    let s = ready();
-    expect(s.phoneAppNotOpen).toBe(false);
-    s = reduce(s, host({ event: "phone_app_not_open", active: true }));
-    expect(s.phoneAppNotOpen).toBe(true);
-    s = reduce(s, host({ event: "phone_app_not_open", active: false }));
-    expect(s.phoneAppNotOpen).toBe(false);
-    expect(reduce(initialState(), host(snapshot({ phone_app_not_open: true }))).phoneAppNotOpen).toBe(true);
   });
 });

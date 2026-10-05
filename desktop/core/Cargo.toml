@@ -7,10 +7,20 @@ description = "Ventriloquist desktop core: sessions, pairing, transcript store, 
 publish = false
 
 [features]
-default = ["ble"]
-# BLE transports: the btleplug central (macOS; Windows with
-# VQ_BLE_MODE=central) and, on Windows, the WinRT GATT peripheral. On by default.
-ble = ["dep:btleplug", "dep:futures", "dep:windows", "dep:windows-future"]
+default = ["relay"]
+# The cloud relay transport (SPEC_V3): WebSocket + HTTPS long-poll fallback,
+# TLS from the OS certificate store (native-tls: schannel / Security.framework),
+# OS proxy settings including PAC. On by default.
+relay = [
+    "dep:tokio-tungstenite",
+    "dep:native-tls",
+    "dep:tokio-native-tls",
+    "dep:reqwest",
+    "dep:futures-util",
+    "dep:core-foundation",
+    "dep:core-foundation-sys",
+    "dep:windows",
+]
 # TCP dev transport (desktop = client). Tests and the `vq-host` binary only;
 # MUST NOT be enabled in release builds of the app.
 dev-tcp = []
@@ -34,20 +44,29 @@ zeroize = "1.8"
 rand = "0.8.5"
 thiserror = "2.0"
 log = "0.4"
-btleplug = { version = "0.13", optional = true }
-futures = { version = "0.3", optional = true }
+url = "2.5"
+percent-encoding = "2.3"
+sha2 = "0.10"
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+native-tls = { version = "0.2", optional = true }
+tokio-native-tls = { version = "0.3", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "blocking"], optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 
-# WinRT GATT server (transport::ble_peripheral); only built on Windows.
+# macOS: CFNetworkCopySystemProxySettings / CFNetworkCopyProxiesForURL (PAC).
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { version = "0.10", optional = true }
+core-foundation-sys = { version = "0.8", optional = true }
+
+# Windows: WinHttpGetIEProxyConfigForCurrentUser + WinHttpGetProxyForUrl.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", optional = true, features = [
-    "Devices_Bluetooth",
-    "Devices_Bluetooth_GenericAttributeProfile",
-    "Foundation",
-    "Foundation_Collections",
-    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
 ] }
-windows-future = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.23"
+tokio-tungstenite = { version = "0.30", features = ["connect"] }
 tokio = { version = "1.45", features = ["process"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "ws", "tokio", "json", "query"] }

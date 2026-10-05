@@ -26,7 +26,7 @@ use vq_protocol::TCP_MTU;
 
 use super::policy::next_attempt_delay;
 use super::{Transport, TransportCommand, TransportEvent};
-use crate::events::{AdapterState, PeerId};
+use crate::events::PeerId;
 
 /// Connect timeout for one attempt.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -93,13 +93,6 @@ async fn run(
     mut cmds: mpsc::UnboundedReceiver<TransportCommand>,
     events: mpsc::Sender<TransportEvent>,
 ) {
-    if events
-        .send(TransportEvent::Adapter(AdapterState::Scanning))
-        .await
-        .is_err()
-    {
-        return;
-    }
     let mut failures: u32 = 0;
     let mut holdoff: Option<Duration> = None;
     let mut conn_no: u64 = 0;

@@ -32,7 +32,7 @@ enum Key {
     Partial(Uuid),
     Rejected(String, String),
     Code(String),
-    Devices,
+    Relay,
 }
 
 fn key_of(e: &HostEvent) -> Option<Key> {
@@ -44,7 +44,7 @@ fn key_of(e: &HostEvent) -> Option<Key> {
             Some(Key::Rejected(peer.clone(), code.clone()))
         }
         HostEvent::PairingCodeShown { peer, .. } => Some(Key::Code(peer.clone())),
-        HostEvent::DevicesSeen { .. } => Some(Key::Devices),
+        HostEvent::RelayStatus { .. } => Some(Key::Relay),
         _ => None,
     }
 }
@@ -97,7 +97,7 @@ impl EventOutbox {
                     // keep the first, drop the repeat
                     Key::Rejected(..) => {}
                     // latest wins, in place
-                    Key::Partial(_) | Key::Code(_) | Key::Devices => self.slots[idx] = Some(e),
+                    Key::Partial(_) | Key::Code(_) | Key::Relay => self.slots[idx] = Some(e),
                 }
                 return;
             }
