@@ -8,6 +8,13 @@ struct VentriloquistApp: App {
         WindowGroup {
             RootView()
                 .environment(model)
+                // A `vq://pair?...` QR scanned with the system Camera app opens
+                // the app here; pair exactly as the in-app scanner does.
+                .onOpenURL { url in
+                    if let problem = model.pair(scanned: url.absoluteString) {
+                        model.alertMessage = problem
+                    }
+                }
         }
     }
 }

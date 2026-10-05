@@ -48,6 +48,10 @@ targets:
         NSMicrophoneUsageDescription: Ventriloquist listens to your voice while you hold a recording so it can transcribe it on this iPhone. Audio never leaves the device.
         NSSpeechRecognitionUsageDescription: Ventriloquist turns your speech into text on this iPhone and sends only the text to your paired computer.
         NSCameraUsageDescription: Scan the QR code shown by Ventriloquist on your computer to pair.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.ventriloquist.app.pair
+            CFBundleURLSchemes:
+              - vq
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ventriloquist.app
