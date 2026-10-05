@@ -7,19 +7,18 @@ import VQPhoneCore
 import VQProtocol
 
 /// The app's state, on the main actor. It owns the transport-agnostic
-/// ``PhoneEngine`` (VQPhoneCore), the BLE peripheral transport and the
+/// ``PhoneEngine`` (VQPhoneCore), the relay transport and the
 /// dictation engine, and mirrors the engine's state for SwiftUI.
 @MainActor
 @Observable
 final class AppModel {
     enum PermissionProblem: Equatable {
-        case microphone, speech, bluetooth
+        case microphone, speech
 
         var title: String {
             switch self {
             case .microphone: "Microphone access is off"
             case .speech: "Speech recognition is off"
-            case .bluetooth: "Bluetooth access is off"
             }
         }
 
@@ -29,8 +28,6 @@ final class AppModel {
                 "Ventriloquist needs the microphone to hear what you dictate. Audio is transcribed on this iPhone and never stored or sent."
             case .speech:
                 "Ventriloquist needs speech recognition to turn your voice into text on this iPhone."
-            case .bluetooth:
-                "Ventriloquist needs Bluetooth to send your text to your paired computer."
             }
         }
     }
@@ -39,8 +36,8 @@ final class AppModel {
 
     @ObservationIgnored let settings: AppSettings
     @ObservationIgnored let engine: PhoneEngine
-    @ObservationIgnored let ble: BLEPeripheralTransport
-    @ObservationIgnored let central: BLECentralTransport
+    @ObservationIgnored let relay: RelayPhoneTransport
+    @ObservationIgnored let relayStore: PairedRelayDesktopStore
     let dictation = DictationEngine()
     @ObservationIgnored private var started = false
     @ObservationIgnored private var tickTask: Task<Void, Never>?
@@ -52,7 +49,8 @@ final class AppModel {
     private(set) var indicator: ConnectionIndicator = .none
     private(set) var activeHostName: String?
     private(set) var pairing: PairingStatus?
-    private(set) var radioState: BLEPeripheralTransport.RadioState = .unknown
+    /// Relay hosts of the paired desktops, by desktop id (read-only, Settings).
+    private(set) var relayHosts: [UUID: String] = [:]
 
     // MARK: UI state
 
@@ -117,11 +115,11 @@ final class AppModel {
             problem = "This iPhone's identity could not be read from the Keychain. Pairings made now will not be kept."
             temporary = true
         }
-        let ble = BLEPeripheralTransport()
-        self.ble = ble
-        let central = BLECentralTransport()
-        self.central = central
-        let composite = CompositeTransport(routes: [("ble:", ble), (BLECentralTransport.peerPrefix, central)])
+        let relay = RelayPhoneTransport(networking: URLSessionRelayNetworking(), clock: SystemClock(),
+                                        scheduler: TaskRelayScheduler())
+        self.relay = relay
+        let relayStore: PairedRelayDesktopStore = temporary ? InMemoryPairedRelayDesktopStore() : FilePairedRelayDesktopStore()
+        self.relayStore = relayStore
         // With a temporary identity the real paired-host file must stay
         // untouched: a pairing made under the wrong identity would otherwise
         // replace or hide valid ones (M9).
@@ -130,7 +128,9 @@ final class AppModel {
         engine = PhoneEngine(identity: identity, deviceName: settings.deviceName,
                              partialStreamingEnabled: settings.partialStreaming,
                              hostStore: hostStore, settings: settingsStore,
-                             transport: composite, clock: SystemClock())
+                             transport: relay, clock: SystemClock(),
+                             relayStore: relayStore, relaySecrets: KeychainRelaySecretStore(),
+                             relayRooms: relay)
         needsDeviceName = !settings.deviceNameChosen
         if engine.pairedHostsUnreadable {
             hostsProblem = "The list of paired computers could not be read. The old file was kept; pair again."
@@ -139,20 +139,16 @@ final class AppModel {
         partialStreaming = settings.partialStreaming
         vocabulary = settings.vocabulary
         identityProblem = problem
-        ble.engine = engine
-        central.engine = engine
-        ble.onStateChange = { [weak self] state in self?.radioChanged(state) }
+        relay.events = engine
         engine.onChange = { [weak self] in self?.syncFromEngine() }
         engine.onEvent = { [weak self] event in self?.handle(event) }
         syncFromEngine()
     }
 
-    /// Start Bluetooth and timers.
+    /// Start timers.
     func start() {
         guard !started else { return }
         started = true
-        ble.start()
-        central.start()
         // Fetch the speech model on first run, with the progress overlay (M11).
         Task { [weak self] in try? await self?.dictation.prepareModel() }
         dictation.onInterrupted = { [weak self] in
@@ -181,7 +177,7 @@ final class AppModel {
     // MARK: - Scene phase (SPEC §5.2: foreground only)
 
     /// Stops the recording, gives the final a bounded moment to be acked and
-    /// flushed (BLE queue), then tears the connections down. A quick return to
+    /// flushed, then tears the connections down. A quick return to
     /// the foreground cancels the teardown (M3, M4).
     func enterBackground() {
         sceneGeneration += 1
@@ -191,13 +187,12 @@ final class AppModel {
             await stopRecording()
             let deadline = ContinuousClock.now + .seconds(5)
             while ContinuousClock.now < deadline, gen == sceneGeneration,
-                  ble.hasQueuedFrames || central.hasQueuedFrames || (engine.indicator == .secure && engine.inFlightDeliveryCount > 0) {
+                  (engine.indicator == .secure && engine.inFlightDeliveryCount > 0) {
                 try? await Task.sleep(for: .milliseconds(100))
             }
             if gen == sceneGeneration {
                 engine.disconnectAll()
-                ble.enterBackground()
-                central.enterBackground()
+                relay.pauseAll()
             }
             UIApplication.shared.endBackgroundTask(bgTask)
         }
@@ -205,8 +200,7 @@ final class AppModel {
 
     func enterForeground() {
         sceneGeneration += 1
-        ble.enterForeground()
-        central.enterForeground()
+        relay.resumeAll()
     }
 
     func confirmDeviceName(_ name: String) {
@@ -219,7 +213,10 @@ final class AppModel {
 
     private func syncFromEngine() {
         let newHosts = engine.hosts
-        if newHosts != hosts { hosts = newHosts }
+        if newHosts != hosts {
+            hosts = newHosts
+            refreshRelayHosts()
+        }
         let ind = engine.indicator
         if ind != indicator { indicator = ind }
         let name = engine.activeHost?.name
@@ -245,9 +242,20 @@ final class AppModel {
         }
     }
 
-    private func radioChanged(_ state: BLEPeripheralTransport.RadioState) {
-        radioState = state
-        if state == .unauthorized { permissionProblem = .bluetooth }
+    private func refreshRelayHosts() {
+        let list = (try? relayStore.loadRelayDesktops()) ?? []
+        let map = Dictionary(list.map { ($0.deviceId, $0.relayURL) }, uniquingKeysWith: { a, _ in a })
+        if map != relayHosts { relayHosts = map }
+    }
+
+    /// A scanned QR string: parse it and pair. Returns an error text, or nil.
+    func pair(scanned string: String) -> String? {
+        do {
+            engine.pair(using: try PairingURI.parse(string))
+            return nil
+        } catch {
+            return error.text
+        }
     }
 
     // MARK: - Hosts and pairing
@@ -258,6 +266,7 @@ final class AppModel {
 
     func forget(_ host: HostInfo) {
         engine.forgetHost(host.id)
+        refreshRelayHosts()
     }
 
     func submitCode(_ code: String) { engine.submitPairingCode(code) }

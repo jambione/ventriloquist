@@ -22,8 +22,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Ventriloquist uses Bluetooth to send your dictated text to your paired computer.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Scan the QR code shown by Ventriloquist on your computer to pair.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Ventriloquist listens to your voice while you hold a recording so it can transcribe it on this iPhone. Audio never leaves the device.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

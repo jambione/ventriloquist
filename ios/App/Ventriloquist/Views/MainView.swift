@@ -20,9 +20,6 @@ struct MainView: View {
                     Banner(text: "Not connected — will send when connected",
                            systemImage: "antenna.radiowaves.left.and.right", tint: Color.secondary)
                 }
-                if let radio = radioMessage {
-                    Banner(text: radio, systemImage: "bolt.horizontal.circle", tint: .orange)
-                }
                 content
                 RecordControls()
                     .padding(.vertical, 20)
@@ -59,16 +56,6 @@ struct MainView: View {
                 .disabled(!model.canSendCorrection)
             }
             .padding()
-        }
-    }
-
-    private var radioMessage: String? {
-        switch model.radioState {
-        case .poweredOff: "Bluetooth is off"
-        case .unauthorized: "Bluetooth access is off — enable it in Settings"
-        case .unsupported: "Bluetooth LE is not available on this device"
-        case .advertisingFailed: "Bluetooth is not advertising yet — retrying"
-        case .unknown, .ready: nil
         }
     }
 }

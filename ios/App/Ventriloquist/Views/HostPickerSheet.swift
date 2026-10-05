@@ -1,10 +1,11 @@
 import SwiftUI
 import VQPhoneCore
 
-/// SPEC §5.1 Host picker: Paired (online/offline) and Nearby, not paired.
+/// SPEC_V3 §7 Host picker: paired desktops (online/offline) and Add desktop (QR).
 struct HostPickerSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var showScanner = false
 
     var body: some View {
         NavigationStack {
@@ -26,34 +27,11 @@ struct HostPickerSheet: View {
                     }
                 }
                 Section {
-                    if nearby.isEmpty {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                            Text("Looking for desktops running Ventriloquist…")
-                                .foregroundStyle(.secondary)
-                        }
+                    Button { showScanner = true } label: {
+                        Label("Add desktop", systemImage: "qrcode.viewfinder")
                     }
-                    ForEach(nearby) { host in
-                        Button {
-                            model.select(host)
-                        } label: {
-                            HStack {
-                                Image(systemName: "desktopcomputer")
-                                VStack(alignment: .leading) {
-                                    Text(host.name).foregroundStyle(.primary)
-                                    if host.keyChanged {
-                                        Text("Its key changed — pair again").font(.caption).foregroundStyle(.orange)
-                                    }
-                                }
-                                Spacer()
-                                Text("Pair").foregroundStyle(.tint)
-                            }
-                        }
-                    }
-                } header: {
-                    Text("Nearby, not paired")
                 } footer: {
-                    Text("Desktops appear here when the Ventriloquist desktop app is running nearby.")
+                    Text("Open Ventriloquist on your computer and scan the QR code it shows.")
                 }
             }
             .alert("Ventriloquist", isPresented: Binding(
@@ -69,6 +47,7 @@ struct HostPickerSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
             }
+            .sheet(isPresented: $showScanner) { QRScannerSheet() }
             .sheet(isPresented: Binding(
                 get: { model.pairing != nil },
                 set: { if !$0 { model.dismissPairing() } }
@@ -81,7 +60,6 @@ struct HostPickerSheet: View {
     }
 
     private var paired: [HostInfo] { model.hosts.filter(\.isPaired) }
-    private var nearby: [HostInfo] { model.hosts.filter { !$0.isPaired && $0.isOnline } }
 
     private var isVerifying: Bool {
         model.pairing?.phase == .verifying

@@ -30,7 +30,7 @@ targets:
         product: VQProtocol
       - package: VQProtocol
         product: VQPhoneCore
-      - sdk: CoreBluetooth.framework
+      - sdk: AVFoundation.framework
       - sdk: Speech.framework
       - sdk: AVFAudio.framework
     info:
@@ -47,7 +47,7 @@ targets:
           - UIInterfaceOrientationPortrait
         NSMicrophoneUsageDescription: Ventriloquist listens to your voice while you hold a recording so it can transcribe it on this iPhone. Audio never leaves the device.
         NSSpeechRecognitionUsageDescription: Ventriloquist turns your speech into text on this iPhone and sends only the text to your paired computer.
-        NSBluetoothAlwaysUsageDescription: Ventriloquist uses Bluetooth to send your dictated text to your paired computer.
+        NSCameraUsageDescription: Scan the QR code shown by Ventriloquist on your computer to pair.
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.ventriloquist.app

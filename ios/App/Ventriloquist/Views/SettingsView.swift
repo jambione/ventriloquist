@@ -38,6 +38,18 @@ struct SettingsView: View {
                     Text("Shown to your desktops when they connect (up to \(PhoneNames.maxScalars) characters).")
                 }
 
+                if !pairedDesktops.isEmpty {
+                    Section {
+                        ForEach(pairedDesktops) { host in
+                            LabeledContent(host.name, value: model.relayHosts[host.id] ?? "—")
+                        }
+                    } header: {
+                        Text("Relay")
+                    } footer: {
+                        Text("The relay server each paired desktop is reached through.")
+                    }
+                }
+
                 Section {
                     Toggle("Stream live text", isOn: $model.partialStreaming)
                 } footer: {
@@ -63,6 +75,8 @@ struct SettingsView: View {
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return "Version \(short) (\(build))"
     }
+
+    private var pairedDesktops: [HostInfo] { model.hosts.filter(\.isPaired) }
 
     private var trimmed: String { newTerm.trimmingCharacters(in: .whitespacesAndNewlines) }
 

@@ -96,7 +96,6 @@ struct PermissionView: View {
         switch problem {
         case .microphone: "mic.slash"
         case .speech: "waveform.slash"
-        case .bluetooth: "antenna.radiowaves.left.and.right.slash"
         }
     }
 }
