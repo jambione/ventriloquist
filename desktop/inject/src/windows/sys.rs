@@ -755,16 +755,24 @@ fn put_privacy_markers(skip: &[u32]) {
 }
 
 /// Replace the clipboard with `text`, marked so clipboard history / cloud
-/// sync skip it. Returns the clipboard sequence number right after the set
-/// (read while the clipboard is still open, so nobody can slip in between).
+/// sync skip it. Returns the clipboard sequence number as it stands right
+/// after the set.
+///
+/// The number is read AFTER `CloseClipboard`: Windows bumps it again while
+/// closing (it adds synthesized formats such as `CF_TEXT`/`CF_LOCALE`), so a
+/// value read while the clipboard is still open never matches later and every
+/// paste was reported as "clipboard changed during paste" (seen in the Notepad
+/// CI test). The window between close and read is a few instructions.
 pub fn clipboard_set_text(text: &str) -> Option<u32> {
-    let _g = ClipboardGuard::open()?;
-    // SAFETY: clipboard open.
-    unsafe { EmptyClipboard().ok()? };
-    if !put(CF_UNICODETEXT, &utf16_nul_bytes(text)) {
-        return None;
-    }
-    put_privacy_markers(&[]);
+    {
+        let _g = ClipboardGuard::open()?;
+        // SAFETY: clipboard open.
+        unsafe { EmptyClipboard().ok()? };
+        if !put(CF_UNICODETEXT, &utf16_nul_bytes(text)) {
+            return None;
+        }
+        put_privacy_markers(&[]);
+    } // guard dropped: CloseClipboard
     Some(clipboard_sequence())
 }
 

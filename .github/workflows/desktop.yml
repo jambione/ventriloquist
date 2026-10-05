@@ -66,12 +66,11 @@ jobs:
       - name: Clippy
         run: cargo clippy -p vq-inject --all-targets -- -D warnings
 
-  # Drives real Notepad through SendInput/UIA. Needs an interactive desktop, which
-  # hosted runners may not give reliably, so a failure here does not block.
+  # Drives real Notepad through SendInput/UIA (typing and clipboard paste).
+  # Blocking: it caught a real paste bug in v0.3.0.
   windows-integration:
-    name: Windows integration (Notepad, non-blocking)
+    name: Windows integration (Notepad)
     runs-on: windows-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -83,7 +82,7 @@ jobs:
 
   build:
     name: Build (${{ matrix.name }})
-    needs: [test, windows-test]
+    needs: [test, windows-test, windows-integration]
     strategy:
       fail-fast: false
       matrix:
