@@ -34,6 +34,13 @@ public protocol PhoneTransport: AnyObject {
     func mtu(for peer: PeerID) -> Int
 }
 
+/// What the engine needs from a relay transport: start and stop a room.
+/// (``RelayPhoneTransport`` conforms; call from the main actor.)
+public protocol RelayRoomControl: AnyObject {
+    func startRoom(relayURL: URL, roomId: String, secret: String)
+    func stopRoom(roomId: String)
+}
+
 /// Time source, injectable for tests.
 public protocol PhoneClock: AnyObject {
     /// Monotonic seconds, for timers (throttling, retries, keepalive).

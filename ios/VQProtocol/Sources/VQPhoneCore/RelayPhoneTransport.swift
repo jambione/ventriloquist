@@ -239,6 +239,15 @@ public final class RelayPhoneTransport: PhoneTransport, @unchecked Sendable {  /
     }
 }
 
+extension RelayPhoneTransport: RelayRoomControl {
+    public func startRoom(relayURL: URL, roomId: String, secret: String) {
+        MainActor.assumeIsolated { addRoom(relayURL: relayURL, roomId: roomId, secret: secret) }
+    }
+    public func stopRoom(roomId: String) {
+        MainActor.assumeIsolated { removeRoom(roomId: roomId) }
+    }
+}
+
 // MARK: - URLSession implementation
 
 @MainActor public final class URLSessionRelayNetworking: RelayNetworking {

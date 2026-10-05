@@ -102,6 +102,8 @@ public enum PhoneNotice: Equatable, Sendable {
     case keepaliveTimeout(hostName: String)
     /// The pairing was made but could not be saved.
     case storageFailed
+    /// The desktop's `hello` key or id differs from the one in the QR code.
+    case pairingCodeMismatch
 
     /// Text for an alert or banner.
     public var text: String {
@@ -124,6 +126,8 @@ public enum PhoneNotice: Equatable, Sendable {
             }
         case .keepaliveTimeout(let name):
             return "Lost contact with \(name)."
+        case .pairingCodeMismatch:
+            return "This QR code doesn't match the desktop"
         case .storageFailed:
             return "The pairing could not be saved. It works until you disconnect."
         }

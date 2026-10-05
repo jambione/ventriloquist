@@ -81,3 +81,41 @@ final class FileSettingsStore: PhoneSettingsStore {
         }
     }
 }
+
+/// `relay-desktops.json` (records) and `relay-secrets.json` (room secrets).
+final class FileRelayStores: PairedRelayDesktopStore, RelaySecretStore {
+    let desktopsURL: URL
+    let secretsURL: URL
+    init(dir: URL) {
+        desktopsURL = dir.appendingPathComponent("relay-desktops.json")
+        secretsURL = dir.appendingPathComponent("relay-secrets.json")
+    }
+
+    func loadRelayDesktops() throws -> [PairedRelayDesktop] {
+        guard let data = try readIfExists(desktopsURL) else { return [] }
+        return try JSONDecoder().decode([PairedRelayDesktop].self, from: data)
+    }
+
+    func saveRelayDesktops(_ desktops: [PairedRelayDesktop]) throws {
+        try writePrivate(try JSONEncoder().encode(desktops), to: desktopsURL)
+    }
+
+    private func secrets() throws -> [String: String] {
+        guard let data = try readIfExists(secretsURL) else { return [:] }
+        return try JSONDecoder().decode([String: String].self, from: data)
+    }
+
+    func get(roomId: String) throws -> String? { try secrets()[roomId] }
+
+    func set(_ secret: String, roomId: String) throws {
+        var all = (try? secrets()) ?? [:]
+        all[roomId] = secret
+        try writePrivate(try JSONEncoder().encode(all), to: secretsURL)
+    }
+
+    func delete(roomId: String) throws {
+        var all = (try? secrets()) ?? [:]
+        all[roomId] = nil
+        try writePrivate(try JSONEncoder().encode(all), to: secretsURL)
+    }
+}

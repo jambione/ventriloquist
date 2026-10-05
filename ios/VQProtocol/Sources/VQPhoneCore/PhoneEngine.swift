@@ -68,6 +68,9 @@ public final class PhoneEngine {
     private let settings: PhoneSettingsStore
     private let transport: PhoneTransport
     private let clock: PhoneClock
+    private let relayStore: PairedRelayDesktopStore?
+    private let relaySecrets: RelaySecretStore?
+    private let relayRooms: RelayRoomControl?
 
     // MARK: Observation
 
@@ -89,6 +92,9 @@ public final class PhoneEngine {
 
     private var connections: [PeerID: Connection] = [:]
     private var pairedHosts: [PairedHost]
+    private var relayDesktops: [PairedRelayDesktop] = []
+    /// QR pairing code per relay peer, used once when its challenge arrives.
+    private var autoPairCodes: [PeerID: String] = [:]
     private var notRecognized: Set<UUID> = []
     public private(set) var activeHostId: UUID?
     public private(set) var pairing: PairingStatus?
@@ -145,7 +151,12 @@ public final class PhoneEngine {
 
     public init(identity: StoredIdentity, deviceName: String, partialStreamingEnabled: Bool = true,
                 hostStore: PairedHostStore, settings: PhoneSettingsStore,
-                transport: PhoneTransport, clock: PhoneClock) {
+                transport: PhoneTransport, clock: PhoneClock,
+                relayStore: PairedRelayDesktopStore? = nil, relaySecrets: RelaySecretStore? = nil,
+                relayRooms: RelayRoomControl? = nil) {
+        self.relayStore = relayStore
+        self.relaySecrets = relaySecrets
+        self.relayRooms = relayRooms
         self.identity = identity
         self.deviceName = deviceName
         self.partialStreamingEnabled = partialStreamingEnabled
@@ -170,6 +181,42 @@ public final class PhoneEngine {
         if let last = settings.lastHostId, pairedHosts.contains(where: { $0.deviceId == last }) {
             activeHostId = last
         }
+        // Reconnect to every relay desktop (SPEC_V3 §5).
+        relayDesktops = ((try? relayStore?.loadRelayDesktops()) ?? []).filter { $0.pinnedPub.count == 32 }
+        for r in relayDesktops {
+            if let url = URL(string: r.relayURL), let secret = (try? relaySecrets?.get(roomId: r.roomId)) ?? nil {
+                relayRooms?.startRoom(relayURL: url, roomId: r.roomId, secret: secret)
+            }
+        }
+    }
+
+    /// Pair with the desktop in a scanned QR code: save its relay record and
+    /// room secret, join the room, and when its `hello` arrives run the pairing
+    /// flow with the code from the QR. The desktop key is pinned.
+    public func pair(using uri: PairingURI) {
+        let record = PairedRelayDesktop(uri)
+        relayDesktops.removeAll { $0.roomId == record.roomId }
+        relayDesktops.append(record)
+        do {
+            try relaySecrets?.set(uri.roomSecret, roomId: uri.roomId)
+            try relayStore?.saveRelayDesktops(relayDesktops)
+        } catch {
+            log?("saving relay desktop failed")
+            relayDesktops.removeAll { $0.roomId == record.roomId }
+            emit(.notice(.storageFailed))
+            return
+        }
+        autoPairCodes[record.peer] = uri.code
+        relayRooms?.startRoom(relayURL: uri.relayURL, roomId: uri.roomId, secret: uri.roomSecret)
+        changed()
+    }
+
+    private func removeRelayDesktop(roomId: String) {
+        relayDesktops.removeAll { $0.roomId == roomId }
+        autoPairCodes[RelayTransport.peerID(roomId: roomId)] = nil
+        try? relayStore?.saveRelayDesktops(relayDesktops)
+        try? relaySecrets?.delete(roomId: roomId)
+        relayRooms?.stopRoom(roomId: roomId)
     }
 
     // MARK: - Public read model
@@ -356,6 +403,7 @@ public final class PhoneEngine {
 
     /// Remove a paired desktop (SPEC §5.1 swipe to Forget).
     public func forgetHost(_ id: UUID) {
+        for r in relayDesktops where r.deviceId == id { removeRelayDesktop(roomId: r.roomId) }
         pairedHosts.removeAll { $0.deviceId == id }
         persistHosts()
         notRecognized.remove(id)
@@ -527,6 +575,9 @@ public final class PhoneEngine {
         }
         c.phase = .pairing(.awaitingCode(req, ch, challengeAt: clock.now))
         if pairingPeer == c.peer { pairing?.phase = .enterCode(error: nil) }
+        if let code = autoPairCodes.removeValue(forKey: c.peer), pairingPeer == c.peer {
+            submitPairingCode(code)
+        }
     }
 
     private func handlePairResult(_ result: PairResult, on c: Connection) {
@@ -903,7 +954,17 @@ public final class PhoneEngine {
 
     private func handleHello(_ h: Hello, on c: Connection) {
         c.peerHello = h
+        if let r = relayDesktops.first(where: { $0.peer == c.peer }),
+           r.deviceId != h.deviceId || r.pinnedPub != Data(h.publicKey.bytes) {
+            // The QR code named another desktop: store nothing (SPEC_V3 §5).
+            emit(.notice(.pairingCodeMismatch))
+            drop(c, reason: "relay desktop does not match the QR code")
+            if autoPairCodes[c.peer] != nil { removeRelayDesktop(roomId: r.roomId) }
+            changed()
+            return
+        }
         let known = isKnown(h)
+        if known { autoPairCodes[c.peer] = nil }
         let own = Hello.new(deviceId: identity.deviceId, name: PhoneNames.clean(deviceName, fallback: "iPhone"),
                             publicKey: identity.keyPair.publicBytes, paired: known)
         let hello = own.hello
@@ -917,6 +978,7 @@ public final class PhoneEngine {
             _ = establish(c)
         } else {
             c.phase = .unpaired
+            if autoPairCodes[c.peer] != nil { startPairing(with: h.deviceId) }
         }
     }
 

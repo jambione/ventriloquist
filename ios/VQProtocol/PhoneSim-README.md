@@ -18,9 +18,10 @@ swift build --product PhoneSim
 | `--name NAME` | Name sent in `hello` (default `PhoneSim`). |
 | `--state-dir DIR` | Keep the identity (`identity.json`), the paired desktops (`paired-hosts.json`) and the last active desktop (`settings.json`) in `DIR`, all mode 0600. A second run with the same directory reuses the pairing. Without it, everything is in memory. |
 | `--script FILE` | Read commands from `FILE` instead of stdin. |
+| `--relay-pair-uri URI` | **Relay mode** (SPEC_V3 §5): pair through the relay with this `vq://pair?...` QR link instead of listening on TCP. Uses `RelayPhoneTransport` with `URLSessionRelayNetworking` and calls `PhoneEngine.pair(using:)`, which joins the room and enters the QR code automatically when the desktop's `hello` arrives. Emits `relay_pairing`, then the usual `hosts_changed`/`pairing`/`paired` events; use `wait-secure`. A desktop key that differs from the QR gives `notice` kind `pairing_code_mismatch`. `--state-dir` also keeps `relay-desktops.json` and `relay-secrets.json`, so a later run reconnects without the flag. TCP-only commands (`drop-connection`, `tx-*`, `rx-*`, `inject-plaintext-utt`) fail in this mode. |
 | `--verbose` | Engine diagnostics on stderr. |
 
-PhoneSim runs one thread: a `poll(2)` loop over the listening socket, the connections and stdin, which calls `PhoneEngine.tick()` about every 20 ms with the real `SystemClock`. It exits after `quit`, or after the last command once stdin (or the script) ends. The exit status is 1 if any command failed and 0 otherwise.
+In relay mode the loop runs on the main thread and drives `RunLoop.main` in 20 ms slices (the transport is main-actor bound), polling stdin without blocking. In TCP mode PhoneSim runs one thread: a `poll(2)` loop over the listening socket, the connections and stdin, which calls `PhoneEngine.tick()` about every 20 ms with the real `SystemClock`. It exits after `quit`, or after the last command once stdin (or the script) ends. The exit status is 1 if any command failed and 0 otherwise.
 
 ## Commands
 

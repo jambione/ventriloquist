@@ -13,6 +13,8 @@ final class Sim {
         var stateDir: URL?
         var script: URL?
         var verbose = false
+        /// Relay mode: pair through this `vq://pair?...` link instead of listening on TCP.
+        var relayPairURI: PairingURI?
     }
 
     /// One utterance sent by this run (`start` … `final`, or a `resend`).
@@ -39,7 +41,10 @@ final class Sim {
 
     private let options: Options
     private let clock = SystemClock()
-    private let server: TCPServer
+    /// TCP mode only.
+    private let server: TCPServer?
+    /// Relay mode only. Kept alive here; the engine holds it too.
+    private let relay: RelayPhoneTransport?
     private let engine: PhoneEngine
 
     private var queue: [(seq: Int, line: String)] = []
@@ -59,20 +64,48 @@ final class Sim {
         let idStore: IdentityKeyStore
         let hostStore: PairedHostStore
         let settings: PhoneSettingsStore
+        let relayStore: PairedRelayDesktopStore
+        let relaySecrets: RelaySecretStore
         if let dir = options.stateDir {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             idStore = FileIdentityStore(dir: dir)
             hostStore = FilePairedHostStore(dir: dir)
             settings = FileSettingsStore(dir: dir)
+            let files = FileRelayStores(dir: dir)
+            relayStore = files
+            relaySecrets = files
         } else {
             idStore = InMemoryIdentityStore()
             hostStore = InMemoryPairedHostStore()
             settings = InMemorySettingsStore()
+            relayStore = InMemoryPairedRelayDesktopStore()
+            relaySecrets = InMemoryRelaySecretStore()
         }
         let identity = try PhoneIdentity.loadOrCreate(from: idStore)
-        server = try TCPServer(host: options.host, port: options.port)
+        let transport: PhoneTransport
+        if options.relayPairURI != nil {
+            // Relay mode runs on the main thread/run loop (see `run`).
+            let c = SystemClock()
+            let r = MainActor.assumeIsolated {
+                RelayPhoneTransport(networking: URLSessionRelayNetworking(), clock: c)
+            }
+            relay = r
+            server = nil
+            transport = r
+        } else {
+            let s = try TCPServer(host: options.host, port: options.port)
+            server = s
+            relay = nil
+            transport = s
+        }
         engine = PhoneEngine(identity: identity, deviceName: options.name, hostStore: hostStore,
-                             settings: settings, transport: server, clock: clock)
+                             settings: settings, transport: transport, clock: clock,
+                             relayStore: relayStore, relaySecrets: relaySecrets, relayRooms: relay)
+        if let r = relay {
+            // Single-threaded on the main thread, so this is safe.
+            nonisolated(unsafe) let e = engine
+            MainActor.assumeIsolated { r.events = e }
+        }
         readingStdin = options.script == nil
         if let script = options.script {
             let text = try String(contentsOf: script, encoding: .utf8)
@@ -84,7 +117,7 @@ final class Sim {
     // MARK: Wiring
 
     private func wire() {
-        server.delegate = TCPServer.Delegate(
+        server?.delegate = TCPServer.Delegate(
             connected: { [unowned self] peer in
                 Out.event("tcp_connected", [("peer", .s(peer.raw))])
                 engine.peerConnected(peer)
@@ -122,6 +155,7 @@ final class Sim {
         case .peerError(_, let code, _): "peer_error:\(code)"
         case .keepaliveTimeout: "keepalive_timeout"
         case .storageFailed: "storage_failed"
+        case .pairingCodeMismatch: "pairing_code_mismatch"
         }
     }
 
@@ -192,16 +226,30 @@ final class Sim {
             })),
             ("active_host_id", .str(engine.activeHostId.map(uuid))),
         ])
-        Out.event("listening", [("host", .s(options.host)), ("port", .i(Int(server.port)))])
+        if let server {
+            Out.event("listening", [("host", .s(options.host)), ("port", .i(Int(server.port)))])
+        } else if let uri = options.relayPairURI {
+            Out.event("relay_pairing", [("relay", .s(uri.relayURL.absoluteString)), ("room", .s(uri.roomId)),
+                                        ("desktop", .s(uri.name))])
+            engine.pair(using: uri)
+        }
         if readingStdin { _ = fcntl(0, F_SETFL, fcntl(0, F_GETFL) | O_NONBLOCK) }
         while !quit {
             progress()
             if quit { break }
-            if server.pollOnce(timeoutMs: 20, extraFD: readingStdin ? 0 : nil) { readStdin() }
+            if let server {
+                if server.pollOnce(timeoutMs: 20, extraFD: readingStdin ? 0 : nil) { readStdin() }
+            } else {
+                // Relay mode: the transport's work is posted to the main queue,
+                // which only the main run loop drains. Called from the main thread.
+                var fd = pollfd(fd: 0, events: Int16(POLLIN), revents: 0)
+                if readingStdin, poll(&fd, 1, 0) > 0 { readStdin() }
+                RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.02))
+            }
             engine.tick()
         }
         // Let queued frames go out before closing.
-        server.shutdown()
+        server?.shutdown()
         Out.event("exited", [("failed_commands", .i(failures))])
         return failures == 0 ? 0 : 1
     }
@@ -348,7 +396,7 @@ final class Sim {
                 }
             case "wait-disconnected":
                 return waiting(timeoutMs(a, word: 0)) { [unowned self] in
-                    server.connectionCount == 0 ? .done([]) : .pending
+                    (server?.connectionCount ?? engine.hosts.filter(\.isOnline).count) == 0 ? .done([]) : .pending
                 }
             case "select":
                 let target = a.string("target") ?? words(a).first ?? "first"
@@ -404,21 +452,22 @@ final class Sim {
                 let s = engine.deliveryStatus(of: e.id)?.rawValue
                 return immediate(.done([("id", .s(uuid(e.id))), ("index", .i(e.index)), ("status", .str(s))]))
             case "drop-connection":
+                let server = try tcp()
                 let n = server.connectionCount
                 server.dropAll(reason: "dropped by script")
                 return immediate(.done([("closed", .i(n))]))
             case "tx-pause", "tx-resume":
-                server.setTxPaused(a.cmd == "tx-pause")
+                try tcp().setTxPaused(a.cmd == "tx-pause")
                 return immediate(.done([]))
             case "rx-pause", "rx-resume":
-                server.setRxPaused(a.cmd == "rx-pause")
+                try tcp().setRxPaused(a.cmd == "rx-pause")
                 return immediate(.done([]))
             case "inject-plaintext-utt":
                 let id = UUID()
                 let utt = Utt(id: id, rev: 0, state: .final, text: try text(a), ts: clock.epochMillis)
                 let envelope = [Envelope.kindPlaintext] + (try Message.utt(utt).toJSON())
                 var splitter = FrameSplitter(seq: 0x7000)
-                let n = server.injectFrames(try splitter.split(envelope, mtu: TCPFrameCodec.mtu))
+                let n = try tcp().injectFrames(splitter.split(envelope, mtu: TCPFrameCodec.mtu))
                 return immediate(.done([("id", .s(uuid(id))), ("connections", .i(n))]))
             case "hosts":
                 return immediate(.done([("hosts", hostsJ()), ("indicator", .s(indicator()))]))
@@ -491,6 +540,11 @@ final class Sim {
     }
 
     // MARK: Helpers
+
+    private func tcp() throws -> TCPServer {
+        guard let server else { throw SimError("only available in TCP mode") }
+        return server
+    }
 
     private func uuid(_ id: UUID) -> String { id.uuidString.lowercased() }
 

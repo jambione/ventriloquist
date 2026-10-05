@@ -17,6 +17,8 @@ final class FakeDesktop {
     var autoAck = true
     var answerPings = true
     var corruptDesktopMac = false
+    /// Use this code instead of a random one (a QR code carries it).
+    var fixedCode: String?
     /// Reply to `pair_request` with `error{code}` (e.g. "rate_limited"); the
     /// link stays open unless `closeAfterRefusal` (README §7.3).
     var errorOnPairRequest: String?
@@ -161,7 +163,7 @@ final class FakeDesktop {
             request = r
             let ch = PairChallenge.generate()
             challenge = ch
-            code = PairingCode.generate()
+            code = fixedCode.flatMap { try? PairingCode(parsing: $0) } ?? PairingCode.generate()
             codeAt = clock.now
             failures = 0
             sendPlain(.pairChallenge(ch))

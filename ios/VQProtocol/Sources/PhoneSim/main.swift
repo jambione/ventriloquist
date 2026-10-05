@@ -1,4 +1,5 @@
 import Foundation
+import VQPhoneCore
 import VQProtocol
 
 // PhoneSim: a scripted fake phone for the E2E test (SPEC §8, gate 3).
@@ -7,11 +8,13 @@ import VQProtocol
 
 let usage = """
     usage: PhoneSim [--port N] [--bind ADDR] [--name NAME] [--state-dir DIR] [--script FILE] [--verbose]
+                    [--relay-pair-uri 'vq://pair?...']
       --port       TCP port to listen on (default \(VQ.tcpDefaultPort); 0 picks a free port)
       --bind       IPv4 address to listen on (default 127.0.0.1)
       --name       name sent in hello (default PhoneSim)
       --state-dir  keep identity, paired desktops and the last desktop here (default: in memory)
       --script     read commands from FILE instead of stdin
+      --relay-pair-uri  pair through the relay with this QR link (no TCP listener)
       --verbose    engine diagnostics on stderr
     Events: one JSON object per line on stdout. Exit status 1 if any command failed.
     """
@@ -43,6 +46,12 @@ func parseOptions() -> Sim.Options? {
         case "--script":
             guard let v = value() else { return nil }
             o.script = URL(fileURLWithPath: v)
+        case "--relay-pair-uri":
+            guard let v = value() else { return nil }
+            do { o.relayPairURI = try PairingURI.parse(v) } catch {
+                Out.diag(error.text)
+                return nil
+            }
         case "--verbose":
             o.verbose = true
         default:

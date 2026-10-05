@@ -73,6 +73,48 @@ public extension PairedHostStore {
     func backUpUnreadableHosts() throws {}
 }
 
+/// A desktop reached through the relay (SPEC_V3 §5). `pinnedPub` is the
+/// desktop key from the QR code: its `hello` must carry exactly this key.
+/// The room secret lives in a ``RelaySecretStore``, never here.
+public struct PairedRelayDesktop: Codable, Hashable, Sendable, Identifiable {
+    public var relayURL: String
+    public var roomId: String
+    public var deviceId: UUID
+    public var pinnedPub: Data
+    public var name: String
+
+    public var id: UUID { deviceId }
+
+    public init(relayURL: String, roomId: String, deviceId: UUID, pinnedPub: Data, name: String) {
+        self.relayURL = relayURL
+        self.roomId = roomId
+        self.deviceId = deviceId
+        self.pinnedPub = pinnedPub
+        self.name = name
+    }
+
+    public init(_ uri: PairingURI) {
+        self.init(relayURL: uri.relayURL.absoluteString, roomId: uri.roomId, deviceId: uri.desktopDeviceId,
+                  pinnedPub: Data(uri.desktopPublicKey.bytes), name: uri.name)
+    }
+
+    /// The relay connection's peer id.
+    public var peer: PeerID { RelayTransport.peerID(roomId: roomId) }
+}
+
+/// Persisted list of relay desktops (the app: next to the paired-host file).
+public protocol PairedRelayDesktopStore: AnyObject {
+    func loadRelayDesktops() throws -> [PairedRelayDesktop]
+    func saveRelayDesktops(_ desktops: [PairedRelayDesktop]) throws
+}
+
+/// Room secrets by room id (the app: Keychain, `ThisDeviceOnly`).
+public protocol RelaySecretStore: AnyObject {
+    func get(roomId: String) throws -> String?
+    func set(_ secret: String, roomId: String) throws
+    func delete(roomId: String) throws
+}
+
 /// Small persisted engine settings.
 public protocol PhoneSettingsStore: AnyObject {
     /// The desktop last made active (SPEC §5.1: selected again when it connects).
@@ -114,6 +156,29 @@ public final class InMemoryPairedHostStore: PairedHostStore {
     public func saveHosts(_ hosts: [PairedHost]) throws {
         if failSaves { throw StoreError.unwritable }
         self.hosts = hosts
+    }
+}
+
+public final class InMemoryRelaySecretStore: RelaySecretStore {
+    public var secrets: [String: String] = [:]
+    public var failSets = false
+    public init() {}
+    public func get(roomId: String) throws -> String? { secrets[roomId] }
+    public func set(_ secret: String, roomId: String) throws {
+        if failSets { throw StoreError.unwritable }
+        secrets[roomId] = secret
+    }
+    public func delete(roomId: String) throws { secrets[roomId] = nil }
+}
+
+public final class InMemoryPairedRelayDesktopStore: PairedRelayDesktopStore {
+    public var desktops: [PairedRelayDesktop]
+    public var failSaves = false
+    public init(desktops: [PairedRelayDesktop] = []) { self.desktops = desktops }
+    public func loadRelayDesktops() throws -> [PairedRelayDesktop] { desktops }
+    public func saveRelayDesktops(_ d: [PairedRelayDesktop]) throws {
+        if failSaves { throw StoreError.unwritable }
+        desktops = d
     }
 }
 
